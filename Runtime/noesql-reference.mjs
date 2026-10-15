@@ -1,6 +1,8 @@
 // NoeSQL experimental reference executor. This is an independent in-memory
 // conformance oracle, NOT the production Noqeri-owned engine or durable .nqd format.
 // No external SQL runtime or npm dependency is used.
+import { relationalSelect } from './noesql-relational.mjs'
+
 export class NoeError extends Error {
   constructor(code, token, message) {
     super(`${code} at ${token.line}:${token.col}: ${message}`)
@@ -72,7 +74,7 @@ export function parse(source) {
     else if (first.kind === 'int') { const value = Number(first.value); if (!Number.isSafeInteger(value)) throw new NoeError('NOE014',first,'integer exceeds safe reference-engine range'); left = {k:'literal',value,at:first} }
     else if (first.value === 'true' || first.value === 'false') left = {k:'literal',value:first.value === 'true',at:first}
     else if (first.value === 'null') left = {k:'literal',value:null,at:first}
-    else if (first.kind === 'id' && !['where','sort','take','skip','set','delete','group','get'].includes(first.value)) {
+    else if (first.kind === 'id' && !['where','sort','take','skip','set','delete','group','get','join','on'].includes(first.value)) {
       let name = first.value
       while (eat('.')) name += '.' + id()
       left = {k:'column',name,at:first}
@@ -109,16 +111,31 @@ export function parse(source) {
     }
     need('}'); return entries
   }
+  const qualified = () => { let name=id(); while(eat('.'))name+='.'+id();return name }
   const select = (table, at) => {
-    need('get'); const columns = []
-    if (eat('*')) columns.push('*')
-    else { columns.push(id()); while (eat(',')) columns.push(id()) }
-    let where=null, sort=null, skip=null, takeCount=null
-    if (eat('where')) where = expr()
-    if (eat('sort')) sort = id()
-    if (eat('skip')) skip = expr()
-    if (eat('take')) takeCount = expr()
-    return {k:'get',table,columns,where,sort,skip,take:takeCount,at}
+    need('get'); const columns=[]
+    const projection=()=>{
+      const at=cur(),name=qualified()
+      if(!eat('('))return name
+      if(!['count','sum','min','max'].includes(name))err('NOE030','unsupported aggregate '+name)
+      let arg=null
+      if(eat('*')){if(name!=='count')err('NOE030','only count accepts *');arg='*'}
+      else if(!is(')'))arg=qualified()
+      need(')')
+      if(name!=='count'&&(arg===null||arg==='*'))err('NOE030',name+' requires a column')
+      const alias=eat('as')?id():name+(arg===null||arg==='*'?'':'_'+arg.replaceAll('.','_'))
+      return {k:'aggregate',fn:name,arg,alias,at}
+    }
+    if(eat('*'))columns.push('*')
+    else{columns.push(projection());while(eat(','))columns.push(projection())}
+    let join=null,where=null,group=[],sort=null,skip=null,takeCount=null
+    if(eat('join')){const at=cur(),table=id();need('on');join={table,on:expr(),at}}
+    if(eat('where'))where=expr()
+    if(eat('group')){group.push(qualified());while(eat(','))group.push(qualified())}
+    if(eat('sort'))sort=qualified()
+    if(eat('skip'))skip=expr()
+    if(eat('take'))takeCount=expr()
+    return {k:'get',table,columns,join,where,group,sort,skip,take:takeCount,at}
   }
   const stmt = () => {
     nl(); const at = cur()
@@ -261,18 +278,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
       if(row[key.name]>=t.nextId)t.nextId=row[key.name]+1
       return {kind:'add',affected:1,row:structuredClone(row)}
     }
-    if(s.k==='get') {
-      for(const c of s.columns)if(c!=='*'&&!col[c])fail('NOE119',s.at,`unknown projection ${c}`)
-      if(s.where)validExpr(s.where,t,types,'bool')
-      if(s.sort&&!col[s.sort])fail('NOE119',s.at,`unknown sort field ${s.sort}`)
-      for(const limit of [s.skip,s.take])if(limit)validExpr(limit,t,types,'int')
-      let rows=t.rows.filter(r=>!s.where||value(s.where,r,params)===true)
-      if(s.sort)rows=rows.slice().sort((a,b)=>a[s.sort]===b[s.sort]?a[key.name]-b[key.name]:a[s.sort]===null?1:b[s.sort]===null?-1:a[s.sort]<b[s.sort]?-1:1)
-      let skip=s.skip?value(s.skip,{},params):0, take=s.take?value(s.take,{},params):rows.length
-      if(!Number.isSafeInteger(skip)||!Number.isSafeInteger(take)||skip<0||take<0)fail('NOE206',s.at,'skip/take must be nonnegative integers')
-      rows=rows.slice(skip,skip+take)
-      return {kind:'get',rows:rows.map(r=>structuredClone(s.columns[0]==='*'?r:Object.fromEntries(s.columns.map(c=>[c,r[c]]))))}
-    }
+    if(s.k==='get') return relationalSelect(s,db,params,types,false,{fail,infer,value,fieldType})
     if(s.k==='set'||s.k==='delete') {
       if(!s.where)fail('NOE207',s.at,'write requires where')
       validExpr(s.where,t,types,'bool')
@@ -290,11 +296,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   }
   function validateStatement(s,types) {
     if(s.k!=='get')fail('NOE130',s.at,'named query must select')
-    const t=tableFor(s),f=fieldsFor(t)
-    for(const c of s.columns)if(c!=='*'&&!f[c])fail('NOE119',s.at,`unknown projection ${c}`)
-    if(s.where)validExpr(s.where,t,types,'bool')
-    if(s.sort&&!f[s.sort])fail('NOE119',s.at,'unknown sort field')
-    for(const l of [s.skip,s.take])if(l)validExpr(l,t,types,'int')
+    relationalSelect(s,db,{},types,true,{fail,infer,value,fieldType})
   }
   for(const s of program)results.push(apply(s,bindings,Object.fromEntries(Object.entries(bindings).map(([k,v])=>[k,typeOf(v)]))))
   return {database:db,results}
