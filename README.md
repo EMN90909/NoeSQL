@@ -17,6 +17,35 @@ users add {name:"Amina", age:21}
 users get name, age where age >= 18 sort name take 10
 ```
 
+## Readable joins and reporting (reference preview)
+
+Use one logical line per query statement. No SQL `SELECT`/`FROM` boilerplate:
+
+```noe
+table teams {
+  id: int key auto
+  name: text required
+}
+table tickets {
+  id: int key auto
+  team_id: ref teams required
+  effort: int required
+}
+teams add {name:"Build"}
+tickets add {team_id:1,effort:5}
+tickets get teams.name, count(*) as tickets, sum(effort) as effort join teams on team_id == teams.id group teams.name sort teams.name
+alter tickets add { resolved: bool required = false }
+```
+
+This preview implements bounded **inner joins**, typed **count/sum/min/max**, `group`, and safe **add-column** migrations in the JavaScript reference engine and optional SQL adapters. Joined columns use `table.column` names. It does **not** implement native Noqeri compilation, outer joins, physical persisted indexes, decimal/currency types, concurrent snapshot isolation, authenticated principals or production WAL recovery.
+
+```sh
+npm test
+npm run benchmark:reference
+```
+
+The benchmark runs an in-memory reference/SQLite parity workload and prints measurements for the current machine; it is **not** a native Noqeri or durability benchmark.
+
 ## Layout
 
 - `Database/*.nqr`: native Noqeri source, unverified until compiled.
