@@ -1,0 +1,53 @@
+module noqeri.database.noesql.isolation
+
+// Single-writer, multiple-reader generation protocol. Callers must hold the
+// OS-level exclusive writer lock before publishing. These functions are
+// policy/state primitives; atomicity across threads requires host atomics.
+record NoeTxState {
+    generation: u64
+    activeReaders: usize
+    writerActive: bool
+    writerBase: u64
+    committed: u64
+}
+export function noeTxInit(state: *NoeTxState): void {
+    state.generation = 1 as u64
+    state.activeReaders = 0 as usize
+    state.writerActive = false
+    state.writerBase = 0 as u64
+    state.committed = 0 as u64
+}
+export function noeTxBeginRead(state: *NoeTxState, maxReaders: usize): isize {
+    if state == null || maxReaders == 0 as usize { return -1 as isize }
+    if state.activeReaders >= maxReaders { return -2 as isize }
+    if state.writerActive { return -3 as isize }
+    state.activeReaders = state.activeReaders + 1 as usize
+    return state.generation as isize
+}
+export function noeTxEndRead(state: *NoeTxState): isize {
+    if state == null || state.activeReaders == 0 as usize { return -1 as isize }
+    state.activeReaders = state.activeReaders - 1 as usize
+    return 0 as isize
+}
+export function noeTxBeginWrite(state: *NoeTxState): isize {
+    if state == null || state.writerActive || state.activeReaders != 0 as usize { return -1 as isize }
+    state.writerBase = state.generation
+    state.writerActive = true
+    return 0 as isize
+}
+export function noeTxCanCommit(state: *NoeTxState, base: u64, walDurable: bool): bool {
+    return state != null && state.writerActive && state.writerBase == base &&
+        state.generation == base && walDurable && state.generation < 9223372036854775806 as u64
+}
+export function noeTxCommit(state: *NoeTxState, base: u64, walDurable: bool): isize {
+    if !noeTxCanCommit(state, base, walDurable) { return -1 as isize }
+    state.generation = state.generation + 1 as u64
+    state.committed = state.generation
+    state.writerActive = false
+    return 0 as isize
+}
+export function noeTxRollback(state: *NoeTxState): isize {
+    if state == null || !state.writerActive { return -1 as isize }
+    state.writerActive = false
+    return 0 as isize
+}

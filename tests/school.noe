@@ -1,0 +1,15 @@
+db school
+table learners {
+  id: int key auto
+  name: text required
+  age: int
+  passed: bool = false
+}
+index learner_name on learners(name)
+query adults(minAge: int = 18) {
+  learners get id, name where age >= $minAge sort name
+}
+learners add { name: "Amina", age: 16 }
+learners add { name: "Bea", age: 21 }
+learners get name, age where age >= 15 sort name take 10
+learners where id == 1 set passed = true

@@ -1,0 +1,32 @@
+module noqeri.database.noesql.auth
+
+// Authenticated identity must come from a trusted host verification boundary.
+// This module does not handle passwords, tokens or cryptography.
+record NoePrincipal {
+    userId: u64
+    authenticated: bool
+    disabled: bool
+    scope: u64
+    roles: u32
+}
+export function noeRoleRead(): u32 { return 1 as u32 }
+export function noeRoleInsert(): u32 { return 2 as u32 }
+export function noeRoleUpdate(): u32 { return 4 as u32 }
+export function noeRoleDelete(): u32 { return 8 as u32 }
+export function noeRoleSchema(): u32 { return 16 as u32 }
+export function noeRoleAdmin(): u32 { return 32 as u32 }
+export function noeAuthenticated(p: *NoePrincipal): bool {
+    return p != null && p.authenticated && !p.disabled && p.userId != 0 as u64
+}
+export function noePermit(p: *NoePrincipal, required: u32, scope: u64): bool {
+    if !noeAuthenticated(p) || scope == 0 as u64 || p.scope != scope || required == 0 as u32 { return false }
+    if (p.roles & noeRoleAdmin()) != 0 as u32 { return true }
+    return (p.roles & required) == required
+}
+export function noeOperationPermit(p: *NoePrincipal, operation: int, scope: u64): bool {
+    if operation == 1 { return noePermit(p, noeRoleRead(), scope) }
+    if operation == 2 { return noePermit(p, noeRoleInsert(), scope) }
+    if operation == 3 { return noePermit(p, noeRoleUpdate(), scope) }
+    if operation == 4 { return noePermit(p, noeRoleDelete(), scope) }
+    return false
+}

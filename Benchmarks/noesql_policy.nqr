@@ -1,0 +1,19 @@
+import "../Database/noesql_isolation.nqr"
+import "../Database/noesql_auth.nqr"
+import "../Database/noesql_limits.nqr"
+
+// Deterministic operation counter. Time externally with a verified Noqeri
+// runner; do not invent throughput numbers from source-only inspection.
+let tx: NoeTxState
+noeTxInit(&tx)
+let i: int = 0
+let ok: int = 0
+while i < 10000 {
+    if noeTxBeginWrite(&tx) == 0 as isize {
+        if noeTxCommit(&tx, tx.writerBase, true) == 0 as isize {
+            ok = ok + 1
+        }
+    }
+    i = i + 1
+}
+print(ok)

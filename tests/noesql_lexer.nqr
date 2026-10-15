@@ -1,0 +1,16 @@
+import "../Database/noesql_lexer.nqr"
+function require(ok: bool): void {
+    if !ok {
+        let invalid: *u8 = 0 as *u8
+        print(invalid[0])
+    }
+}
+let source: [u8; 21] = [116 as u8,97 as u8,98 as u8,108 as u8,101 as u8,32 as u8,117 as u8,115 as u8,101 as u8,114 as u8,115 as u8,32 as u8,123 as u8,10 as u8,125 as u8,10 as u8,47 as u8,47 as u8,120 as u8,10 as u8,32 as u8]
+require(noeTokensWellFormed(slice(source)))
+let cursor: NoeCursor
+noeCursorInit(&cursor)
+let token: NoeToken
+require(noeNextToken(slice(source),&cursor,&token)==noeTokenIdentifier())
+require(token.start==0 as usize && token.end==5 as usize)
+require(token.line==1 as usize && token.column==1 as usize)
+print("NoeSQL lexer scan: OK")

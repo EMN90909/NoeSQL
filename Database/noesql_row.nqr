@@ -1,0 +1,114 @@
+module noqeri.database.noesql.row
+import "noesql_ir.nqr"
+
+// ROW1 portable row encoding, versioned separately from pages and WAL.
+// Header (14 bytes): magic "NROW", schema-version u32 little-endian,
+// column-count u16, payload-length u32. Each column is a type tag u8,
+// null marker u8, payload byte count u32, then an 8-byte little-endian
+// scalar or raw UTF-8 bytes. Decoding checks all offsets before reads.
+function noeRowPut(bytes: []u8, at: usize, count: usize, number: u64): bool {
+    if at > len(bytes) || count > len(bytes) - at { return false }
+    let value: u64 = number
+    let i: usize = 0 as usize
+    while i < count {
+        bytes[at + i] = (value % 256 as u64) as u8
+        value = value / 256 as u64
+        i = i + 1 as usize
+    }
+    return value == 0 as u64
+}
+function noeRowGet(bytes: []u8, at: usize, count: usize): u64 {
+    let total: u64 = 0 as u64
+    let i: usize = count
+    while i > 0 as usize {
+        i = i - 1 as usize
+        total = total * 256 as u64 + bytes[at + i] as u64
+    }
+    return total
+}
+export function noeRowEncode(columns: []NoeColumn, values: []NoeValue, textPool: []u8, version: u32, output: []u8): isize {
+    if version == 0 as u32 || len(columns) == 0 as usize || len(columns) > 256 as usize || len(values) != len(columns) || len(output) < 14 as usize { return -1 as isize }
+    let at: usize = 14 as usize
+    let i: usize = 0 as usize
+    while i < len(columns) {
+        let v: *NoeValue = &values[i]
+        if !noeValueValid(v, columns[i].kind, textPool) { return -2 as isize }
+        if v.isNull && (columns[i].required || columns[i].primary) { return -3 as isize }
+        let length: usize = 8 as usize
+        if v.isNull { length = 0 as usize }
+        else if v.kind == noeTypeText() { length = v.textLength }
+        if length > 4294967295 as usize || at > len(output) || len(output) - at < 6 as usize || length > len(output) - at - 6 as usize { return -4 as isize }
+        output[at] = v.kind as u8
+        if v.isNull { output[at + 1 as usize] = 1 as u8 }
+        else { output[at + 1 as usize] = 0 as u8 }
+        if !noeRowPut(output, at + 2 as usize, 4 as usize, length as u64) { return -5 as isize }
+        at = at + 6 as usize
+        if !v.isNull {
+            if v.kind == noeTypeText() {
+                let j: usize = 0 as usize
+                while j < length { output[at + j] = textPool[v.textStart + j] j = j + 1 as usize }
+            } else {
+                if !noeRowPut(output, at, 8 as usize, v.number as u64) { return -6 as isize }
+            }
+            at = at + length
+        }
+        i = i + 1 as usize
+    }
+    if at - 14 as usize > 4294967295 as usize { return -7 as isize }
+    output[0] = 78 as u8
+    output[1] = 82 as u8
+    output[2] = 79 as u8
+    output[3] = 87 as u8
+    if !noeRowPut(output, 4 as usize, 4 as usize, version as u64) { return -8 as isize }
+    if !noeRowPut(output, 8 as usize, 2 as usize, len(columns) as u64) { return -9 as isize }
+    if !noeRowPut(output, 10 as usize, 4 as usize, (at - 14 as usize) as u64) { return -10 as isize }
+    return at as isize
+}
+// Byte-pool is caller-owned and may be separate from the row input. Decoded
+// text starts/lengths are offsets into that pool, not unsafe source pointers.
+export function noeRowDecode(input: []u8, columns: []NoeColumn, expectedVersion: u32, values: []NoeValue, pool: []u8, used: *usize): isize {
+    if used == null || len(input) < 14 as usize || len(columns) == 0 as usize || len(columns) > 256 as usize || len(values) != len(columns) { return -1 as isize }
+    if input[0] != 78 as u8 || input[1] != 82 as u8 || input[2] != 79 as u8 || input[3] != 87 as u8 { return -2 as isize }
+    if noeRowGet(input, 4 as usize, 4 as usize) != expectedVersion as u64 || expectedVersion == 0 as u32 { return -3 as isize }
+    if noeRowGet(input, 8 as usize, 2 as usize) != len(columns) as u64 { return -4 as isize }
+    let length: usize = noeRowGet(input, 10 as usize, 4 as usize) as usize
+    if length > len(input) - 14 as usize { return -5 as isize }
+    let finish: usize = 14 as usize + length
+    let cursor: usize = 14 as usize
+    let poolAt: usize = 0 as usize
+    let i: usize = 0 as usize
+    while i < len(columns) {
+        if cursor > finish || finish - cursor < 6 as usize { return -6 as isize }
+        let kind: int = input[cursor] as int
+        let nullTag: u8 = input[cursor + 1 as usize]
+        let count: usize = noeRowGet(input, cursor + 2 as usize, 4 as usize) as usize
+        cursor = cursor + 6 as usize
+        if kind != columns[i].kind || nullTag > 1 as u8 || count > finish - cursor { return -7 as isize }
+        let v: NoeValue
+        v.kind = kind
+        v.isNull = nullTag == 1 as u8
+        v.number = 0 as i64
+        v.textStart = 0 as usize
+        v.textLength = 0 as usize
+        if v.isNull {
+            if count != 0 as usize || columns[i].required || columns[i].primary { return -8 as isize }
+        } else if kind == noeTypeText() {
+            if poolAt > len(pool) || count > len(pool) - poolAt { return -9 as isize }
+            v.textStart = poolAt
+            v.textLength = count
+            let j: usize = 0 as usize
+            while j < count { pool[poolAt + j] = input[cursor + j] j = j + 1 as usize }
+            poolAt = poolAt + count
+        } else {
+            if count != 8 as usize { return -10 as isize }
+            v.number = noeRowGet(input, cursor, 8 as usize) as i64
+        }
+        if !noeValueValid(&v,kind,pool) { return -11 as isize }
+        values[i] = v
+        cursor = cursor + count
+        i = i + 1 as usize
+    }
+    if cursor != finish { return -12 as isize }
+    used[0] = finish
+    return 0 as isize
+}

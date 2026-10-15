@@ -1,0 +1,19 @@
+module noqeri.database.noesql.secure_executor
+import "noesql_executor.nqr"
+import "noesql_auth.nqr"
+import "noesql_limits.nqr"
+
+// Authorized entry point for the bounded in-memory NoeSQL executor.
+// Security checks run before any caller-owned row buffer is mutated.
+// The caller MUST provide an authenticated principal from a trusted verifier,
+// and an operation budget; direct legacy noeExecute callers remain unguarded.
+export function noeExecuteAuthorized(principal: *NoePrincipal, scope: u64, budget: *NoeBudget, plan: *NoeIrPlan, columns: []NoeColumn, original: []NoeValue, scratch: []NoeValue, rowCount: usize, insertRow: []NoeValue, projections: []usize, output: []NoeValue, bytes: []u8, version: u32, result: *NoeExecutionResult): isize {
+    if plan == null || budget == null { return -30 as isize }
+    if !noeOperationPermit(principal, plan.operation, scope) { return -31 as isize }
+    if len(columns) == 0 as usize || rowCount > len(original) / len(columns) { return -32 as isize }
+    if rowCount > 16777216 as usize { return -34 as isize }
+    // Conservative quota: scan up to all input rows (including inserts).
+    // No subexpression cancellation yet; caller MUST enforce timeouts.
+    if !noeBudgetConsume(budget, rowCount as u64 + 1 as u64, rowCount + 1 as usize) { return -33 as isize }
+    return noeExecute(plan, columns, original, scratch, rowCount, insertRow, projections, output, bytes, version, result)
+}

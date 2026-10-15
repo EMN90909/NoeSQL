@@ -1,0 +1,78 @@
+import "../Database/noesql_ir.nqr"
+import "../Database/noesql_executor.nqr"
+import "../Database/noesql_row.nqr"
+
+// Native conformance fixture: compile and execute once a trusted Noqeri stage-0
+// is available. Not counted among local Node.js tests.
+function require(ok: bool): void {
+    if !ok {
+        let invalid: *u8 = 0 as *u8
+        print(invalid[0])
+    }
+}
+let cols: [NoeColumn; 2]
+cols[0].kind = noeTypeInt()
+cols[0].required = true
+cols[0].unique = true
+cols[0].primary = true
+cols[1].kind = noeTypeBool()
+cols[1].required = true
+cols[1].unique = false
+cols[1].primary = false
+let first: NoeValue
+first.kind = noeTypeInt()
+first.isNull = false
+first.number = 7 as i64
+first.textStart = 0 as usize
+first.textLength = 0 as usize
+let second: NoeValue
+second.kind = noeTypeBool()
+second.isNull = false
+second.number = 1 as i64
+second.textStart = 0 as usize
+second.textLength = 0 as usize
+let plan: NoeIrPlan
+plan.operation = noePlanInsert()
+plan.schemaVersion = 1 as u32
+plan.predicateColumn = 0 as usize
+plan.predicateOperator = noePredicateNone()
+plan.predicateValue = first
+plan.mutationColumn = 1 as usize
+plan.mutationValue = second
+let memory: [NoeValue; 8]
+let scratch: [NoeValue; 8]
+let incoming: [NoeValue; 2]
+incoming[0] = first
+incoming[1] = second
+let projection: [usize; 1] = [0 as usize]
+let output: [NoeValue; 4]
+let bytes: [u8; 1] = [0 as u8]
+let result: NoeExecutionResult
+let status: isize = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),0 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+require(status == 0 as isize)
+require(result.rowCount == 1 as usize)
+plan.operation = noePlanGet()
+plan.predicateOperator = noePredicateEqual()
+plan.predicateColumn = 0 as usize
+plan.predicateValue = first
+status = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),1 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+require(status == 0 as isize)
+require(result.returned == 1 as usize)
+require(output[0].number == 7 as i64)
+plan.operation = noePlanSet()
+plan.mutationColumn = 1 as usize
+let falseValue: NoeValue
+falseValue.kind = noeTypeBool()
+falseValue.isNull = false
+falseValue.number = 0 as i64
+falseValue.textStart = 0 as usize
+falseValue.textLength = 0 as usize
+plan.mutationValue = falseValue
+status = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),1 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+require(status == 0 as isize)
+require(memory[1].number == 0 as i64)
+plan.operation = noePlanDelete()
+status = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),1 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+require(status == 0 as isize)
+require(result.rowCount == 0 as usize)
+print("NoeSQL native IR/executor smoke: OK")

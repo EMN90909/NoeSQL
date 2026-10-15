@@ -1,0 +1,129 @@
+// Native NoeSQL lexical scanner. This compiles into the Noqeri-side frontend
+// when a trusted compiler seed is available. It is not an AST/executor.
+module noqeri.database.noesql.lexer
+
+record NoeCursor {
+    offset: usize
+    line: usize
+    column: usize
+}
+record NoeToken {
+    kind: int
+    start: usize
+    end: usize
+    line: usize
+    column: usize
+}
+export function noeTokenEof(): int { return 0 }
+export function noeTokenIdentifier(): int { return 1 }
+export function noeTokenInteger(): int { return 2 }
+export function noeTokenString(): int { return 3 }
+export function noeTokenOperator(): int { return 4 }
+export function noeTokenSeparator(): int { return 5 }
+export function noeTokenInvalid(): int { return 6 }
+export function noeCursorInit(cursor: *NoeCursor): void {
+    cursor.offset = 0 as usize
+    cursor.line = 1 as usize
+    cursor.column = 1 as usize
+}
+function noeAlpha(c: u8): bool {
+    return (c >= 65 as u8 && c <= 90 as u8) || (c >= 97 as u8 && c <= 122 as u8) || c == 95 as u8
+}
+function noeDigit(c: u8): bool { return c >= 48 as u8 && c <= 57 as u8 }
+function noeContinue(c: u8): bool { return noeAlpha(c) || noeDigit(c) }
+function noeMove(source: []u8, cursor: *NoeCursor): void {
+    if cursor.offset >= len(source) { return }
+    if source[cursor.offset] == 10 as u8 {
+        cursor.line = cursor.line + 1 as usize
+        cursor.column = 1 as usize
+    } else { cursor.column = cursor.column + 1 as usize }
+    cursor.offset = cursor.offset + 1 as usize
+}
+function noeWhitespace(source: []u8, cursor: *NoeCursor): bool {
+    while cursor.offset < len(source) {
+        let ch: u8 = source[cursor.offset]
+        if ch == 32 as u8 || ch == 9 as u8 || ch == 13 as u8 { noeMove(source, cursor) }
+        else if ch == 47 as u8 && cursor.offset + 1 as usize < len(source) && source[cursor.offset + 1 as usize] == 47 as u8 {
+            while cursor.offset < len(source) && source[cursor.offset] != 10 as u8 { noeMove(source, cursor) }
+        } else if ch == 47 as u8 && cursor.offset + 1 as usize < len(source) && source[cursor.offset + 1 as usize] == 42 as u8 {
+            noeMove(source, cursor)
+            noeMove(source, cursor)
+            let terminated: bool = false
+            while cursor.offset + 1 as usize < len(source) {
+                if source[cursor.offset] == 42 as u8 && source[cursor.offset + 1 as usize] == 47 as u8 {
+                    noeMove(source, cursor)
+                    noeMove(source, cursor)
+                    terminated = true
+                    break
+                }
+                noeMove(source, cursor)
+            }
+            if !terminated { return false }
+        } else { return true }
+    }
+    return true
+}
+export function noeNextToken(source: []u8, cursor: *NoeCursor, token: *NoeToken): int {
+    if cursor == null || token == null { return noeTokenInvalid() }
+    if !noeWhitespace(source, cursor) { return noeTokenInvalid() }
+    token.start = cursor.offset
+    token.line = cursor.line
+    token.column = cursor.column
+    if cursor.offset >= len(source) {
+        token.kind = noeTokenEof()
+        token.end = cursor.offset
+        return token.kind
+    }
+    let c: u8 = source[cursor.offset]
+    if c == 10 as u8 || c == 59 as u8 {
+        noeMove(source, cursor)
+        token.kind = noeTokenSeparator()
+    } else if noeAlpha(c) {
+        while cursor.offset < len(source) && noeContinue(source[cursor.offset]) { noeMove(source, cursor) }
+        token.kind = noeTokenIdentifier()
+    } else if noeDigit(c) {
+        while cursor.offset < len(source) && noeDigit(source[cursor.offset]) { noeMove(source, cursor) }
+        token.kind = noeTokenInteger()
+    } else if c == 34 as u8 {
+        noeMove(source, cursor)
+        let closed: bool = false
+        while cursor.offset < len(source) {
+            let here: u8 = source[cursor.offset]
+            if here == 34 as u8 { noeMove(source, cursor) closed = true break }
+            if here == 10 as u8 { break }
+            if here == 92 as u8 {
+                noeMove(source, cursor)
+                if cursor.offset >= len(source) { break }
+            }
+            noeMove(source, cursor)
+        }
+        if closed { token.kind = noeTokenString() }
+        else { token.kind = noeTokenInvalid() }
+    } else {
+        noeMove(source, cursor)
+        if cursor.offset < len(source) {
+            let next: u8 = source[cursor.offset]
+            if (c == 61 as u8 || c == 33 as u8 || c == 60 as u8 || c == 62 as u8) && next == 61 as u8 { noeMove(source, cursor) }
+            else if (c == 38 as u8 && next == 38 as u8) || (c == 124 as u8 && next == 124 as u8) { noeMove(source, cursor) }
+        }
+        if c == 123 as u8 || c == 125 as u8 || c == 40 as u8 || c == 41 as u8 || c == 58 as u8 || c == 44 as u8 || c == 46 as u8 || c == 63 as u8 || c == 61 as u8 || c == 36 as u8 || c == 43 as u8 || c == 45 as u8 || c == 42 as u8 || c == 47 as u8 || c == 33 as u8 || c == 60 as u8 || c == 62 as u8 || c == 38 as u8 || c == 124 as u8 {
+            token.kind = noeTokenOperator()
+        } else { token.kind = noeTokenInvalid() }
+    }
+    token.end = cursor.offset
+    return token.kind
+}
+export function noeTokensWellFormed(source: []u8): bool {
+    let cursor: NoeCursor
+    noeCursorInit(&cursor)
+    let token: NoeToken
+    let total: usize = 0 as usize
+    while true {
+        let kind: int = noeNextToken(source, &cursor, &token)
+        if kind == noeTokenInvalid() { return false }
+        if kind == noeTokenEof() { return true }
+        total = total + 1 as usize
+        if total > 1000000 as usize { return false }
+    }
+    return false
+}

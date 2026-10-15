@@ -1,0 +1,39 @@
+import "../Database/noesql_isolation.nqr"
+import "../Database/noesql_auth.nqr"
+import "../Database/noesql_limits.nqr"
+
+function require(ok: bool): void {
+    if !ok {
+        let fail: *u8 = 0 as *u8
+        print(fail[0])
+    }
+}
+let tx: NoeTxState
+noeTxInit(&tx)
+require(noeTxBeginRead(&tx, 4 as usize) == 1 as isize)
+require(noeTxBeginWrite(&tx) < 0 as isize)
+require(noeTxEndRead(&tx) == 0 as isize)
+require(noeTxBeginWrite(&tx) == 0 as isize)
+require(!noeTxCanCommit(&tx, 1 as u64, false))
+require(noeTxCommit(&tx, 1 as u64, true) == 0 as isize)
+require(tx.generation == 2 as u64)
+require(noeTxBeginWrite(&tx) == 0 as isize)
+require(noeTxCommit(&tx, 1 as u64, true) < 0 as isize)
+require(noeTxRollback(&tx) == 0 as isize)
+let p: NoePrincipal
+p.userId = 17 as u64
+p.authenticated = true
+p.disabled = false
+p.scope = 5 as u64
+p.roles = noeRoleRead() | noeRoleInsert()
+require(noeOperationPermit(&p, 1, 5 as u64))
+require(!noeOperationPermit(&p, 4, 5 as u64))
+require(!noeOperationPermit(&p, 1, 6 as u64))
+p.disabled = true
+require(!noeOperationPermit(&p, 1, 5 as u64))
+let budget: NoeBudget
+require(noeBudgetInit(&budget, 10 as u64, 3 as usize))
+require(noeBudgetConsume(&budget, 7 as u64, 2 as usize))
+require(!noeBudgetConsume(&budget, 4 as u64, 1 as usize))
+require(noeBudgetConsume(&budget, 3 as u64, 1 as usize))
+print("NoeSQL native policy fixture OK")
