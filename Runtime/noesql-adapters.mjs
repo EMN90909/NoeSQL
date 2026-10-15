@@ -15,7 +15,7 @@ function fieldMap(table) { return Object.fromEntries(table.fields.map(f=>[f.name
 function validateType(expr,fields,types) {
   if(expr.k==='literal') return typeOf(expr.value)
   if(expr.k==='param') { if(!Object.hasOwn(types,expr.name))fault('NOE401',expr,`unknown parameter $${expr.name}`); return types[expr.name] }
-  if(expr.k==='column') { const f=fields[expr.name];if(!f)fault('NOE402',expr,`unknown column ${expr.name}`);return nativeType(f) }
+  if(expr.k==='column') { const f=fields[expr.name];if(!Object.hasOwn(fields,expr.name))fault('NOE402',expr,`unknown column ${expr.name}`);return nativeType(f) }
   if(expr.k==='unary') {const t=validateType(expr.arg,fields,types);if(expr.op==='!'&&t==='bool')return 'bool';if(expr.op==='-'&&t==='int')return 'int';fault('NOE403',expr,'invalid unary expression')}
   if(expr.k==='binary') {
     const l=validateType(expr.left,fields,types),r=validateType(expr.right,fields,types)
@@ -106,7 +106,7 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
     if(stmt.k==='index') {
       const table=tableFor(stmt), map=fieldMap(table)
       if(!stmt.columns.length||stmt.columns.length>16||new Set(stmt.columns).size!==stmt.columns.length)fault('NOE421',stmt,'invalid index definition')
-      for(const c of stmt.columns)if(!map[c])fault('NOE422',stmt,`unknown index column ${c}`)
+      for(const c of stmt.columns)if(!Object.hasOwn(map,c))fault('NOE422',stmt,`unknown index column ${c}`)
       return {kind:'index',sql:`CREATE INDEX ${quote(stmt.name)} ON ${quote(stmt.table)} (${stmt.columns.map(quote).join(', ')})`,values:[]}
     }
     if(stmt.k==='query') {
@@ -240,9 +240,10 @@ export function createSqliteAdapter(databaseFile=':memory:') {
     function run(source,params={}) {
       checked();const code=typeof source==='string'?parse(source):source
       const tableNames=new Set(Object.keys(compiler.tables)), queryNames=new Set(Object.keys(compiler.named))
+      const oldTables=Object.fromEntries(Object.entries(compiler.tables).map(([name,table])=>[name,structuredClone(table)]))
       db.exec('BEGIN IMMEDIATE')
       try {const out=code.map(x=>executePlan(compiler.compile(x,params)));db.exec('COMMIT');return out}
-      catch(e){db.exec('ROLLBACK');for(const key of Object.keys(compiler.tables))if(!tableNames.has(key))delete compiler.tables[key];for(const key of Object.keys(compiler.named))if(!queryNames.has(key))delete compiler.named[key];throw e}
+      catch(e){db.exec('ROLLBACK');for(const key of Object.keys(compiler.tables))if(!tableNames.has(key))delete compiler.tables[key];for(const [name,table] of Object.entries(oldTables))compiler.tables[name]=table;for(const key of Object.keys(compiler.named))if(!queryNames.has(key))delete compiler.named[key];throw e}
     }
     function query(name,params={}){checked();const plan=compiler.namedQuery(name,params);return executePlan(plan)}
     return {run,query,db,close(){if(!ended){db.close();ended=true}},compiler}
@@ -265,9 +266,10 @@ export async function createPostgresAdapter(config) {
     if(ended)throw Error('PostgreSQL adapter is closed')
     const program=typeof source==='string'?parse(source):source
     const tableNames=new Set(Object.keys(compiler.tables)), queryNames=new Set(Object.keys(compiler.named))
+      const oldTables=Object.fromEntries(Object.entries(compiler.tables).map(([name,table])=>[name,structuredClone(table)]))
     await client.query('BEGIN')
     try {const out=[];for(const x of program)out.push(await executePlan(compiler.compile(x,params)));await client.query('COMMIT');return out}
-    catch(e){await client.query('ROLLBACK');for(const key of Object.keys(compiler.tables))if(!tableNames.has(key))delete compiler.tables[key];for(const key of Object.keys(compiler.named))if(!queryNames.has(key))delete compiler.named[key];throw e}
+    catch(e){await client.query('ROLLBACK');for(const key of Object.keys(compiler.tables))if(!tableNames.has(key))delete compiler.tables[key];for(const [name,table] of Object.entries(oldTables))compiler.tables[name]=table;for(const key of Object.keys(compiler.named))if(!queryNames.has(key))delete compiler.named[key];throw e}
   }
   return {run,query:(name,params={})=>executePlan(compiler.namedQuery(name,params)),close:async()=>{if(!ended){await client.end();ended=true}},compiler}
 }
