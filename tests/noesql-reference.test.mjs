@@ -55,3 +55,8 @@ test('source and parameter diagnostics',()=>{
   assert.throws(()=>apply('table t { id: int key\n'),e=>e.code==='NOE011')
   assert.throws(()=>apply('table t { id: int key }\nquery q(x: int){t get id where id == $missing}'),e=>e.code==='NOE121')
 })
+
+test('truncated table and object have explicit EOF diagnostics', () => {
+  assert.throws(() => parse('table people { id: int key'), e => e instanceof NoeError && e.code === 'NOE017' && /unterminated table/.test(e.message))
+  assert.throws(() => parse('people add { name: "Ada"'), e => e instanceof NoeError && e.code === 'NOE017' && /unterminated object/.test(e.message))
+})
