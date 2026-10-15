@@ -141,6 +141,10 @@ export function parse(source) {
     nl(); const at = cur()
     if (eat('db')) return {k:'db',name:id(),at}
     if (eat('table')) return {k:'table',name:id(),fields:fields(),at}
+    if (eat('alter')) {
+      const table=id();need('add')
+      return {k:'alter',table,fields:fields(),at}
+    }
     if (eat('index')) {
       const name=id(); need('on'); const table=id(); need('('); const columns=[id()]
       while (eat(',')) columns.push(id()); need(')'); return {k:'index',name,table,columns,at}
@@ -183,7 +187,7 @@ function matches(value, type) { return value===null || (type==='int'?Number.isSa
 function typeOf(v) { return v===null?'null':typeof v==='number'?'int':typeof v==='boolean'?'bool':typeof v==='string'?'text':'invalid' }
 function infer(node, columns, params) {
   if (node.k==='literal') return typeOf(node.value)
-  if (node.k==='column') { if (!columns?.[node.name]) fail('NOE120',node.at,`unknown field ${node.name}`); return fieldType(columns[node.name]) }
+  if (node.k==='column') { if (!columns || !Object.hasOwn(columns,node.name)) fail('NOE120',node.at,`unknown field ${node.name}`); return fieldType(columns[node.name]) }
   if (node.k==='param') { if (!Object.hasOwn(params,node.name)) fail('NOE121',node.at,`unknown parameter $${node.name}`); return params[node.name] }
   if (node.k==='unary') { const t=infer(node.arg,columns,params); if (node.op==='!'&&t==='bool') return 'bool'; if(node.op==='-'&&t==='int') return 'int'; fail('NOE122',node.at,'invalid unary operand') }
   const l=infer(node.left,columns,params),r=infer(node.right,columns,params)
@@ -220,7 +224,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   const results=[]
   // The caller owns persistence. Execute against a clone, then publish only on success.
   const db=structuredClone(database)
-  function tableFor(s) { const t=db.tables[s.table]; if(!t) fail('NOE100',s.at,`unknown table ${s.table}`);return t }
+  function tableFor(s) { const t=db.tables[s.table]; if(!Object.hasOwn(db.tables,s.table)) fail('NOE100',s.at,`unknown table ${s.table}`);return t }
   function fieldsFor(t) { return Object.fromEntries(t.fields.map(f=>[f.name,f])) }
   function validExpr(e,t,params,expected) {const got=infer(e,fieldsFor(t),params);if(expected&&got!==expected&&got!=='null')fail('NOE124',e.at,`expected ${expected}, got ${got}`)}
   function tableConstraints(t,row,old=null,at=atUnknown) {
@@ -240,7 +244,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   function apply(s,params,types) {
     if (s.k==='db') { if(db.name&&db.name!==s.name)fail('NOE101',s.at,'cannot change database identity');db.name=s.name;return {kind:'db',name:s.name} }
     if (s.k==='table') {
-      if(db.tables[s.name])fail('NOE102',s.at,`duplicate table ${s.name}`)
+      if(Object.hasOwn(db.tables,s.name))fail('NOE102',s.at,`duplicate table ${s.name}`)
       const known=new Set();let keys=0,autos=0
       for(const f of s.fields) {
         if(known.has(f.name))fail('NOE103',f.at,`duplicate field ${f.name}`); known.add(f.name)
@@ -253,14 +257,36 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
       if(s.fields.length===0||s.fields.length>256)fail('NOE109',s.at,'table requires 1..256 fields')
       db.tables[s.name]={fields:s.fields,rows:[],nextId:1};return {kind:'table',name:s.name}
     }
+    if (s.k==='alter') {
+      const t=tableFor(s),existing=fieldsFor(t),added=new Set()
+      if(!s.fields.length)fail('NOE240',s.at,'alter add requires at least one new field')
+      for(const f of s.fields) {
+        if(Object.hasOwn(existing,f.name)||added.has(f.name))fail('NOE241',f.at,'duplicate migration field '+f.name)
+        added.add(f.name)
+        if(!['int','text','bool'].includes(f.type)||f.flags.includes('key')||f.flags.includes('auto')||f.ref)
+          fail('NOE242',f.at,'alter add supports only scalar non-key fields')
+        if(f.default) {
+          if(f.default.k!=='literal'||!matches(f.default.value,fieldType(f)))fail('NOE243',f.at,'migration default must be a typed literal')
+        }
+        if(t.rows.length&&f.flags.includes('required')&&!f.default)
+          fail('NOE244',f.at,'required new column needs a default on nonempty table')
+        if(t.rows.length&&f.flags.includes('unique')&&f.default&&f.default.value!==null&&t.rows.length>1)
+          fail('NOE245',f.at,'repeated default violates unique constraint')
+        if(f.default?.value===null&&f.flags.includes('required'))fail('NOE244',f.at,'required column needs nonnull default')
+      }
+      for(const row of t.rows)for(const f of s.fields)row[f.name]=f.default?f.default.value:null
+      t.fields.push(...s.fields)
+      db.version+=1
+      return {kind:'alter',table:s.table,version:db.version,added:s.fields.map(f=>f.name)}
+    }
     if (s.k==='index') {
-      const t=tableFor(s);if(db.indexes[s.name])fail('NOE110',s.at,'duplicate index name')
+      const t=tableFor(s);if(Object.hasOwn(db.indexes,s.name))fail('NOE110',s.at,'duplicate index name')
       if(s.columns.length<1||s.columns.length>16||new Set(s.columns).size!==s.columns.length)fail('NOE111',s.at,'invalid index columns')
       for(const c of s.columns)if(!fieldsFor(t)[c])fail('NOE112',s.at,`unknown index field ${c}`)
       db.indexes[s.name]={table:s.table,columns:s.columns};return {kind:'index',name:s.name}
     }
     if (s.k==='query') {
-      if(db.queries[s.name])fail('NOE113',s.at,'duplicate query name')
+      if(Object.hasOwn(db.queries,s.name))fail('NOE113',s.at,'duplicate query name')
       const declared={};for(const p of s.params){if(Object.hasOwn(declared,p.name))fail('NOE114',p.at,'duplicate parameter');if(!['int','text','bool'].includes(p.type))fail('NOE115',p.at,'unsupported parameter type');declared[p.name]=p.type;if(p.default)validExpr(p.default,{fields:[]},{},p.type)}
       validateStatement(s.query,declared)
       db.queries[s.name]=s;return {kind:'query',name:s.name}
@@ -303,7 +329,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
 }
 export function runNamed(database,name,args={}) {
   const definition=database.queries[name]
-  if(!definition)fail('NOE131',atUnknown,`unknown query ${name}`)
+  if(!Object.hasOwn(database.queries,name))fail('NOE131',atUnknown,`unknown query ${name}`)
   const params={};for(const p of definition.params){const v=Object.hasOwn(args,p.name)?args[p.name]:p.default?value(p.default,{},{}):undefined;if(!matches(v,p.type)||v===undefined)fail('NOE132',p.at,`invalid parameter ${p.name}`);params[p.name]=v}
   for(const k of Object.keys(args))if(!definition.params.some(p=>p.name===k))fail('NOE133',definition.at,`unknown parameter ${k}`)
   return execute([definition.query],database,params).results[0]
