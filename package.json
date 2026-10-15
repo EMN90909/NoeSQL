@@ -11,6 +11,7 @@
     "test": "node --test",
     "test:reference": "node --test",
     "smoke": "node Runtime/noesql-cli.mjs",
-    "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed"
+    "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed",
+    "benchmark:reference": "node Benchmarks/reference-relational.mjs 250"
   }
 }
