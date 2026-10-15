@@ -34,3 +34,12 @@ test('CLI verify rejects excess arguments', async () => {
   const { stderr } = await exec(process.execPath, [cli, 'verify']).catch(e => e)
   assert.match(stderr, /Usage:/)
 })
+
+test('CLI verify rejects a missing database instead of claiming success', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'noesql-verify-'))
+  try {
+    const path = join(directory, 'missing.nqd')
+    await assert.rejects(exec(process.execPath, [cli, 'verify', path]), error =>
+      error.code === 1 && /does not exist/.test(error.stderr))
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
