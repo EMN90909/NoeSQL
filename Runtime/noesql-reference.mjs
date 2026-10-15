@@ -291,7 +291,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
     }
     if(s.k==='atomic') { const out=[];for(const x of s.body)out.push(apply(x,params,types));return {kind:'atomic',results:out} }
     const t=tableFor(s), col=fieldsFor(t), key=t.fields.find(f=>f.flags.includes('key'))
-    function assertAssignments(entries,allowKey){let seen=new Set();for(const e of entries){if(seen.has(e.field))fail('NOE116',e.at,'duplicate assignment');seen.add(e.field);if(!col[e.field])fail('NOE117',e.at,`unknown field ${e.field}`);if(!allowKey&&e.field===key.name)fail('NOE118',e.at,'cannot update primary key');validExpr(e.value,t,types,fieldType(col[e.field]))}}
+    function assertAssignments(entries,allowKey){let seen=new Set();for(const e of entries){if(seen.has(e.field))fail('NOE116',e.at,'duplicate assignment');seen.add(e.field);if(!Object.hasOwn(col,e.field))fail('NOE117',e.at,`unknown field ${e.field}`);if(!allowKey&&e.field===key.name)fail('NOE118',e.at,'cannot update primary key');validExpr(e.value,t,types,fieldType(col[e.field]))}}
     if (s.k==='add') {
       assertAssignments(s.entries,true)
       const row=Object.fromEntries(t.fields.map(f=>[f.name,f.default?value(f.default,{},params):null]))
