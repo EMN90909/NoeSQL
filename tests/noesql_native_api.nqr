@@ -1,0 +1,33 @@
+import "../Database/noesql_api.nqr"
+function require(valid: bool): void {
+    if !valid {
+        let bad: *u8 = 0 as *u8
+        print(bad[0])
+    }
+}
+let ctx: NoeQueryContext
+ctx.abiVersion = noeApiVersion()
+ctx.schemaVersion = 1 as u32
+ctx.tenant = 5 as u64
+ctx.principal.userId = 4 as u64
+ctx.principal.authenticated = true
+ctx.principal.disabled = false
+ctx.principal.scope = 5 as u64
+ctx.principal.roles = noeRoleRead()
+require(noeBudgetInit(&ctx.budget, 100 as u64, 10 as usize))
+ctx.maxReturnedRows = 10 as usize
+let columns: [NoeColumn; 1]
+columns[0].kind = noeTypeInt()
+columns[0].required = true
+columns[0].primary = true
+columns[0].unique = true
+let plan: NoeIrPlan
+plan.operation = noePlanGet()
+plan.schemaVersion = 1 as u32
+plan.predicateOperator = noePredicateNone()
+let projections: [usize; 1] = [0 as usize]
+let bytes: [u8; 1] = [0 as u8]
+require(noeApiValidate(&ctx,&plan,slice(columns),slice(bytes),slice(projections)) == 0 as isize)
+ctx.principal.disabled = true
+require(noeApiValidate(&ctx,&plan,slice(columns),slice(bytes),slice(projections)) == -83 as isize)
+print("NoeSQL compiler ABI policy fixture OK")
