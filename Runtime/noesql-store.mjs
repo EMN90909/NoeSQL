@@ -109,8 +109,17 @@ async function checkpoint(path,state,inject) {
   await inject('afterCheckpoint')
 }
 export async function verifyNqd(path) {
-  const state=await readNqd(path)
-  return {ok:true,tables:Object.keys(state.tables).length,walPresent:await (async()=>{try{await lstat(path+'.wal');return true}catch(e){if(e.code==='ENOENT')return false;throw e}})()}
+  pathCheck(path)
+  const snapshot=await boundedRead(path,MAX_FILE)
+  const journal=await boundedRead(path+'.wal',MAX_WAL)
+  if(snapshot===null && journal===null)
+    throw Error('NoeSQL database does not exist')
+  // A journal without a committed transaction is not a valid database.
+  const recovered=journal===null?null:replayWal(journal).committed
+  if(snapshot===null && !recovered)
+    throw Error('NoeSQL database has no committed snapshot or WAL image')
+  const state=recovered?decode(recovered):decode(snapshot)
+  return {ok:true,tables:Object.keys(state.tables).length,walPresent:journal!==null}
 }
 export async function runNqd(path, source, params={}, options={}) {
   pathCheck(path)

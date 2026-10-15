@@ -39,6 +39,7 @@ Reference CLI:
 ```sh
 node Runtime/noesql-cli.mjs run ./school.nqd tests/school.noe
 node Runtime/noesql-cli.mjs query ./school.nqd adults '{"minAge":20}'
+node Runtime/noesql-cli.mjs verify ./school.nqd
 ```
 
 Use test data only. SQLite/PostgreSQL adapters are optional; no GitHub Actions are required.
