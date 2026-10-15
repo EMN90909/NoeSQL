@@ -1,6 +1,8 @@
 // NoeSQL experimental reference executor. This is an independent in-memory
 // conformance oracle, NOT the production Noqeri-owned engine or durable .nqd format.
 // No external SQL runtime or npm dependency is used.
+import { relationalSelect } from './noesql-relational.mjs'
+
 export class NoeError extends Error {
   constructor(code, token, message) {
     super(`${code} at ${token.line}:${token.col}: ${message}`)
@@ -72,7 +74,7 @@ export function parse(source) {
     else if (first.kind === 'int') { const value = Number(first.value); if (!Number.isSafeInteger(value)) throw new NoeError('NOE014',first,'integer exceeds safe reference-engine range'); left = {k:'literal',value,at:first} }
     else if (first.value === 'true' || first.value === 'false') left = {k:'literal',value:first.value === 'true',at:first}
     else if (first.value === 'null') left = {k:'literal',value:null,at:first}
-    else if (first.kind === 'id' && !['where','sort','take','skip','set','delete','group','get'].includes(first.value)) {
+    else if (first.kind === 'id' && !['where','sort','take','skip','set','delete','group','get','join','on'].includes(first.value)) {
       let name = first.value
       while (eat('.')) name += '.' + id()
       left = {k:'column',name,at:first}
@@ -109,21 +111,40 @@ export function parse(source) {
     }
     need('}'); return entries
   }
+  const qualified = () => { let name=id(); while(eat('.'))name+='.'+id();return name }
   const select = (table, at) => {
-    need('get'); const columns = []
-    if (eat('*')) columns.push('*')
-    else { columns.push(id()); while (eat(',')) columns.push(id()) }
-    let where=null, sort=null, skip=null, takeCount=null
-    if (eat('where')) where = expr()
-    if (eat('sort')) sort = id()
-    if (eat('skip')) skip = expr()
-    if (eat('take')) takeCount = expr()
-    return {k:'get',table,columns,where,sort,skip,take:takeCount,at}
+    need('get'); const columns=[]
+    const projection=()=>{
+      const at=cur(),name=qualified()
+      if(!eat('('))return name
+      if(!['count','sum','min','max'].includes(name))err('NOE030','unsupported aggregate '+name)
+      let arg=null
+      if(eat('*')){if(name!=='count')err('NOE030','only count accepts *');arg='*'}
+      else if(!is(')'))arg=qualified()
+      need(')')
+      if(name!=='count'&&(arg===null||arg==='*'))err('NOE030',name+' requires a column')
+      const alias=eat('as')?id():name+(arg===null||arg==='*'?'':'_'+arg.replaceAll('.','_'))
+      return {k:'aggregate',fn:name,arg,alias,at}
+    }
+    if(eat('*'))columns.push('*')
+    else{columns.push(projection());while(eat(','))columns.push(projection())}
+    let join=null,where=null,group=[],sort=null,skip=null,takeCount=null
+    if(eat('join')){const at=cur(),table=id();need('on');join={table,on:expr(),at}}
+    if(eat('where'))where=expr()
+    if(eat('group')){group.push(qualified());while(eat(','))group.push(qualified())}
+    if(eat('sort'))sort=qualified()
+    if(eat('skip'))skip=expr()
+    if(eat('take'))takeCount=expr()
+    return {k:'get',table,columns,join,where,group,sort,skip,take:takeCount,at}
   }
   const stmt = () => {
     nl(); const at = cur()
     if (eat('db')) return {k:'db',name:id(),at}
     if (eat('table')) return {k:'table',name:id(),fields:fields(),at}
+    if (eat('alter')) {
+      const table=id();need('add')
+      return {k:'alter',table,fields:fields(),at}
+    }
     if (eat('index')) {
       const name=id(); need('on'); const table=id(); need('('); const columns=[id()]
       while (eat(',')) columns.push(id()); need(')'); return {k:'index',name,table,columns,at}
@@ -166,7 +187,7 @@ function matches(value, type) { return value===null || (type==='int'?Number.isSa
 function typeOf(v) { return v===null?'null':typeof v==='number'?'int':typeof v==='boolean'?'bool':typeof v==='string'?'text':'invalid' }
 function infer(node, columns, params) {
   if (node.k==='literal') return typeOf(node.value)
-  if (node.k==='column') { if (!columns?.[node.name]) fail('NOE120',node.at,`unknown field ${node.name}`); return fieldType(columns[node.name]) }
+  if (node.k==='column') { if (!columns || !Object.hasOwn(columns,node.name)) fail('NOE120',node.at,`unknown field ${node.name}`); return fieldType(columns[node.name]) }
   if (node.k==='param') { if (!Object.hasOwn(params,node.name)) fail('NOE121',node.at,`unknown parameter $${node.name}`); return params[node.name] }
   if (node.k==='unary') { const t=infer(node.arg,columns,params); if (node.op==='!'&&t==='bool') return 'bool'; if(node.op==='-'&&t==='int') return 'int'; fail('NOE122',node.at,'invalid unary operand') }
   const l=infer(node.left,columns,params),r=infer(node.right,columns,params)
@@ -203,7 +224,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   const results=[]
   // The caller owns persistence. Execute against a clone, then publish only on success.
   const db=structuredClone(database)
-  function tableFor(s) { const t=db.tables[s.table]; if(!t) fail('NOE100',s.at,`unknown table ${s.table}`);return t }
+  function tableFor(s) { const t=db.tables[s.table]; if(!Object.hasOwn(db.tables,s.table)) fail('NOE100',s.at,`unknown table ${s.table}`);return t }
   function fieldsFor(t) { return Object.fromEntries(t.fields.map(f=>[f.name,f])) }
   function validExpr(e,t,params,expected) {const got=infer(e,fieldsFor(t),params);if(expected&&got!==expected&&got!=='null')fail('NOE124',e.at,`expected ${expected}, got ${got}`)}
   function tableConstraints(t,row,old=null,at=atUnknown) {
@@ -223,7 +244,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   function apply(s,params,types) {
     if (s.k==='db') { if(db.name&&db.name!==s.name)fail('NOE101',s.at,'cannot change database identity');db.name=s.name;return {kind:'db',name:s.name} }
     if (s.k==='table') {
-      if(db.tables[s.name])fail('NOE102',s.at,`duplicate table ${s.name}`)
+      if(Object.hasOwn(db.tables,s.name))fail('NOE102',s.at,`duplicate table ${s.name}`)
       const known=new Set();let keys=0,autos=0
       for(const f of s.fields) {
         if(known.has(f.name))fail('NOE103',f.at,`duplicate field ${f.name}`); known.add(f.name)
@@ -236,21 +257,41 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
       if(s.fields.length===0||s.fields.length>256)fail('NOE109',s.at,'table requires 1..256 fields')
       db.tables[s.name]={fields:s.fields,rows:[],nextId:1};return {kind:'table',name:s.name}
     }
+    if (s.k==='alter') {
+      const t=tableFor(s),existing=fieldsFor(t),added=new Set()
+      if(!s.fields.length)fail('NOE240',s.at,'alter add requires at least one new field')
+      for(const f of s.fields) {
+        if(Object.hasOwn(existing,f.name)||added.has(f.name))fail('NOE241',f.at,'duplicate migration field '+f.name)
+        added.add(f.name)
+        if(!['int','text','bool'].includes(f.type)||f.flags.includes('key')||f.flags.includes('auto')||f.flags.includes('unique')||f.ref)
+          fail('NOE242',f.at,'alter add supports only scalar non-key, non-unique fields')
+        if(f.default) {
+          if(f.default.k!=='literal'||!matches(f.default.value,fieldType(f)))fail('NOE243',f.at,'migration default must be a typed literal')
+        }
+        if(t.rows.length&&f.flags.includes('required')&&!f.default)
+          fail('NOE244',f.at,'required new column needs a default on nonempty table')
+        if(f.default?.value===null&&f.flags.includes('required'))fail('NOE244',f.at,'required column needs nonnull default')
+      }
+      for(const row of t.rows)for(const f of s.fields)row[f.name]=f.default?f.default.value:null
+      t.fields.push(...s.fields)
+      db.version+=1
+      return {kind:'alter',table:s.table,version:db.version,added:s.fields.map(f=>f.name)}
+    }
     if (s.k==='index') {
-      const t=tableFor(s);if(db.indexes[s.name])fail('NOE110',s.at,'duplicate index name')
+      const t=tableFor(s);if(Object.hasOwn(db.indexes,s.name))fail('NOE110',s.at,'duplicate index name')
       if(s.columns.length<1||s.columns.length>16||new Set(s.columns).size!==s.columns.length)fail('NOE111',s.at,'invalid index columns')
       for(const c of s.columns)if(!fieldsFor(t)[c])fail('NOE112',s.at,`unknown index field ${c}`)
       db.indexes[s.name]={table:s.table,columns:s.columns};return {kind:'index',name:s.name}
     }
     if (s.k==='query') {
-      if(db.queries[s.name])fail('NOE113',s.at,'duplicate query name')
+      if(Object.hasOwn(db.queries,s.name))fail('NOE113',s.at,'duplicate query name')
       const declared={};for(const p of s.params){if(Object.hasOwn(declared,p.name))fail('NOE114',p.at,'duplicate parameter');if(!['int','text','bool'].includes(p.type))fail('NOE115',p.at,'unsupported parameter type');declared[p.name]=p.type;if(p.default)validExpr(p.default,{fields:[]},{},p.type)}
       validateStatement(s.query,declared)
       db.queries[s.name]=s;return {kind:'query',name:s.name}
     }
     if(s.k==='atomic') { const out=[];for(const x of s.body)out.push(apply(x,params,types));return {kind:'atomic',results:out} }
     const t=tableFor(s), col=fieldsFor(t), key=t.fields.find(f=>f.flags.includes('key'))
-    function assertAssignments(entries,allowKey){let seen=new Set();for(const e of entries){if(seen.has(e.field))fail('NOE116',e.at,'duplicate assignment');seen.add(e.field);if(!col[e.field])fail('NOE117',e.at,`unknown field ${e.field}`);if(!allowKey&&e.field===key.name)fail('NOE118',e.at,'cannot update primary key');validExpr(e.value,t,types,fieldType(col[e.field]))}}
+    function assertAssignments(entries,allowKey){let seen=new Set();for(const e of entries){if(seen.has(e.field))fail('NOE116',e.at,'duplicate assignment');seen.add(e.field);if(!Object.hasOwn(col,e.field))fail('NOE117',e.at,`unknown field ${e.field}`);if(!allowKey&&e.field===key.name)fail('NOE118',e.at,'cannot update primary key');validExpr(e.value,t,types,fieldType(col[e.field]))}}
     if (s.k==='add') {
       assertAssignments(s.entries,true)
       const row=Object.fromEntries(t.fields.map(f=>[f.name,f.default?value(f.default,{},params):null]))
@@ -261,18 +302,7 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
       if(row[key.name]>=t.nextId)t.nextId=row[key.name]+1
       return {kind:'add',affected:1,row:structuredClone(row)}
     }
-    if(s.k==='get') {
-      for(const c of s.columns)if(c!=='*'&&!col[c])fail('NOE119',s.at,`unknown projection ${c}`)
-      if(s.where)validExpr(s.where,t,types,'bool')
-      if(s.sort&&!col[s.sort])fail('NOE119',s.at,`unknown sort field ${s.sort}`)
-      for(const limit of [s.skip,s.take])if(limit)validExpr(limit,t,types,'int')
-      let rows=t.rows.filter(r=>!s.where||value(s.where,r,params)===true)
-      if(s.sort)rows=rows.slice().sort((a,b)=>a[s.sort]===b[s.sort]?a[key.name]-b[key.name]:a[s.sort]===null?1:b[s.sort]===null?-1:a[s.sort]<b[s.sort]?-1:1)
-      let skip=s.skip?value(s.skip,{},params):0, take=s.take?value(s.take,{},params):rows.length
-      if(!Number.isSafeInteger(skip)||!Number.isSafeInteger(take)||skip<0||take<0)fail('NOE206',s.at,'skip/take must be nonnegative integers')
-      rows=rows.slice(skip,skip+take)
-      return {kind:'get',rows:rows.map(r=>structuredClone(s.columns[0]==='*'?r:Object.fromEntries(s.columns.map(c=>[c,r[c]]))))}
-    }
+    if(s.k==='get') return relationalSelect(s,db,params,types,false,{fail,infer,value,fieldType})
     if(s.k==='set'||s.k==='delete') {
       if(!s.where)fail('NOE207',s.at,'write requires where')
       validExpr(s.where,t,types,'bool')
@@ -290,18 +320,14 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   }
   function validateStatement(s,types) {
     if(s.k!=='get')fail('NOE130',s.at,'named query must select')
-    const t=tableFor(s),f=fieldsFor(t)
-    for(const c of s.columns)if(c!=='*'&&!f[c])fail('NOE119',s.at,`unknown projection ${c}`)
-    if(s.where)validExpr(s.where,t,types,'bool')
-    if(s.sort&&!f[s.sort])fail('NOE119',s.at,'unknown sort field')
-    for(const l of [s.skip,s.take])if(l)validExpr(l,t,types,'int')
+    relationalSelect(s,db,{},types,true,{fail,infer,value,fieldType})
   }
   for(const s of program)results.push(apply(s,bindings,Object.fromEntries(Object.entries(bindings).map(([k,v])=>[k,typeOf(v)]))))
   return {database:db,results}
 }
 export function runNamed(database,name,args={}) {
   const definition=database.queries[name]
-  if(!definition)fail('NOE131',atUnknown,`unknown query ${name}`)
+  if(!Object.hasOwn(database.queries,name))fail('NOE131',atUnknown,`unknown query ${name}`)
   const params={};for(const p of definition.params){const v=Object.hasOwn(args,p.name)?args[p.name]:p.default?value(p.default,{},{}):undefined;if(!matches(v,p.type)||v===undefined)fail('NOE132',p.at,`invalid parameter ${p.name}`);params[p.name]=v}
   for(const k of Object.keys(args))if(!definition.params.some(p=>p.name===k))fail('NOE133',definition.at,`unknown parameter ${k}`)
   return execute([definition.query],database,params).results[0]

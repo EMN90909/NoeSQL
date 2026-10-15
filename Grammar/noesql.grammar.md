@@ -6,11 +6,12 @@ A NoeSQL script is `.noe`; `.nqr` remains Noqeri source. Experimental `.nqd` sto
 
 ```ebnf
 unit          = { separator | declaration, boundary | statement, boundary } ;
-declaration   = db | table | index | query ;
+declaration   = db | table | index | query | alter ;
 db            = "db", identifier ;
 table         = "table", identifier, "{", { separator | field, fieldBoundary }, "}" ;
 field         = identifier, ":", type, [ "?" ], { modifier }, [ "=", expression ] ;
-type          = "int" | "text" | "bool" | "ref", identifier ;
+type          = "int" | "text" | "bool" | ("ref", identifier) ;
+alter         = "alter", identifier, "add", "{", { separator | field, fieldBoundary }, "}" ;
 modifier      = "required" | "unique" | "key" | "auto" ;
 index         = "index", identifier, "on", identifier,
                 "(", identifier, { ",", identifier }, ")" ;
@@ -20,8 +21,15 @@ parameters    = parameter, { ",", parameter } ;
 parameter     = identifier, ":", ("int" | "text" | "bool"), ["=", expression] ;
 statement     = insert | select | update | delete | atomic ;
 insert        = identifier, "add", object ;
-select        = identifier, "get", ("*" | names), ["where",expression],
-                ["sort", identifier], ["skip",expression], ["take",expression] ;
+select        = identifier, "get", ("*" | projection, {",", projection}),
+                ["join", identifier, "on", expression],
+                ["where", expression],
+                ["group", qualified, {",", qualified}],
+                ["sort", qualified], ["skip",expression], ["take",expression] ;
+projection    = qualified | aggregate ;
+aggregate     = ("count" | "sum" | "min" | "max"), "(",
+                ["*" | qualified], ")", ["as", identifier] ;
+qualified     = identifier, [".", identifier] ;
 update        = identifier, "where", expression, "set", assignments ;
 delete        = identifier, "where", expression, "delete" ;
 atomic        = "atomic", "{", { separator | statement, boundary }, "}" ;
@@ -51,4 +59,33 @@ fieldBoundary = ("," | separator), {separator} | "}" ;
 
 **Execution contract:** `get` is mandatory for retrieval, and `where` is mandatory for `set` and `delete`. `get` returns selected rows; `add` returns the inserted row and an affected count; `set` and `delete` return affected counts. Equality is strictly typed, truth conditions must be booleans, and null comparisons evaluate to unknown (not true). `&&` and `||` short-circuit and follow three-valued logic. Arithmetic only accepts safe integers and checks overflow. The reference rejects unsupported scalar types rather than converting money to float.
 
-**Current restrictions:** one integer primary key per table; only scalar `int`, `bool`, `text` and integer-key `ref` types; single-column sort; indexes currently have schema metadata only (no physical index seek); no `group`, aggregates, joins, relationship projection, date/decimal, explicit `is null`, migrations, byte storage or typed Noqeri binding generation. These are NOT silently accepted. NoeSQL does not yet parse inline inside a `.nqr` compilation unit.
+**Current restrictions:** one integer primary key per table; only scalar `int`, `bool`, `text` and integer-key `ref` types; single-column sort; indexes currently have schema metadata only (no physical index seek); no outer/self joins, HAVING, DISTINCT, GROUPING SETS, date/decimal, explicit `is null`, destructive schema migrations, byte storage or typed Noqeri binding generation. **A bounded reference-only subset of inner `join`, `group`, `count`, `sum`, `min`, `max` and additive `alter` is available in the JavaScript implementation.** These are NOT silently accepted. NoeSQL does not yet parse inline inside a `.nqr` compilation unit.
+
+## Readable relational queries (experimental reference engine only)
+
+```noe
+table customers {
+  id: int key auto
+  name: text required
+}
+table orders {
+  id: int key auto
+  customer_id: ref customers required
+  amount: int required
+}
+
+orders get customers.name, count(*) as orders, sum(amount) as total
+  join customers on customer_id == customers.id
+  group customers.name
+  sort customers.name
+```
+
+The parser currently requires each query statement on **one logical line**; the multi-line presentation above is for readability, not directly executable. Use a single line for the `orders get...` statement. Joining a second table exposes its fields under `table.field`; base table fields remain usable without qualification. Grouped projections must be declared in `group` unless they are aggregates. `count()` and `count(*)` count rows; `count(column)` ignores nulls. `sum` accepts integer fields only; empty `sum/min/max` yields null, and sum overflow is rejected.
+
+```noe
+alter orders add { fulfilled: bool required = false }
+```
+
+Additive migration supports scalar non-key, non-unique fields only. A required field needs a literal default on an existing nonempty table. The reference database schema version increments when the change succeeds. No general migration framework, index rebuild, compatibility guarantee, or native storage upgrade is implied.
+
+Execution is limited to **100,000 matching rows** and **1,000,000 candidate join pairs** per query. This is a reference safety budget rather than an optimizer guarantee. Native Noqeri compilation and durable isolation remain unverified.

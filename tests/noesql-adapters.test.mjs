@@ -106,3 +106,44 @@ test('SQL compiler refuses invalid column references without contacting database
  assert.throws(()=>compiler.compile(parse('users where unknown == 1 delete')[0]),/NOE402/)
  assert.throws(()=>compiler.compile(parse('users where id == $unset delete')[0]),/NOE401/)
 })
+
+test('SQLite executes grouped joins with readable result labels',async()=>{
+  const a=await createSqliteAdapter()
+  try{
+    a.run(`table people {id:int key auto
+ name:text required}
+table sales {id:int key auto
+ person_id:ref people required
+ amount:int required}
+people add {name:"Ada"}
+people add {name:"Lin"}
+sales add {person_id:1,amount:10}
+sales add {person_id:1,amount:20}
+sales add {person_id:2,amount:5}`)
+    const out=a.run('sales get people.name, count(*) as count, sum(amount) as total join people on person_id == people.id group people.name sort people.name')[0].rows
+    assert.deepEqual(out,[{'people.name':'Ada',count:2,total:30},{'people.name':'Lin',count:1,total:5}])
+  }finally{a.close()}
+})
+test('SQLite additive migration adds a default without losing rows',async()=>{
+  const a=await createSqliteAdapter()
+  try{
+    a.run('table people {id:int key auto\n name:text required}\npeople add {name:"Ada"}')
+    a.run('alter people add {active:bool required = true}')
+    assert.deepEqual(a.run('people get name, active')[0].rows,[{name:'Ada',active:true}])
+    assert.throws(()=>a.run('alter people add {unsupported:bool unique}'),/NOE242/)
+  }finally{a.close()}
+})
+test('PostgreSQL join compiler uses validated names and placeholders',()=>{
+  const c=createSqlCompiler('postgres')
+  const program=parse(`table people {id:int key auto
+ name:text required}
+table sales {id:int key auto
+ person_id:ref people required
+ amount:int required}
+sales get people.name, sum(amount) as revenue join people on person_id == people.id where amount >= $min group people.name sort people.name`)
+  const plans=program.map(x=>c.compile(x,{min:5}))
+  assert.match(plans.at(-1).sql,/INNER JOIN "people"/)
+  assert.match(plans.at(-1).sql,/SUM\("sales"."amount"\)/)
+  assert.match(plans.at(-1).sql,/\$1/)
+  assert.deepEqual(plans.at(-1).values,[5])
+})
