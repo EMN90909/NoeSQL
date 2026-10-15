@@ -263,15 +263,13 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
       for(const f of s.fields) {
         if(Object.hasOwn(existing,f.name)||added.has(f.name))fail('NOE241',f.at,'duplicate migration field '+f.name)
         added.add(f.name)
-        if(!['int','text','bool'].includes(f.type)||f.flags.includes('key')||f.flags.includes('auto')||f.ref)
-          fail('NOE242',f.at,'alter add supports only scalar non-key fields')
+        if(!['int','text','bool'].includes(f.type)||f.flags.includes('key')||f.flags.includes('auto')||f.flags.includes('unique')||f.ref)
+          fail('NOE242',f.at,'alter add supports only scalar non-key, non-unique fields')
         if(f.default) {
           if(f.default.k!=='literal'||!matches(f.default.value,fieldType(f)))fail('NOE243',f.at,'migration default must be a typed literal')
         }
         if(t.rows.length&&f.flags.includes('required')&&!f.default)
           fail('NOE244',f.at,'required new column needs a default on nonempty table')
-        if(t.rows.length&&f.flags.includes('unique')&&f.default&&f.default.value!==null&&t.rows.length>1)
-          fail('NOE245',f.at,'repeated default violates unique constraint')
         if(f.default?.value===null&&f.flags.includes('required'))fail('NOE244',f.at,'required column needs nonnull default')
       }
       for(const row of t.rows)for(const f of s.fields)row[f.name]=f.default?f.default.value:null
