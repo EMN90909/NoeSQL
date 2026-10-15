@@ -8,6 +8,7 @@ const at = { line: 1, col: 1 }
 function fault(code, node, msg) { throw new NoeError(code, node?.at || at, msg) }
 function quote(name) { if (!IDENT.test(name) || ['constructor','prototype','__proto__'].includes(name)) fault('NOE400',null,`invalid SQL identifier ${name}`); return `"${name}"` }
 const quotePath = name => name.split('.').map(quote).join('.')
+const quoteOutput = name => { name.split('.').forEach(quote);return '"'+name+'"' }
 const typeOf = value => value===null ? 'null' : typeof value==='boolean' ? 'bool' : Number.isSafeInteger(value) ? 'int' : typeof value==='string' ? 'text' : 'invalid'
 const nativeType = x => x.type==='ref' ? 'int' : x.type
 function fieldMap(table) { return Object.fromEntries(table.fields.map(f=>[f.name,f])) }
@@ -51,12 +52,12 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
   function valuesFor(node,parameters) {
     const ctx={params:parameters,values:[]};return {text:compileExpression(node,ctx),params:ctx.values}
   }
-  function tableFor(stmt) {const table=tables[stmt.table];if(!table)fault('NOE411',stmt,`unknown table ${stmt.table}`);return table}
+  function tableFor(stmt) {const table=tables[stmt.table];if(!Object.hasOwn(tables,stmt.table))fault('NOE411',stmt,`unknown table ${stmt.table}`);return table}
   function compile(stmt,parameters={},parameterTypes=Object.fromEntries(Object.entries(parameters).map(([k,v])=>[k,typeOf(v)]))) {
     if(stmt.k==='db')return {kind:'db',name:stmt.name}
     if(stmt.k==='atomic')return {kind:'atomic',statements:stmt.body.map(s=>compile(s,parameters,parameterTypes))}
     if(stmt.k==='table') {
-      if(tables[stmt.name])fault('NOE412',stmt,`duplicate table ${stmt.name}`)
+      if(Object.hasOwn(tables,stmt.name))fault('NOE412',stmt,`duplicate table ${stmt.name}`)
       if(!stmt.fields.length||stmt.fields.length>256)fault('NOE413',stmt,'invalid field count')
       const seen=new Set(), keys=stmt.fields.filter(f=>f.flags.includes('key'))
       if(keys.length!==1||keys[0].type!=='int')fault('NOE414',stmt,'one int primary key required')
@@ -109,7 +110,7 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
       return {kind:'index',sql:`CREATE INDEX ${quote(stmt.name)} ON ${quote(stmt.table)} (${stmt.columns.map(quote).join(', ')})`,values:[]}
     }
     if(stmt.k==='query') {
-      if(named[stmt.name])fault('NOE423',stmt,'duplicate named query')
+      if(Object.hasOwn(named,stmt.name))fault('NOE423',stmt,'duplicate named query')
       const defaults=Object.create(null),types=Object.create(null)
       for(const p of stmt.params){if(Object.hasOwn(types,p.name))fault('NOE424',p,'duplicate query parameter');if(!['int','text','bool'].includes(p.type))fault('NOE425',p,'invalid parameter type');types[p.name]=p.type;if(p.default){if(p.default.k!=='literal'||typeOf(p.default.value)!==p.type)fault('NOE426',p,'bad query default');defaults[p.name]=p.default.value}}
       // Fully validate references and types without executing any query.
@@ -139,6 +140,7 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
       const groups=stmt.group||[],grouping=groups.length>0||stmt.columns.some(p=>typeof p==='object')
       if(grouping&&stmt.columns.includes('*'))fault('NOE233',stmt,'cannot group *')
       const names=new Set(),projections=[],resultTypes={}
+      const readColumn=name=>name.includes('.')?quotePath(name):joined?base+'.'+quote(name):quote(name)
       for(const p of stmt.columns){
         if(p==='*'){projections.push(joined?base+'.*':'*');continue}
         const out=typeof p==='string'?p:p.alias
@@ -147,14 +149,14 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
         if(typeof p==='string'){
           if(!Object.hasOwn(columns,p))fault('NOE430',stmt,'unknown projection '+p)
           if(grouping&&!groups.includes(p))fault('NOE235',stmt,'projection must be grouped: '+p)
-          projections.push(quotePath(p)+(p.includes('.')?' AS '+quote(p):''))
+          projections.push(readColumn(p)+(p.includes('.')?' AS '+quoteOutput(p):''))
           resultTypes[out]=columns[p]
         }else{
           if(p.arg!==null&&p.arg!=='*'&&!Object.hasOwn(columns,p.arg))fault('NOE402',p,'unknown aggregate column')
           if(p.fn==='sum'&&nativeType(columns[p.arg])!=='int')fault('NOE236',p,'sum requires int')
           const fn=({count:'COUNT',sum:'SUM',min:'MIN',max:'MAX'})[p.fn]
           if(!fn)fault('NOE030',p,'unsupported aggregate')
-          projections.push(fn+'('+(p.arg===null||p.arg==='*'?'*':quotePath(p.arg))+') AS '+quote(out))
+          projections.push(fn+'('+(p.arg===null||p.arg==='*'?'*':readColumn(p.arg))+') AS '+quoteOutput(out))
         }
       }
       let sql='SELECT '+projections.join(', ')+' FROM '+base
@@ -166,7 +168,7 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
       if(stmt.sort){
         if(grouping&&!names.has(stmt.sort))fault('NOE237',stmt,'group sort must use output column or alias')
         if(!grouping&&!Object.hasOwn(columns,stmt.sort))fault('NOE431',stmt,'unknown sort column')
-        const sort=grouping?quote(stmt.sort):stmt.sort.includes('.')?quotePath(stmt.sort):joined?base+'.'+quote(stmt.sort):quote(stmt.sort)
+        const sort=grouping?quoteOutput(stmt.sort):stmt.sort.includes('.')?quotePath(stmt.sort):joined?base+'.'+quote(stmt.sort):quote(stmt.sort)
         sql+=' ORDER BY ('+sort+' IS NULL), '+sort
         if(!grouping){
           const key=table.fields.find(f=>f.flags.includes('key')).name
@@ -201,7 +203,7 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
     fault('NOE437',stmt,`unsupported statement ${stmt.k}`)
   }
   function namedQuery(name,inputs={}) {
-    const definition=named[name];if(!definition)fault('NOE438',null,`unknown query ${name}`)
+    const definition=named[name];if(!Object.hasOwn(named,name))fault('NOE438',null,`unknown query ${name}`)
     for(const k of Object.keys(inputs))if(!Object.hasOwn(definition.types,k))fault('NOE439',null,`unknown query argument ${k}`)
     const params={...definition.defaults,...inputs}
     for(const [k,type] of Object.entries(definition.types))if(!Object.hasOwn(params,k)||typeOf(params[k])!==type)fault('NOE440',null,`missing/invalid query argument ${k}`)
