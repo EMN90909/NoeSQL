@@ -87,6 +87,7 @@ export function parse(source) {
   const fields = () => {
     need('{'); nl(); const out = []
     while (!is('}')) {
+      if (cur().kind === 'eof') err('NOE017', 'unterminated table declaration')
       const at = cur(), name = id(); need(':'); let type = id(), ref = null
       if (type === 'ref') ref = id()
       let nullable = eat('?'), flags = []
@@ -101,6 +102,7 @@ export function parse(source) {
   const obj = () => {
     need('{'); nl(); const entries = []
     while (!is('}')) {
+      if (cur().kind === 'eof') err('NOE017', 'unterminated object')
       const at=cur(), field=id(); need(':'); const value=expr(); entries.push({field,value,at})
       if (eat(',')) { nl(); continue }
       if (!is('}')) boundary()
