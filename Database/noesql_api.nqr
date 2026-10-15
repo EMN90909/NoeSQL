@@ -1,0 +1,26 @@
+module noqeri.database.noesql.api
+import "noesql_ir.nqr"
+import "noesql_auth.nqr"
+import "noesql_limits.nqr"
+
+// Compiler/runtime contract v1. The caller MUST authenticate principal at
+// trusted host boundary. No raw query text, SQL interpolation, or unchecked
+// index reaches executor. This is a validation boundary, not a DB driver.
+record NoeQueryContext {
+    abiVersion: u32
+    schemaVersion: u32
+    tenant: u64
+    principal: NoePrincipal
+    budget: NoeBudget
+    maxReturnedRows: usize
+}
+export function noeApiVersion(): u32 { return 1 as u32 }
+export function noeApiValidate(ctx: *NoeQueryContext, plan: *NoeIrPlan, columns: []NoeColumn, bytes: []u8, projections: []usize): isize {
+    if ctx == null || plan == null { return -80 as isize }
+    if ctx.abiVersion != noeApiVersion() { return -81 as isize }
+    if ctx.tenant == 0 as u64 || ctx.schemaVersion == 0 as u32 { return -82 as isize }
+    if !noeOperationPermit(&ctx.principal, plan.operation, ctx.tenant) { return -83 as isize }
+    if ctx.maxReturnedRows == 0 as usize || ctx.maxReturnedRows > 1048576 as usize { return -84 as isize }
+    if ctx.budget.cancelled || ctx.budget.maxRows == 0 as usize || ctx.budget.maxSteps == 0 as u64 { return -85 as isize }
+    return noeIrVerify(plan, columns, ctx.schemaVersion, bytes, projections)
+}
