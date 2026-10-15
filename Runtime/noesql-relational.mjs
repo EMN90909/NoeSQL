@@ -41,14 +41,38 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
   }
   for(const limit of [s.skip,s.take])if(limit&&infer(limit,{},types)!=='int')fail('NOE124',limit.at,'skip/take must be integer constants or parameters')
   if(validateOnly)return
+  // Equality joins use an ephemeral hash index instead of quadratic scans.
+  // The index is query-local, so it cannot become stale across transactions.
+  let hash=null,joinKey=null
+  if(other && s.join.on?.k==='binary' && s.join.on.op==='==' &&
+     s.join.on.left.k==='column' && s.join.on.right.k==='column'){
+    const baseName=name=>name.startsWith(s.table+'.')?name.slice(s.table.length+1):!name.includes('.')?name:null
+    const rightName=name=>name.startsWith(s.join.table+'.')?name.slice(s.join.table.length+1):null
+    const left=s.join.on.left.name,right=s.join.on.right.name
+    if(baseName(left)&&rightName(right))joinKey=[baseName(left),rightName(right)]
+    else if(baseName(right)&&rightName(left))joinKey=[baseName(right),rightName(left)]
+    if(joinKey){
+      hash=new Map()
+      for(const row of other.rows){
+        const v=row[joinKey[1]]
+        if(v===null)continue
+        const key=JSON.stringify([typeof v,v])
+        const bucket=hash.get(key)
+        if(bucket)bucket.push(row)
+        else hash.set(key,[row])
+      }
+    }
+  }
   const rows=[]
   let pairs=0
   for(const source of base.rows){
     const baseRow={...source}
     for(const [k,v] of Object.entries(source))baseRow[s.table+'.'+k]=v
     if(other){
-      for(const target of other.rows){
-        if(++pairs>MAX_PAIRS)fail('NOE238',s.at,'join exceeds one million candidate pairs')
+      const leftValue=joinKey?source[joinKey[0]]:null
+      const candidates=joinKey?(leftValue===null?[]:(hash.get(JSON.stringify([typeof leftValue,leftValue]))||[])):other.rows
+      for(const target of candidates){
+        if(++pairs>MAX_PAIRS)fail('NOE238',s.at,'join exceeds one million evaluated row pairs')
         const joined={...baseRow}
         for(const [k,v] of Object.entries(target))joined[s.join.table+'.'+k]=v
         if(value(s.join.on,joined,params)!==true)continue
