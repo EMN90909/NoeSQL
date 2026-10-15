@@ -7,6 +7,7 @@ const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/
 const at = { line: 1, col: 1 }
 function fault(code, node, msg) { throw new NoeError(code, node?.at || at, msg) }
 function quote(name) { if (!IDENT.test(name) || ['constructor','prototype','__proto__'].includes(name)) fault('NOE400',null,`invalid SQL identifier ${name}`); return `"${name}"` }
+const quotePath = name => name.split('.').map(quote).join('.')
 const typeOf = value => value===null ? 'null' : typeof value==='boolean' ? 'bool' : Number.isSafeInteger(value) ? 'int' : typeof value==='string' ? 'text' : 'invalid'
 const nativeType = x => x.type==='ref' ? 'int' : x.type
 function fieldMap(table) { return Object.fromEntries(table.fields.map(f=>[f.name,f])) }
@@ -29,7 +30,7 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
   if(!['sqlite','postgres'].includes(dialect))throw Error(`unsupported SQL dialect ${dialect}`)
   const tables=Object.assign(Object.create(null),existing), named=Object.create(null)
   function compileExpression(node,ctx) {
-    if(node.k==='column')return quote(node.name)
+    if(node.k==='column')return ctx.baseTable && !node.name.includes('.') ? quote(ctx.baseTable)+'.'+quote(node.name) : quotePath(node.name)
     if(node.k==='literal'||node.k==='param') {
       const value=node.k==='literal'?node.value:ctx.params[node.name]
       if(node.k==='param'&&!Object.hasOwn(ctx.params,node.name))fault('NOE407',node,`missing binding $${node.name}`)
@@ -80,6 +81,27 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
       tables[stmt.name]={fields:stmt.fields}
       return {kind:'table',sql,values:[]}
     }
+    if(stmt.k==='alter') {
+      const table=tableFor(stmt)
+      if(!stmt.fields.length)fault('NOE240',stmt,'alter requires columns')
+      const original=fieldMap(table),seen=new Set(),plans=[]
+      for(const f of stmt.fields){
+        if(Object.hasOwn(original,f.name)||seen.has(f.name))fault('NOE241',f,'duplicate migration field '+f.name)
+        seen.add(f.name)
+        if(!['int','bool','text'].includes(f.type)||f.flags.some(flag=>['key','auto','unique'].includes(flag)))
+          fault('NOE242',f,'alter add supports simple non-key, non-unique scalar fields')
+        let spec=quote(f.name)+' '+(f.type==='text'?'TEXT':f.type==='bool'?'BOOLEAN':'BIGINT')
+        if(f.flags.includes('required'))spec+=' NOT NULL'
+        if(f.default){
+          if(f.default.k!=='literal'||typeOf(f.default.value)!==f.type)fault('NOE243',f,'migration default type mismatch')
+          const v=f.default.value
+          spec+=' DEFAULT '+(typeof v==='string'?"'"+v.replaceAll("'","''")+"'":typeof v==='boolean'?(v?'TRUE':'FALSE'):v)
+        }else if(f.flags.includes('required'))fault('NOE244',f,'required migration field needs default')
+        plans.push({kind:'alter-column',sql:'ALTER TABLE '+quote(stmt.table)+' ADD COLUMN '+spec,values:[]})
+      }
+      tables[stmt.table]={fields:[...table.fields,...stmt.fields]}
+      return {kind:'atomic',statements:plans}
+    }
     if(stmt.k==='index') {
       const table=tableFor(stmt), map=fieldMap(table)
       if(!stmt.columns.length||stmt.columns.length>16||new Set(stmt.columns).size!==stmt.columns.length)fault('NOE421',stmt,'invalid index definition')
@@ -103,17 +125,68 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
       return {kind:'add',table:stmt.table,sql:`INSERT INTO ${quote(stmt.table)} (${names.join(', ')}) VALUES (${expressions.join(', ')}) RETURNING *`,values:ctx.values}
     }
     if(stmt.k==='get') {
-      for(const c of stmt.columns)if(c!=='*'&&!fields[c])fault('NOE430',stmt,`unknown projection ${c}`)
-      let sql=`SELECT ${stmt.columns.map(x=>x==='*'?'*':quote(x)).join(', ')} FROM ${quote(stmt.table)}`
-      if(stmt.where){expect(stmt.where,fields,parameterTypes,'bool');sql+=' WHERE '+compileExpression(stmt.where,ctx)}
-      if(stmt.sort){
-        if(!fields[stmt.sort])fault('NOE431',stmt,`unknown sort column ${stmt.sort}`)
-        const pk=table.fields.find(f=>f.flags.includes('key')).name
-        sql+=' ORDER BY ('+quote(stmt.sort)+' IS NULL), '+quote(stmt.sort)
-        if(stmt.sort!==pk)sql+=', '+quote(pk)
+      const base=quote(stmt.table)
+      const columns={...fields}
+      for(const [n,f] of Object.entries(fields))columns[stmt.table+'.'+n]=f
+      let joined=null
+      if(stmt.join){
+        if(stmt.join.table===stmt.table)fault('NOE230',stmt.join,'self join needs aliases')
+        joined=tableFor({table:stmt.join.table,at:stmt.join.at})
+        for(const f of joined.fields)columns[stmt.join.table+'.'+f.name]=f
+        ctx.baseTable=stmt.table
+        expect(stmt.join.on,columns,parameterTypes,'bool')
       }
-      if(stmt.skip||stmt.take){if(stmt.take){expect(stmt.take,{},parameterTypes,'int');sql+=' LIMIT '+compileExpression(stmt.take,ctx)}else sql+=dialect==='sqlite'?' LIMIT -1':' LIMIT ALL';if(stmt.skip){expect(stmt.skip,{},parameterTypes,'int');sql+=' OFFSET '+compileExpression(stmt.skip,ctx)}}
-      return {kind:'get',table:stmt.table,sql,values:ctx.values}
+      const groups=stmt.group||[],grouping=groups.length>0||stmt.columns.some(p=>typeof p==='object')
+      if(grouping&&stmt.columns.includes('*'))fault('NOE233',stmt,'cannot group *')
+      const names=new Set(),projections=[],resultTypes={}
+      for(const p of stmt.columns){
+        if(p==='*'){projections.push(joined?base+'.*':'*');continue}
+        const out=typeof p==='string'?p:p.alias
+        if(names.has(out))fault('NOE234',stmt,'duplicate output '+out)
+        names.add(out)
+        if(typeof p==='string'){
+          if(!Object.hasOwn(columns,p))fault('NOE430',stmt,'unknown projection '+p)
+          if(grouping&&!groups.includes(p))fault('NOE235',stmt,'projection must be grouped: '+p)
+          projections.push(quotePath(p)+(p.includes('.')?' AS '+quote(p):''))
+          resultTypes[out]=columns[p]
+        }else{
+          if(p.arg!==null&&p.arg!=='*'&&!Object.hasOwn(columns,p.arg))fault('NOE402',p,'unknown aggregate column')
+          if(p.fn==='sum'&&nativeType(columns[p.arg])!=='int')fault('NOE236',p,'sum requires int')
+          const fn=({count:'COUNT',sum:'SUM',min:'MIN',max:'MAX'})[p.fn]
+          if(!fn)fault('NOE030',p,'unsupported aggregate')
+          projections.push(fn+'('+(p.arg===null||p.arg==='*'?'*':quotePath(p.arg))+') AS '+quote(out))
+        }
+      }
+      let sql='SELECT '+projections.join(', ')+' FROM '+base
+      if(joined)sql+=' INNER JOIN '+quote(stmt.join.table)+' ON '+compileExpression(stmt.join.on,ctx)
+      if(stmt.where){expect(stmt.where,columns,parameterTypes,'bool');sql+=' WHERE '+compileExpression(stmt.where,ctx)}
+      for(const g of groups)if(!Object.hasOwn(columns,g))fault('NOE402',stmt,'unknown group '+g)
+      if(new Set(groups).size!==groups.length)fault('NOE232',stmt,'duplicate group')
+      if(groups.length)sql+=' GROUP BY '+groups.map(g=>g.includes('.')?quotePath(g):joined?base+'.'+quote(g):quote(g)).join(', ')
+      if(stmt.sort){
+        if(grouping&&!names.has(stmt.sort))fault('NOE237',stmt,'group sort must use output column or alias')
+        if(!grouping&&!Object.hasOwn(columns,stmt.sort))fault('NOE431',stmt,'unknown sort column')
+        const sort=grouping?quote(stmt.sort):stmt.sort.includes('.')?quotePath(stmt.sort):joined?base+'.'+quote(stmt.sort):quote(stmt.sort)
+        sql+=' ORDER BY ('+sort+' IS NULL), '+sort
+        if(!grouping){
+          const key=table.fields.find(f=>f.flags.includes('key')).name
+          if(stmt.sort!==key)sql+=', '+base+'.'+quote(key)
+          if(joined){
+            const otherKey=joined.fields.find(f=>f.flags.includes('key')).name
+            sql+=', '+quote(stmt.join.table)+'.'+quote(otherKey)
+          }
+        }
+      }
+      if(stmt.take||stmt.skip){
+        for(const limit of [stmt.take,stmt.skip])if(limit){
+          expect(limit,{},parameterTypes,'int')
+          const v=limit.k==='literal'?limit.value:limit.k==='param'?parameters[limit.name]:undefined
+          if(!Number.isSafeInteger(v)||v<0)fault('NOE206',limit,'skip/take must be nonnegative safe integers')
+        }
+        sql+=' LIMIT '+(stmt.take?compileExpression(stmt.take,ctx):dialect==='sqlite'?'-1':'ALL')
+        if(stmt.skip)sql+=' OFFSET '+compileExpression(stmt.skip,ctx)
+      }
+      return {kind:'get',table:stmt.table,sql,values:ctx.values,columnTypes:resultTypes}
     }
     if(stmt.k==='set'||stmt.k==='delete') {
       if(!stmt.where)fault('NOE432',stmt,'write requires a where predicate')
@@ -151,7 +224,7 @@ export function createSqliteAdapter(databaseFile=':memory:') {
       if(!plan.sql)return plan
       const statement=db.prepare(plan.sql)
       if(plan.kind==='get'||plan.kind==='add') {
-        const columnTypes=fieldMap(compiler.tables[plan.table])
+        const columnTypes={...fieldMap(compiler.tables[plan.table]),...(plan.columnTypes||{})}
         const rows=statement.all(...plan.values).map(x=>Object.fromEntries(Object.entries(x).map(([k,v])=> {
           if(typeof v==='bigint') {if(v>BigInt(Number.MAX_SAFE_INTEGER)||v<BigInt(Number.MIN_SAFE_INTEGER))throw Error('NOE441: SQLite integer exceeds safe NoeSQL range');v=Number(v)}
           if(columnTypes[k]?.type==='bool'&&v!==null)v=Boolean(v)
