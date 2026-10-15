@@ -1,0 +1,16 @@
+{
+  "name": "noesql",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "description": "Experimental NoeSQL language reference and unverified Noqeri-native engine",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:reference": "node --test",
+    "smoke": "node Runtime/noesql-cli.mjs",
+    "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed"
+  }
+}
