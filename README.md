@@ -63,6 +63,8 @@ Requires Node.js 22 or newer (SQLite tests use `node:sqlite`). Run from the repo
 node --test tests/noesql-*.test.mjs
 ```
 
+The acceptance suite `tests/noesql-acceptance.test.mjs` exercises persisted create/insert/read/update/delete, failed multi-statement rollback, and real POSIX subprocess `SIGKILL` at the reference store's critical commit/checkpoint hooks. These are process-crash tests, **not** power-loss or hardware-failure certification. A killed writer leaves its lock file behind by design; inspect the owner/state before manually removing a stale lock.
+
 Reference CLI:
 
 ```sh
