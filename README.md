@@ -4,6 +4,14 @@ NoeSQL is an experimental, beginner-friendly database language and a developing 
 
 > **Development snapshot — NOT production ready.** The JavaScript reference parser/storage and optional SQLite/PostgreSQL adapters are experimental. The Noqeri-native `.nqr` lexer/IR/executor/WAL/security modules have **not** been compiled and integrated with a verified Noqeri bootstrap compiler. Do not store important production data in the reference `.nqd` format.
 
+## Engine architecture: Noqeri + C++ + JavaScript
+
+- **Noqeri (`Database/*.nqr`)** is intended to own the parser, IR verification, execution semantics, and future native storage/WAL implementation. Follow the compiler and language conventions in [the Noqeri repository](https://github.com/EMN90909/Noqeri).
+- **C++17 (`Native/cpp/`)** provides a small versioned C ABI bridge for a compiled Noqeri engine. It checks ABI compatibility and buffer bounds; it must not become a second SQL/database implementation.
+- **JavaScript (`Runtime/noesql-reference.mjs`)** remains the reference oracle for semantic tests and future differential testing against the native engine.
+
+The ABI bridge and local fake-callback test are now present. The compiled Noqeri export, linker integration, and native CLI dispatch are **not yet connected or verified**. See [the integration plan](Doc/NOQERI_CPP_INTEGRATION.md). Run the C++ bridge test locally with `make -C Native/cpp test`; it verifies the bridge contract only, not the native database engine.
+
 ## Language example
 
 ```noe
@@ -49,11 +57,12 @@ The benchmark runs an in-memory reference/SQLite parity workload and prints meas
 ## Layout
 
 - `Database/*.nqr`: native Noqeri source, unverified until compiled.
+- `Native/cpp/`: C++17 ABI bridge and local contract test.
 - `Runtime/*.mjs`: experimental JavaScript reference implementation and optional adapters.
 - `Grammar/`: language grammar.
 - `tests/`: reference tests, fixtures and pending native fixtures.
 - `Benchmarks/`: native benchmark *source*; no measured performance claims.
-- `Doc/`: compatibility details, threat model, remaining production-readiness gates.
+- `Doc/`: compatibility details, threat model, integration plan, and remaining production-readiness gates.
 
 ## Run reference tests
 
@@ -81,4 +90,4 @@ This source is synced from [Noqeri PR #12](https://github.com/EMN90909/Noqeri/pu
 
 ## Release blockers
 
-Native bootstrap and compiler tests; AST-to-NoeIR integration; native durable page storage and WAL recovery; enforceable authentication/authorization; real transaction isolation and crash tests; physical indexes, joins and query planner; cross-platform security, fuzz and performance testing. See `Doc/NOESQL_IMPLEMENTATION_STATUS.md` and `Doc/NOESQL_SECURITY_GATES.md`.
+Native bootstrap and compiler tests; AST-to-NoeIR integration; the C++ ABI export/link path; native durable page storage and WAL recovery; enforceable authentication/authorization; real transaction isolation and crash tests; physical indexes, joins and query planner; cross-platform security, fuzz and performance testing. See `Doc/NOESQL_IMPLEMENTATION_STATUS.md` and `Doc/NOESQL_SECURITY_GATES.md`.
