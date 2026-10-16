@@ -3,13 +3,14 @@
   "version": "0.1.0-dev",
   "private": true,
   "type": "module",
-  "description": "Experimental NoeSQL language reference and unverified Noqeri-native engine",
+  "description": "Experimental NoeSQL reference runtime with a Noqeri-native engine and C++ ABI bridge in development",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "test": "node --test",
     "test:reference": "node --test",
+    "test:cpp-bridge": "make -C Native/cpp test",
     "smoke": "node Runtime/noesql-cli.mjs",
     "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed",
     "benchmark:reference": "node Benchmarks/reference-relational.mjs 250"
