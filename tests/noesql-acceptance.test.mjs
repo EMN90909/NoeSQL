@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import { strict as assert } from 'node:assert'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -44,6 +44,17 @@ test('acceptance: failed multi-statement transaction preserves prior committed s
   }`))
   assert.deepEqual((await readNqd(path)), before)
   assert.deepEqual((await readNqd(path)).tables.users.rows, [{id:1,name:'Committed',age:30}])
+}))
+
+
+test('acceptance: failed pre-rename checkpoint removes orphan temporary snapshot', () => fixture(async (path, dir) => {
+  await runNqd(path, schema + '\\nusers add {name:"Before", age:10}')
+  await assert.rejects(runNqd(path, 'users add {name:"During", age:11}', {}, {
+    inject: phase => { if (phase === 'afterSnapshotSync') throw Error('injected checkpoint failure') }
+  }), /injected checkpoint failure/)
+  assert.deepEqual((await readdir(dir)).filter(name => name.endsWith('.tmp')), [])
+  // The durable WAL remains authoritative after checkpoint failure.
+  assert.deepEqual((await readNqd(path)).tables.users.rows.map(row => row.name), ['Before','During'])
 }))
 
 const phases = [
