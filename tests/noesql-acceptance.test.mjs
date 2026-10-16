@@ -36,7 +36,7 @@ test('acceptance: create, insert, read, update, delete and persist across reopen
 }))
 
 test('acceptance: failed multi-statement transaction preserves prior committed state', () => fixture(async path => {
-  await runNqd(path, schema + '\\nusers add {name:"Committed", age:30}')
+  await runNqd(path, schema + '\nusers add {name:"Committed", age:30}')
   const before = await readNqd(path)
   await assert.rejects(runNqd(path, `atomic {
     users add {name:"Temporary", age:31}
@@ -48,7 +48,7 @@ test('acceptance: failed multi-statement transaction preserves prior committed s
 
 
 test('acceptance: failed pre-rename checkpoint removes orphan temporary snapshot', () => fixture(async (path, dir) => {
-  await runNqd(path, schema + '\\nusers add {name:"Before", age:10}')
+  await runNqd(path, schema + '\nusers add {name:"Before", age:10}')
   await assert.rejects(runNqd(path, 'users add {name:"During", age:11}', {}, {
     inject: phase => { if (phase === 'afterSnapshotSync') throw Error('injected checkpoint failure') }
   }), /injected checkpoint failure/)
@@ -71,7 +71,7 @@ const phases = [
 
 for (const [phase, expectedCommit] of phases) {
   test(`acceptance: SIGKILL at ${phase} recovers a consistent database`, { skip: process.platform === 'win32' }, () => fixture(async (path, dir) => {
-    await runNqd(path, schema + '\\nusers add {name:"Before", age:10}')
+    await runNqd(path, schema + '\nusers add {name:"Before", age:10}')
     const moduleUrl = new URL('../Runtime/noesql-store.mjs', import.meta.url).href
     const childScript = `
       import { runNqd } from ${JSON.stringify(moduleUrl)};
