@@ -78,15 +78,26 @@ async function syncDirectory(path) {
 async function persistNqd(path, state, inject=async()=>{}) {
   const content=serialize(state)
   const temp=resolve(dirname(path),`.noesql-${randomUUID()}.tmp`)
-  let file
+  let file, renamed=false
   try {
     file=await open(temp,'wx',0o600)
     await file.writeFile(content)
     await file.sync()
     await inject('afterSnapshotSync')
-  } finally {await file?.close()}
-  try {await rename(temp,path);await inject('afterSnapshotRename');await syncDirectory(path);await inject('afterDirectorySync')}
-  catch(e){try{await unlink(temp)}catch{}throw e}
+    await file.close()
+    file=null
+    await rename(temp,path)
+    renamed=true
+    await inject('afterSnapshotRename')
+    await syncDirectory(path)
+    await inject('afterDirectorySync')
+  } catch(e) {
+    try { await file?.close() } catch {}
+    // Before rename the temporary snapshot is never authoritative. Remove it
+    // on ordinary errors so a failed checkpoint does not leak orphan files.
+    if(!renamed) try { await unlink(temp) } catch {}
+    throw e
+  }
 }
 async function walAppend(path, state, inject) {
   const tx=newWalTransaction(Buffer.from(serialize(state)))
