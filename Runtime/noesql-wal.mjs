@@ -3,10 +3,11 @@
 import { createHash, randomBytes } from 'node:crypto'
 const MAGIC = Buffer.from('NWAL')
 const VERSION = 1, HEADER = 56, MAX_IMAGE = 16 * 1024 * 1024
+const MAX_TXID = (1n << 64n) - 1n
 const digest = bytes => createHash('sha256').update(bytes).digest()
 export const WAL_TYPES = Object.freeze({ BEGIN: 1, IMAGE: 2, COMMIT: 3 })
 export function walFrame(type, txid, seq, payload = Buffer.alloc(0)) {
-  if (![1,2,3].includes(type) || typeof txid !== 'bigint' || txid <= 0n || !Number.isSafeInteger(seq) || seq < 0 || payload.length > MAX_IMAGE) throw Error('NOE-WAL: invalid frame')
+  if (![1,2,3].includes(type) || typeof txid !== 'bigint' || txid <= 0n || txid > MAX_TXID || !Number.isInteger(seq) || seq < 0 || seq > 0xffffffff || !Buffer.isBuffer(payload) || payload.length > MAX_IMAGE) throw Error('NOE-WAL: invalid frame')
   const header = Buffer.alloc(HEADER)
   MAGIC.copy(header)
   header.writeUInt16LE(VERSION, 4)
@@ -20,6 +21,7 @@ export function walFrame(type, txid, seq, payload = Buffer.alloc(0)) {
   return Buffer.concat([header,payload])
 }
 export function newWalTransaction(image, txid = randomBytes(8).readBigUInt64LE() || 1n) {
+  if (!Buffer.isBuffer(image) && !(image instanceof Uint8Array)) throw Error('NOE-WAL: image must be bytes')
   const bytes = Buffer.isBuffer(image) ? image : Buffer.from(image)
   if (bytes.length < 1 || bytes.length > MAX_IMAGE) throw Error('NOE-WAL: image out of bounds')
   const frames = [
@@ -32,6 +34,7 @@ export function newWalTransaction(image, txid = randomBytes(8).readBigUInt64LE()
 // Strict scanner: complete corrupt frames always fail; an incomplete suffix can
 // be uncommitted and is not considered durable. Committed records are never skipped.
 export function replayWal(buffer) {
+  if (!Buffer.isBuffer(buffer) && !(buffer instanceof Uint8Array)) throw Error('NOE-WAL: input must be bytes')
   if (!Buffer.isBuffer(buffer)) buffer = Buffer.from(buffer)
   if (buffer.length > MAX_IMAGE + HEADER * 3 + 64) throw Error('NOE-WAL: file too large')
   let at=0, txid=0n, image=null, expectedSeq=0, stage=0, committed=null, incomplete=false
