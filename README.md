@@ -91,3 +91,12 @@ This source is synced from [Noqeri PR #12](https://github.com/EMN90909/Noqeri/pu
 ## Release blockers
 
 Native bootstrap and compiler tests; AST-to-NoeIR integration; the C++ ABI export/link path; native durable page storage and WAL recovery; enforceable authentication/authorization; real transaction isolation and crash tests; physical indexes, joins and query planner; cross-platform security, fuzz and performance testing. See `Doc/NOESQL_IMPLEMENTATION_STATUS.md` and `Doc/NOESQL_SECURITY_GATES.md`.
+
+
+## Cross-repository integration update (October 17, 2026)
+
+Noqeri main now includes experimental NoeSQL native source modules, JavaScript reference runtime, WAL helpers, adapter files, and tests imported from PRs #11 and #12, without replacing more recent compiler/bootstrap implementations. The Noqeri Stage-2 CLI exposes `noqeri noe` as a reference runner; this **does not** imply native Noqeri code has been built or executed.
+
+This repository's WAL frame functions now reject transaction IDs outside the unsigned 64-bit range, sequences outside the unsigned 32-bit range, and non-binary payloads rather than coercing arbitrary strings. Corresponding regression cases are in `tests/noesql-wal-validation.test.mjs`.
+
+Run `npm test` and `make -C Native/cpp test` from a clean checkout, then compare results with Noqeri's embedded reference runtime. A full test run was not possible on the available worker due to GitHub DNS resolution failure. These are **experimental reference components, not a production database**.
