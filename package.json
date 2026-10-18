@@ -4,7 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Experimental NoeSQL native engine and readable SQLite-backed embedded/web runtime",
-  "engines": {"node": ">=22.13.0"},
+  "engines": {
+    "node": ">=22.13.0"
+  },
   "scripts": {
     "test": "node --test",
     "test:reference": "node --test",
@@ -17,6 +19,9 @@
     "benchmark:native": "make -C Native/cpp benchmark",
     "benchmark:sqlite": "make -C Native/cpp benchmark-compare",
     "benchmark:embedded": "node Benchmarks/embedded-vs-sqlite.mjs 10000 3000",
-    "example:web": "node Examples/embedded-web.mjs"
+    "example:web": "node Examples/embedded-web.mjs",
+    "test:zig": "cd Native/zig && zig build test",
+    "build:zig": "cd Native/zig && zig build -Doptimize=ReleaseSafe",
+    "qualify:zig": "node scripts/qualify-zig.mjs"
   }
 }
