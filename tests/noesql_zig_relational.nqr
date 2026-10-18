@@ -1,0 +1,68 @@
+import "../Database/noesql_zig_relational.nqr"
+
+// Compiled native smoke fixture. Caller supplies a fresh private .nqdb path.
+// This is source only until a trusted Noqeri native toolchain links it.
+export function noeZigRelationalSmoke(path: string): isize {
+    let ctx: NoeQueryContext
+    ctx.abiVersion = noeApiVersion()
+    ctx.schemaVersion = 1 as u32
+    ctx.tenant = 31 as u64
+    ctx.principal.userId = 1 as u64
+    ctx.principal.authenticated = true
+    ctx.principal.disabled = false
+    ctx.principal.scope = 31 as u64
+    ctx.principal.roles = noeRoleAdmin()
+    if !noeBudgetInit(&ctx.budget, 128 as u64, 16 as usize) { return -300 as isize }
+    ctx.maxReturnedRows = 8 as usize
+
+    let cols: [NoeColumn; 2]
+    cols[0].kind = noeTypeInt()
+    cols[0].primary = true
+    cols[0].required = true
+    cols[0].unique = true
+    cols[1].kind = noeTypeBool()
+    cols[1].primary = false
+    cols[1].required = true
+    cols[1].unique = false
+
+    let id: NoeValue
+    id.kind = noeTypeInt()
+    id.isNull = false
+    id.number = 44 as i64
+    id.textStart = 0 as usize
+    id.textLength = 0 as usize
+    let enabled: NoeValue
+    enabled.kind = noeTypeBool()
+    enabled.isNull = false
+    enabled.number = 1 as i64
+    enabled.textStart = 0 as usize
+    enabled.textLength = 0 as usize
+    let values: [NoeValue; 2]
+    values[0] = id
+    values[1] = enabled
+
+    let plan: NoeIrPlan
+    plan.operation = noePlanInsert()
+    plan.schemaVersion = 1 as u32
+    plan.predicateColumn = 0 as usize
+    plan.predicateOperator = noePredicateNone()
+    plan.predicateValue = id
+    plan.mutationColumn = 1 as usize
+    plan.mutationValue = enabled
+    let projections: [usize; 2] = [0 as usize,1 as usize]
+    let result: NoeExecutionResult
+    let output: [NoeValue; 4]
+    let status: isize = noeZigSingleRowExecute(path,3 as u32,&ctx,&plan,slice(cols),slice(values),slice(projections),slice(output),&result)
+    if status != 0 as isize || result.affected != 1 as usize { return -301 as isize }
+
+    plan.operation = noePlanGet()
+    plan.predicateOperator = noePredicateEqual()
+    status = noeZigSingleRowExecute(path,3 as u32,&ctx,&plan,slice(cols),slice(values),slice(projections),slice(output),&result)
+    if status != 0 as isize || result.returned != 1 as usize { return -302 as isize }
+    if output[0].number != 44 as i64 || output[1].number != 1 as i64 { return -303 as isize }
+
+    ctx.principal.authenticated = false
+    status = noeZigSingleRowExecute(path,3 as u32,&ctx,&plan,slice(cols),slice(values),slice(projections),slice(output),&result)
+    if status != -83 as isize { return -304 as isize }
+    return 0 as isize
+}
