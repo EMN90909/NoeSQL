@@ -18,4 +18,11 @@ pub fn build(b: *std.Build) void {
     const tests = b.addTest(.{ .root_module = bridge });
     const step = b.step("test", "Exercise the versioned Zig/Noqeri ABI bridge");
     step.dependOn(&b.addRunArtifact(tests).step);
+    const pages = b.createModule(.{
+        .root_source_file = b.path("src/page_verify.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const page_tests = b.addTest(.{ .root_module = pages });
+    step.dependOn(&b.addRunArtifact(page_tests).step);
 }
