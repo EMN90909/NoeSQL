@@ -163,3 +163,11 @@ The Zig build now installs `libnoesql_zig_pages.a` containing `noesql_zig_page_*
 **Compiler status:** Noqeri's current portable Stage-2 CLI can check source but has not produced a verified, linkable native relational executor targeting the Zig pager. NoeSQL retains explicit experimental adapters; this 0.7.6 update does not silently switch them to the incomplete native path.
 
 See [component hardening and outstanding integration gates](Doc/NOESQL_076_COMPONENT_GATES.md).
+
+## Native executor and npm release qualification (follow-up)
+
+`npm run qualify:native-e2e` now requires a **genuine pinned native Noqeri-produced binary** with a Noqeri compiler Stage-2 proof, and runs a durable Zig-backed .nqd CRUD/restart oracle comparison. The runner **fails** with the current unverified Noqeri compiler; a JavaScript reference CLI is explicitly rejected as the native binary. Its documented protocol includes `identity --json`, `run`, `query`, `verify` and `checkpoint`. No native runtime implementing that full protocol has been built or verified in this release.
+
+`npm run test:npm-pack` tests a **locally packed tarball** by installing it into a fresh offline project and executing the current SQLite-backed NoeSQL API. This is distinct from testing a real npm registry release. NoeSQL remains `private:true`, no verified npm publication credentials are connected, and a production-compatible license file must be selected by the repository owner before releasing sources publicly. `npm run qualify:zig` rejects caller-selected fake conformance commands and retains fail-closed durability and cross-platform gates.
+
+See `Doc/NOESQL_NATIVE_NPM_PUBLICATION_GATE.md`.
