@@ -214,7 +214,8 @@ export function createSqlCompiler(dialect='sqlite',existing={}) {
 
 // SQLite and PostgreSQL are optional compatibility targets; NoeSQL .nqd
 // uses its own reference/native storage and has no dependency on either engine.
-export function createSqliteAdapter(databaseFile=':memory:') {
+export function createSqliteAdapter(databaseFile=':memory:', {afterSuccessfulRun=null}={}) {
+  if(afterSuccessfulRun!==null && typeof afterSuccessfulRun!=='function') throw Error('afterSuccessfulRun must be a function')
   return import('node:sqlite').then(({DatabaseSync})=> {
     const db=new DatabaseSync(databaseFile)
     db.exec('PRAGMA foreign_keys=ON')
@@ -242,7 +243,7 @@ export function createSqliteAdapter(databaseFile=':memory:') {
       const tableNames=new Set(Object.keys(compiler.tables)), queryNames=new Set(Object.keys(compiler.named))
       const oldTables=Object.fromEntries(Object.entries(compiler.tables).map(([name,table])=>[name,structuredClone(table)]))
       db.exec('BEGIN IMMEDIATE')
-      try {const out=code.map(x=>executePlan(compiler.compile(x,params)));db.exec('COMMIT');return out}
+      try {const out=code.map(x=>executePlan(compiler.compile(x,params)));if(afterSuccessfulRun)afterSuccessfulRun(code,db);db.exec('COMMIT');return out}
       catch(e){db.exec('ROLLBACK');for(const key of Object.keys(compiler.tables))if(!tableNames.has(key))delete compiler.tables[key];for(const [name,table] of Object.entries(oldTables))compiler.tables[name]=table;for(const key of Object.keys(compiler.named))if(!queryNames.has(key))delete compiler.named[key];throw e}
     }
     function query(name,params={}){checked();const plan=compiler.namedQuery(name,params);return executePlan(plan)}

@@ -119,3 +119,17 @@ make -C Native/cpp native-cli
 **0.7.5-rc.1 is not stable or production-ready.** The native page kernel remains a separate experimental key/value layer rather than the compiled Noqeri relational engine. This iteration gates crash-test exits to test builds, caps index verification depth, adds a production-build fault-gate test, and includes an optional on-machine SQLite WAL/FULL comparator. The native tests passed locally; PostgreSQL parity and full cross-platform correctness have not been established.
 
 See [the 0.7.5 release gates](Doc/NOESQL_075_RELEASE_GATES.md), [native SQLite benchmark methodology](Benchmarks/README-native.md), and [language usability comparison](Doc/NOESQL_SYNTAX_COMPARISON.md). No stable v0.7.5 tag is justified by these tests.
+
+
+## Embedded and website storage (0.7.5-rc.2 preview)
+
+A new optional **SQLite-backed** NoeSQL runtime is available for Node.js websites, desktop apps and server-side embedded databases. It preserves the existing readable `.noe` adapter and adds an advanced reporting dialect with JOIN (inner/left/right/full), GROUP, HAVING, typed parameters, indexed query plans and bounded results. Persistent compiler/catalog metadata survives application restart. See [the embedded/web guide](Doc/NOESQL_EMBEDDED_WEB.md).
+
+```js
+import {openNoeSQLEmbedded} from './Runtime/noesql-embedded.mjs'
+const store = await openNoeSQLEmbedded({file:'/var/lib/app/content.sqlite'})
+const rows = store.query('from users\\nselect id, name\\nwhere id == $id', {id:1})
+store.close()
+```
+
+The private HTTP example is in `Examples/embedded-web.mjs`. Never expose database service keys to browsers. To test: `npm run test:embedded`; to benchmark the language overhead against direct prepared SQLite: `npm run benchmark:embedded`. These results are **not a claim that the native NoeSQL engine matches SQLite performance**. The independent native `.nqd` page kernel is unchanged, SQLite WAL must use a persistent local disk, and neither backend has completed all production release gates. Node's `node:sqlite` API remains experimental in Node.js 22.

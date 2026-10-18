@@ -1,0 +1,11 @@
+# Never commit embedded databases, journal files, generated backups or secrets.
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+*.nqd
+*.nqd.wal
+*.nqd.lck
+*.env
+.env.*
+!*.env.example

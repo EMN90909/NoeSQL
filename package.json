@@ -1,21 +1,22 @@
 {
   "name": "noesql",
-  "version": "0.7.5-rc.1",
+  "version": "0.7.5-rc.2",
   "private": true,
   "type": "module",
-  "description": "Experimental NoeSQL reference runtime with a Noqeri-native engine and C++ ABI bridge in development",
-  "engines": {
-    "node": ">=22"
-  },
+  "description": "Experimental NoeSQL native engine and readable SQLite-backed embedded/web runtime",
+  "engines": {"node": ">=22.13.0"},
   "scripts": {
     "test": "node --test",
     "test:reference": "node --test",
     "test:cpp-bridge": "make -C Native/cpp test",
+    "test:native": "make -C Native/cpp test-native",
+    "test:embedded": "node --test tests/noesql-advanced.test.mjs tests/noesql-sqlite-durability.test.mjs tests/noesql-web.test.mjs tests/noesql-embedded-integration.test.mjs",
     "smoke": "node Runtime/noesql-cli.mjs",
     "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed",
     "benchmark:reference": "node Benchmarks/reference-relational.mjs 250",
-    "test:native": "make -C Native/cpp test-native",
     "benchmark:native": "make -C Native/cpp benchmark",
-    "benchmark:sqlite": "make -C Native/cpp benchmark-compare"
+    "benchmark:sqlite": "make -C Native/cpp benchmark-compare",
+    "benchmark:embedded": "node Benchmarks/embedded-vs-sqlite.mjs 10000 3000",
+    "example:web": "node Examples/embedded-web.mjs"
   }
 }

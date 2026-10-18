@@ -1,6 +1,6 @@
 # NoeSQL 0.7.5 release readiness
 
-Status: **0.7.5-rc.1, NOT STABLE and NOT production ready** (18 October 2026).
+Status: **0.7.5-rc.2, NOT STABLE and NOT production ready** (18 October 2026).
 
 ## Verified locally in this increment
 
@@ -41,3 +41,8 @@ npm test                              # JavaScript reference suite
 The native compiled kernel is POSIX-only and must not be used to store
 irreplaceable or customer production data. Back up any existing `.nqd` files;
 JSON reference `.nqd` and native page `.nqd` are mutually incompatible.
+
+
+## 18 October 2026: optional embedded/web backend
+
+The Node.js SQLite-backed `.sqlite` route offers physical SQLite indexes, WAL, read snapshots, and the new readable query/compiler API. This is an **interop mode**, not a completed Noqeri-native engine, and it does not resolve the independent `.nqd` kernel's full-image write amplification or the production-hardening blockers above. The new `_noesql_catalog` writes schema AST in the same transaction as schema changes, subject to full-repository compatibility tests. See `Doc/NOESQL_EMBEDDED_WEB.md`.
