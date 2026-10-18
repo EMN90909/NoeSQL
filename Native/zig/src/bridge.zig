@@ -92,7 +92,7 @@ test "Zig C ABI validates callbacks and compatible versions" {
 
 test "Zig dispatcher forwards bytes without owning database semantics" {
     const engine = EngineV1{ .abi_version = ABI_VERSION, .execute = echo };
-    const input = "Noqeri owns execution";
+    const input: []const u8 = "Noqeri owns execution";
     var output: [64]u8 = undefined;
     var written: usize = 777;
     try std.testing.expectEqual(@as(i32, 0), noesql_zig_execute(&engine, input.ptr, input.len, output[0..].ptr, output.len, &written));
