@@ -4,11 +4,14 @@ NoeSQL is an experimental, beginner-friendly database language and a developing 
 
 > **Development snapshot — NOT production ready.** The JavaScript reference parser/storage and optional SQLite/PostgreSQL adapters are experimental. The Noqeri-native `.nqr` lexer/IR/executor/WAL/security modules have **not** been compiled and integrated with a verified Noqeri bootstrap compiler. Do not store important production data in the reference `.nqd` format.
 
-## Engine architecture: Noqeri + C++ + JavaScript
+## Current architecture and the Noqeri + Zig migration
 
 - **Noqeri (`Database/*.nqr`)** is intended to own the parser, IR verification, execution semantics, and future native storage/WAL implementation. Follow the compiler and language conventions in [the Noqeri repository](https://github.com/EMN90909/Noqeri).
-- **C++17 (`Native/cpp/`)** provides a small versioned C ABI bridge for a compiled Noqeri engine. It checks ABI compatibility and buffer bounds; it must not become a second SQL/database implementation.
+- **Zig 0.15.2 (`Native/zig/`)** is the new versioned C ABI bridge for a future compiled Noqeri engine. It enforces callback, ABI and buffer bounds. The Zig bridge does **not** yet run relational NoeSQL or persist pages.
+- **C++17 (`Native/cpp/`)** remains the existing experimental native page-store and legacy bridge until byte-compatible Zig storage, recovery, auth, and fault tests are proven. The C++ kernel is not removed in this increment to avoid risking existing `.nqd` data.
 - **JavaScript (`Runtime/noesql-reference.mjs`)** remains the reference oracle for semantic tests and future differential testing against the native engine.
+
+Both the legacy C++ ABI bridge and new Zig ABI bridge have standalone fake-callback tests. Run `npm run test:zig` with Zig 0.15.2 and `npm run qualify:zig` for a fail-closed compiled-engine release gate. See [the Noqeri + Zig migration plan](Doc/NOESQL_ZIG_MIGRATION.md).
 
 The ABI bridge and local fake-callback test are now present. The compiled Noqeri export, linker integration, and native CLI dispatch are **not yet connected or verified**. See [the integration plan](Doc/NOQERI_CPP_INTEGRATION.md). Run the C++ bridge test locally with `make -C Native/cpp test`; it verifies the bridge contract only, not the native database engine.
 
@@ -57,7 +60,8 @@ The benchmark runs an in-memory reference/SQLite parity workload and prints meas
 ## Layout
 
 - `Database/*.nqr`: native Noqeri source, unverified until compiled.
-- `Native/cpp/`: C++17 ABI bridge and local contract test.
+- `Native/zig/`: Zig ABI bridge + unit tests, migration work in progress.
+- `Native/cpp/`: legacy C++17 page kernel and compatibility tests (not yet retired).
 - `Runtime/*.mjs`: experimental JavaScript reference implementation and optional adapters.
 - `Grammar/`: language grammar.
 - `tests/`: reference tests, fixtures and pending native fixtures.
@@ -90,7 +94,7 @@ This source is synced from [Noqeri PR #12](https://github.com/EMN90909/Noqeri/pu
 
 ## Release blockers
 
-Native bootstrap and compiler tests; AST-to-NoeIR integration; the C++ ABI export/link path; native durable page storage and WAL recovery; enforceable authentication/authorization; real transaction isolation and crash tests; physical indexes, joins and query planner; cross-platform security, fuzz and performance testing. See `Doc/NOESQL_IMPLEMENTATION_STATUS.md` and `Doc/NOESQL_SECURITY_GATES.md`.
+Native bootstrap and compiler tests; AST-to-NoeIR integration; the Zig ABI export/link path with compiled Noqeri; legacy C++ page-store migration; native durable page storage and WAL recovery; enforceable authentication/authorization; real transaction isolation and crash tests; physical indexes, joins and query planner; cross-platform security, fuzz and performance testing. See `Doc/NOESQL_IMPLEMENTATION_STATUS.md` and `Doc/NOESQL_SECURITY_GATES.md`.
 
 
 ## Cross-repository integration update (October 17, 2026)
