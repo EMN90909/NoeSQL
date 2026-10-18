@@ -1,0 +1,113 @@
+module noqeri.database.noesql_parser
+import "noesql_lexer.nqr"
+import "noesql_ir.nqr"
+
+// Native precedence parser for expressions in the shared .noe language.
+// The reference host handles complete statements until Stage-2 can execute
+// these Noqeri-owned parser functions and preserve the same AST contract.
+export function noeExprLiteral(): int { return 1 }
+export function noeExprName(): int { return 2 }
+export function noeExprParameter(): int { return 3 }
+export function noeExprUnary(): int { return 4 }
+export function noeExprBinary(): int { return 5 }
+export function noeExprError(): isize { return -1 as isize }
+
+export function noeTokenEquals(source: []u8, token: *NoeToken, word: []u8): bool {
+    if token == null || token.end < token.start { return false }
+    if token.end > len(source) || token.end - token.start != len(word) { return false }
+    let i: usize = 0 as usize
+    while i < len(word) {
+        if source[token.start + i] != word[i] { return false }
+        i = i + 1 as usize
+    }
+    return true
+}
+
+export function noeTokenSymbolIs(source: []u8, token: *NoeToken, a: u8, b: u8): bool {
+    if token == null || token.start >= len(source) || token.end > len(source) { return false }
+    if source[token.start] != a { return false }
+    if b == 0 as u8 { return token.end == token.start + 1 as usize }
+    return token.end == token.start + 2 as usize && source[token.start + 1 as usize] == b
+}
+
+export function noeOperatorPrecedence(source: []u8, token: *NoeToken): int {
+    if token == null { return 0 }
+    if noeTokenEquals(source, token, slice([111 as u8,114 as u8])) { return 1 }
+    if noeTokenEquals(source, token, slice([97 as u8,110 as u8,100 as u8])) { return 2 }
+    if noeTokenSymbolIs(source, token, 61 as u8, 61 as u8) ||
+       noeTokenSymbolIs(source, token, 33 as u8, 61 as u8) ||
+       noeTokenSymbolIs(source, token, 60 as u8, 0 as u8) ||
+       noeTokenSymbolIs(source, token, 62 as u8, 0 as u8) ||
+       noeTokenSymbolIs(source, token, 60 as u8, 61 as u8) ||
+       noeTokenSymbolIs(source, token, 62 as u8, 61 as u8) { return 3 }
+    if noeTokenSymbolIs(source, token, 43 as u8, 0 as u8) ||
+       noeTokenSymbolIs(source, token, 45 as u8, 0 as u8) { return 4 }
+    if noeTokenSymbolIs(source, token, 42 as u8, 0 as u8) ||
+       noeTokenSymbolIs(source, token, 47 as u8, 0 as u8) ||
+       noeTokenSymbolIs(source, token, 37 as u8, 0 as u8) { return 5 }
+    return 0
+}
+
+function noeAppendExpr(nodes: []NoeExprNode, used: *usize, tag: int, start: usize, end: usize, left: isize, right: isize, op: int): isize {
+    if used == null || used[0] >= len(nodes) { return noeExprError() }
+    let index: usize = used[0]
+    nodes[index].tag = tag
+    nodes[index].operator = op
+    nodes[index].start = start
+    nodes[index].end = end
+    nodes[index].left = left
+    nodes[index].right = right
+    nodes[index].next = -1 as isize
+    nodes[index].typeCode = noeTypeUnknown()
+    used[0] = index + 1 as usize
+    return index as isize
+}
+
+function noeParseExprLevel(source: []u8, tokens: []NoeToken, tokenCount: usize, cursor: *usize, nodes: []NoeExprNode, used: *usize, minPrec: int, depth: usize): isize {
+    if cursor == null || used == null || depth > 64 as usize || cursor[0] >= tokenCount || cursor[0] >= len(tokens) { return noeExprError() }
+    let tok: NoeToken = tokens[cursor[0]]
+    let left: isize = noeExprError()
+    if noeTokenSymbolIs(source, &tok, 40 as u8, 0 as u8) {
+        cursor[0] = cursor[0] + 1 as usize
+        left = noeParseExprLevel(source, tokens, tokenCount, cursor, nodes, used, 1, depth + 1 as usize)
+        if left < 0 as isize || cursor[0] >= tokenCount { return noeExprError() }
+        if !noeTokenSymbolIs(source, &tokens[cursor[0]], 41 as u8, 0 as u8) { return noeExprError() }
+        cursor[0] = cursor[0] + 1 as usize
+    } else if noeTokenSymbolIs(source, &tok, 36 as u8, 0 as u8) {
+        cursor[0] = cursor[0] + 1 as usize
+        if cursor[0] >= tokenCount || tokens[cursor[0]].kind != noeTokenName() { return noeExprError() }
+        left = noeAppendExpr(nodes, used, noeExprParameter(), tok.start, tokens[cursor[0]].end, -1 as isize, -1 as isize, 0)
+        cursor[0] = cursor[0] + 1 as usize
+    } else if noeTokenSymbolIs(source, &tok, 45 as u8, 0 as u8) ||
+              noeTokenEquals(source, &tok, slice([110 as u8,111 as u8,116 as u8])) {
+        cursor[0] = cursor[0] + 1 as usize
+        let unary: isize = noeParseExprLevel(source, tokens, tokenCount, cursor, nodes, used, 6, depth + 1 as usize)
+        if unary < 0 as isize { return noeExprError() }
+        left = noeAppendExpr(nodes, used, noeExprUnary(), tok.start, nodes[unary as usize].end, unary, -1 as isize, 0)
+    } else if tok.kind == noeTokenNumber() || tok.kind == noeTokenString() ||
+              noeTokenEquals(source, &tok, slice([116 as u8,114 as u8,117 as u8,101 as u8])) ||
+              noeTokenEquals(source, &tok, slice([102 as u8,97 as u8,108 as u8,115 as u8,101 as u8])) ||
+              noeTokenEquals(source, &tok, slice([110 as u8,117 as u8,108 as u8,108 as u8])) {
+        cursor[0] = cursor[0] + 1 as usize
+        left = noeAppendExpr(nodes, used, noeExprLiteral(), tok.start, tok.end, -1 as isize, -1 as isize, 0)
+    } else if tok.kind == noeTokenName() {
+        cursor[0] = cursor[0] + 1 as usize
+        left = noeAppendExpr(nodes, used, noeExprName(), tok.start, tok.end, -1 as isize, -1 as isize, 0)
+    } else { return noeExprError() }
+    if left < 0 as isize { return left }
+    while cursor[0] < tokenCount && cursor[0] < len(tokens) {
+        let opToken: NoeToken = tokens[cursor[0]]
+        let prec: int = noeOperatorPrecedence(source, &opToken)
+        if prec < minPrec || prec == 0 { break }
+        cursor[0] = cursor[0] + 1 as usize
+        let right: isize = noeParseExprLevel(source, tokens, tokenCount, cursor, nodes, used, prec + 1, depth + 1 as usize)
+        if right < 0 as isize { return noeExprError() }
+        left = noeAppendExpr(nodes, used, noeExprBinary(), nodes[left as usize].start, nodes[right as usize].end, left, right, prec)
+        if left < 0 as isize { return left }
+    }
+    return left
+}
+
+export function noeParseExpression(source: []u8, tokens: []NoeToken, tokenCount: usize, cursor: *usize, nodes: []NoeExprNode, used: *usize): isize {
+    return noeParseExprLevel(source, tokens, tokenCount, cursor, nodes, used, 1, 0 as usize)
+}

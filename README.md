@@ -146,3 +146,8 @@ Language scripts now prefer **`.nqd`** (the former `.noe` remains a CLI compatib
 Example reference-only command: `node Runtime/noesql-cli.mjs run ./scratch.nqdb tests/school.nqd`.
 
 This change begins hardening but does **not** make NoeSQL a unified native Noqeri+Zig database. Zig adds a **read-only legacy WAL verifier** alongside its legacy page verifier. C++ remains the compatibility storage kernel; JS and SQLite remain experimental adapters. Native relational integration, incremental WAL, snapshot transactions, cross-platform fault testing, and actual compiler bootstrap proof are still blockers. See [v1 remediation plan](Doc/NOESQL_V1_REMEDIATION_PLAN.md) and [security assessment](Doc/NOESQL_SECURITY_REMEDIATION_REVIEW.md).
+
+
+## Stage 2 native Zig pager (experimental)
+
+New `Native/zig/src/pager_v2.zig` adds Linux-only checksummed incremental WAL transactions, replay, checkpoint, bounded in-process snapshots, and a separate v2 C page ABI. `Native/zig/src/index_v2.zig` introduces a bounded physically persisted unique numeric index. `Database/noesql_parser.nqr` is synchronized from the current Noqeri source, while `scripts/verify-noqeri-bootstrap.mjs` validates pinned Stage-2 proof inputs. **No native Noqeri statement compiler/executor has been linked**; the old C++ and JS compatibility paths remain. Do not claim release qualification. See [Stage 2 storage and blockers](Doc/NOESQL_STAGE2_ZIG_STORAGE.md).

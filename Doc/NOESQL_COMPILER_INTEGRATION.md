@@ -13,6 +13,10 @@ Noqeri owns compiler semantics in `Compiler/selfhost/` and exposes `stage2Compil
 5. Call `noeApiValidate` before all executor operations. Route execution only through a mandatory authorized entry point.
 6. Host provider supplies atomic locks, durable journal, fsync, encryption and validated identity. A generation counter alone is not thread safe.
 
+## Stage 2 additions (not compiled into a complete relational engine)
+
+The Noqeri-owned expression parser has been synchronized to `Database/noesql_parser.nqr`, and a separate native Zig pager ABI v2 is declared in `Database/noesql_pager_abi.nqr`. `scripts/verify-noqeri-bootstrap.mjs` enforces pinned Noqeri revision/source closure and compiler artifact verification before any future integration qualifies. **There is still no Noqeri-compiled statement frontend/executor linked to the Zig page ABI.**
+
 ## Current implementation
 
 `Database/noesql_api.nqr` provides a pure, Noqeri-owned typed ABI/policy validation function. `tests/noesql_native_api.nqr` is its native conformance fixture. **Native compilation and execution are blocked without a trusted Noqeri stage-0 binary.**
