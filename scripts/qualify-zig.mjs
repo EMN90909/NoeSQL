@@ -28,15 +28,13 @@ if(executable(seed)&&/^[a-f0-9]{64}$/.test(pinned)){
   authenticatedSeed=actual===pinned
 }
 gate('trusted Noqeri compiler seed',authenticatedSeed,'NOQERI_STAGE0 path and pinned NOQERI_STAGE0_SHA256 required; matching a hash alone is not self-hosting proof')
-const raw=process.env.NOESQL_NATIVE_CONFORMANCE_JSON
-if(!raw)gate('compiled native Noqeri/Zig relational conformance',false,'NOESQL_NATIVE_CONFORMANCE_JSON command not configured')
-else{
-  try{
-    const argv=JSON.parse(raw)
-    if(!Array.isArray(argv)||argv.length===0||!argv.every(a=>typeof a==='string'&&a.length>0))throw new Error('expected non-empty JSON argv')
-    run('compiled native Noqeri/Zig relational conformance',argv[0],argv.slice(1))
-  }catch(e){gate('compiled native Noqeri/Zig relational conformance',false,e.message)}
-}
+// Never delegate release qualification to an arbitrary caller-supplied command.
+// Require the fixed in-repository native integration harness and pinned binary.
+if(process.env.NOESQL_NATIVE_BIN){
+  run('compiled native Noqeri/Zig relational conformance',process.execPath,
+    ['scripts/verify-native-e2e.mjs'])
+}else gate('compiled native Noqeri/Zig relational conformance',false,
+  'NOESQL_NATIVE_BIN, pinned SHA-256 and trusted Noqeri compiler proof are required')
 // A callback echo test and a caller-selected zero-exit command are NOT native
 // parser/executor/storage conformance. Keep this gate fail-closed until the
 // Zig pager, compiled Noqeri ABI and independently verified suites are wired.
@@ -44,8 +42,8 @@ else{
 // must pass before it can be selected as a relational production engine.
 if(process.env.NOQERI_ROOT)run('pinned Noqeri self-hosting proof',process.execPath,['scripts/verify-noqeri-bootstrap.mjs'])
 else gate('pinned Noqeri self-hosting proof',false,'NOQERI_ROOT, NOQERI_COMMIT_SHA and NOQERI_SOURCE_CLOSURE_SHA256 are required')
-gate('compiled Noqeri executor linked to Zig pager with differential results',false,
-  'BLOCKED: no trusted Noqeri-compiled native relational executor is linked and tested')
+// The fixed gate above is the only accepted native-executor proof. Other
+// independent durability and cross-platform release blockers remain fail-closed.
 gate('native cross-platform durability, recovery and security release suite',false,
   'BLOCKED: Linux-only experimental Zig v2, no crash-powercut/Windows/macOS qualification')
 run('NoeSQL JavaScript/SQLite reference tests',process.execPath,['--test'])

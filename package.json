@@ -26,7 +26,11 @@
     "verify:noqeri": "node scripts/verify-noqeri-bootstrap.mjs",
     "benchmark:zig-v2": "bash scripts/benchmark-zig-v2.sh",
     "pack:inspect": "npm pack --dry-run --json",
-    "test:component-contract": "node --test tests/noesql-076-release-contract.test.mjs"
+    "test:component-contract": "node --test tests/noesql-076-release-contract.test.mjs",
+    "qualify:native-e2e": "node scripts/verify-native-e2e.mjs",
+    "test:npm-pack": "node scripts/test-npm-package.mjs",
+    "test:native-contract": "node --test tests/noesql-native-contract.test.mjs",
+    "test:npm-contract": "node --test tests/noesql-npm-package.test.mjs"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",
