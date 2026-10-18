@@ -8,6 +8,7 @@ extern "C" {
 /* Experimental Linux-only Zig native pager ABI v2.
  * Not a SQL engine and not authenticated. Trusted callers only.
  * Treat handles as opaque and never reuse after close. */
+#define NOESQL_ZIG_PAGER_COMPONENT_VERSION "1.0.0"
 #define NOESQL_ZIG_PAGE_ABI_VERSION 2u
 #define NOESQL_ZIG_PAGE_BYTES 4096u
 #define NOESQL_ZIG_PAGE_OK 0

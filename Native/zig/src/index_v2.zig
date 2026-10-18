@@ -1,6 +1,7 @@
 const std = @import("std");
 const pager = @import("pager_v2.zig");
 
+pub const COMPONENT_VERSION = "1.0.0"; // component API, not a B+tree
 // Experimental physical integer-key index page, backed by the Zig WAL pager.
 // Single-node index with a strict capacity bound; B+tree fanout/splits, NULL
 // ordering, composite values, and SQL planning are not provided yet.
@@ -82,11 +83,19 @@ pub const Index = struct {
         if (at >= self.count or self.entries[at].key != key) return null;
         return self.entries[at].page_id;
     }
+    fn upperBound(self: *const Index, key: i64) usize {
+        var lo: usize = 0;
+        var hi = self.count;
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.entries[mid].key <= key) lo = mid + 1 else hi = mid;
+        }
+        return lo;
+    }
     pub fn range(self: *const Index, min: i64, max: i64) []const Entry {
         const first = self.lowerBound(min);
-        var last = first;
-        while (last < self.count and self.entries[last].key <= max) : (last += 1) {}
-        return self.entries[first..last];
+        if (min > max) return self.entries[first..first];
+        return self.entries[first..self.upperBound(max)];
     }
     pub fn insert(self: *Index, key: i64, page_id: u32) IndexError!void {
         if (page_id >= pager.MAX_PAGES) return error.CorruptIndex;
@@ -117,6 +126,8 @@ test "persistent index bytes support unique lookup and bounded sorted range" {
     const bytes = index.encode();
     var loaded = try Index.decode(&bytes);
     try std.testing.expectEqual(@as(usize, 2), loaded.range(-2, 5).len);
+    try std.testing.expectEqual(@as(usize, 0), loaded.range(50, -50).len);
+    try std.testing.expectEqual(@as(usize, 1), loaded.range(20, 20).len);
     try std.testing.expectEqual(@as(?u32, 2), loaded.find(20));
     try loaded.delete(20);
     try std.testing.expectEqual(@as(?u32, null), loaded.find(20));
