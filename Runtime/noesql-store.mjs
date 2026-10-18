@@ -1,5 +1,3 @@
-// Experimental NoeSQL reference store: append+sync WAL before checkpointing.
-// Native Noqeri engine and cross-platform power-loss semantics require further proof.
 import { open, rename, unlink, lstat } from 'node:fs/promises'
 import { constants as fsConstants } from 'node:fs'
 import { dirname, extname, resolve } from 'node:path'
@@ -10,8 +8,6 @@ const MAX_FILE = 16 * 1024 * 1024
 const MAX_WAL = MAX_FILE + 3 * 56 + 64
 const checksum = payload => createHash('sha256').update(payload).digest('hex')
 const pathCheck = path => { if(extname(path)!=='.nqd') throw Error('NoeSQL reference store path must end in .nqd') }
-// Read through one validated descriptor, avoiding a pathname re-open race.
-// Bound allocation before reading and reject non-regular and multiply-linked files.
 async function boundedRead(file, maximum) {
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0)
   let handle
@@ -29,14 +25,17 @@ async function boundedRead(file, maximum) {
       at += bytesRead
     }
     const after = await handle.stat()
-    if (after.size !== st.size || after.ino !== st.ino)
+    if (after.size !== st.size || after.ino !== st.ino || after.mtimeMs !== st.mtimeMs || after.ctimeMs !== st.ctimeMs)
       throw Error('NOE-SEC: file modified during read')
     return bytes
   } finally { await handle.close() }
 }
 async function regularOrAbsent(file) {
-  try { const s=await lstat(file);if(!s.isFile()||s.isSymbolicLink())throw Error('NoeSQL path must be a regular file, never a symlink') }
-  catch(e){if(e.code!=='ENOENT')throw e}
+  try {
+    const s = await lstat(file)
+    if (!s.isFile() || s.isSymbolicLink() || s.nlink !== 1)
+      throw Error('NOE-SEC: checkpoint target must be a regular single-link file')
+  } catch(e) { if (e.code !== 'ENOENT') throw e }
 }
 function serialize(state) {
   const payload=JSON.stringify(state)
@@ -58,20 +57,18 @@ async function baseState(path) {
   return bytes === null ? emptyDatabase() : decode(bytes)
 }
 async function walState(path) {
-  const file=path+'.wal'
-  const bytes = await boundedRead(file, MAX_WAL)
+  const bytes = await boundedRead(path+'.wal', MAX_WAL)
   if (bytes === null) return null
   const parsed=replayWal(bytes)
   return parsed.committed ? decode(parsed.committed) : null
 }
 export async function readNqd(path) {
   pathCheck(path)
-  // If WAL is committed, use its image even when the older base is absent or corrupt.
   const wal=await walState(path)
   return wal || await baseState(path)
 }
 async function syncDirectory(path) {
-  if(process.platform==='win32')return // Windows needs distinct native durability validation.
+  if(process.platform==='win32')return
   const directory=await open(dirname(path),'r')
   try{await directory.sync()}finally{await directory.close()}
 }
@@ -80,12 +77,15 @@ async function persistNqd(path, state, inject=async()=>{}) {
   const temp=resolve(dirname(path),`.noesql-${randomUUID()}.tmp`)
   let file, renamed=false
   try {
+    // Refuse to overwrite an existing symlink, device, or hard-linked snapshot.
+    await regularOrAbsent(path)
     file=await open(temp,'wx',0o600)
     await file.writeFile(content)
     await file.sync()
     await inject('afterSnapshotSync')
     await file.close()
     file=null
+    await regularOrAbsent(path)
     await rename(temp,path)
     renamed=true
     await inject('afterSnapshotRename')
@@ -93,8 +93,6 @@ async function persistNqd(path, state, inject=async()=>{}) {
     await inject('afterDirectorySync')
   } catch(e) {
     try { await file?.close() } catch {}
-    // Before rename the temporary snapshot is never authoritative. Remove it
-    // on ordinary errors so a failed checkpoint does not leak orphan files.
     if(!renamed) try { await unlink(temp) } catch {}
     throw e
   }
@@ -108,13 +106,11 @@ async function walAppend(path, state, inject) {
     await file.writeFile(tx.frames[1]);await inject('afterImageWrite')
     await file.writeFile(tx.frames[2]);await inject('afterCommitWrite')
     await file.sync();await inject('afterWalSync')
-    // Directory fsync makes the new WAL name persistent on POSIX.
     await syncDirectory(path);await inject('afterWalDirectorySync')
   } finally {await file?.close()}
 }
 async function checkpoint(path,state,inject) {
   await persistNqd(path,state,inject)
-  // A failed unlink leaves a harmless redo WAL; replay is idempotent.
   try{await unlink(path+'.wal')}catch(e){if(e.code!=='ENOENT')throw e}
   await syncDirectory(path)
   await inject('afterCheckpoint')
@@ -125,7 +121,6 @@ export async function verifyNqd(path) {
   const journal=await boundedRead(path+'.wal',MAX_WAL)
   if(snapshot===null && journal===null)
     throw Error('NoeSQL database does not exist')
-  // A journal without a committed transaction is not a valid database.
   const recovered=journal===null?null:replayWal(journal).committed
   if(snapshot===null && !recovered)
     throw Error('NoeSQL database has no committed snapshot or WAL image')
@@ -140,8 +135,9 @@ export async function runNqd(path, source, params={}, options={}) {
   let holder
   try{holder=await open(path+'.lock','wx',0o600)}catch(e){if(e.code==='EEXIST')throw Error('NoeSQL locked; inspect stale lock manually');throw e}
   try {
+    // A new database must not silently replace a hostile checkpoint target.
+    await regularOrAbsent(path)
     const before=await readNqd(path)
-    // Finish outstanding recovery before accepting a new transaction.
     try{await lstat(path+'.wal');await checkpoint(path,before,async()=>{})}catch(e){if(e.code!=='ENOENT')throw e}
     const outcome=execute(source,before,params)
     await walAppend(path,outcome.database,inject)
