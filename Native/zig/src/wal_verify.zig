@@ -29,8 +29,9 @@ pub fn verifyLegacyCommittedWal(wal: []const u8) VerifyError!RecoveryImage {
     if (wal.len < HEADER_BYTES + TRAILER_BYTES) return error.InvalidLength;
     if (!std.mem.eql(u8, wal[0..8], "NQWL0001")) return error.InvalidMagic;
     const raw_size = u64le(wal, 16);
-    if (raw_size > pages.MAX_IMAGE_BYTES or raw_size < pages.PAGE_BYTES * 2 or
-        raw_size % pages.PAGE_BYTES != 0) return error.InvalidImageSize;
+    if (raw_size > @as(u64, @intCast(pages.MAX_IMAGE_BYTES)) or
+        raw_size < @as(u64, @intCast(pages.PAGE_BYTES * 2)) or
+        raw_size % @as(u64, @intCast(pages.PAGE_BYTES)) != 0) return error.InvalidImageSize;
     const size: usize = @intCast(raw_size);
     if (wal.len != HEADER_BYTES + size + TRAILER_BYTES) return error.InvalidLength;
     const image = wal[HEADER_BYTES .. HEADER_BYTES + size];
