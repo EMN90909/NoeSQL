@@ -1,4 +1,5 @@
-import {existsSync} from 'node:fs'
+import {existsSync,readFileSync} from 'node:fs'
+import {createHash} from 'node:crypto'
 import {spawnSync} from 'node:child_process'
 import {fileURLToPath} from 'node:url'
 import {resolve,join} from 'node:path'
@@ -19,7 +20,14 @@ const zigPresent=version.status===0
 const zigVersion=(version.stdout||'').trim()
 gate('Zig 0.15.2 available',zigPresent&&zigVersion==='0.15.2',zigPresent?zigVersion:'zig binary unavailable')
 if(zigPresent&&zigVersion==='0.15.2')run('Zig bridge unit tests',zig,['build','test'],join(root,'Native','zig'))
-gate('trusted Noqeri compiler seed',executable(process.env.NOQERI_STAGE0),'NOQERI_STAGE0 must be a local trusted executable')
+const seed=process.env.NOQERI_STAGE0
+const pinned=(process.env.NOQERI_STAGE0_SHA256||'').toLowerCase()
+let authenticatedSeed=false
+if(executable(seed)&&/^[a-f0-9]{64}$/.test(pinned)){
+  const actual=createHash('sha256').update(readFileSync(resolve(seed))).digest('hex')
+  authenticatedSeed=actual===pinned
+}
+gate('trusted Noqeri compiler seed',authenticatedSeed,'NOQERI_STAGE0 path and pinned NOQERI_STAGE0_SHA256 required; matching a hash alone is not self-hosting proof')
 const raw=process.env.NOESQL_NATIVE_CONFORMANCE_JSON
 if(!raw)gate('compiled native Noqeri/Zig relational conformance',false,'NOESQL_NATIVE_CONFORMANCE_JSON command not configured')
 else{
@@ -29,6 +37,11 @@ else{
     run('compiled native Noqeri/Zig relational conformance',argv[0],argv.slice(1))
   }catch(e){gate('compiled native Noqeri/Zig relational conformance',false,e.message)}
 }
+// A callback echo test and a caller-selected zero-exit command are NOT native
+// parser/executor/storage conformance. Keep this gate fail-closed until the
+// Zig pager, compiled Noqeri ABI and independently verified suites are wired.
+gate('Zig-owned durable relational engine linked to compiled Noqeri',false,
+  'BLOCKED: Zig currently provides a bounded ABI bridge and read-only legacy verifier, not durable relational execution')
 run('NoeSQL JavaScript/SQLite reference tests',process.execPath,['--test'])
 console.log(JSON.stringify({status:results.every(x=>x.status==='pass')?'qualified':'blocked',gates:results},null,2))
 if(results.some(x=>x.status==='fail'))process.exitCode=1

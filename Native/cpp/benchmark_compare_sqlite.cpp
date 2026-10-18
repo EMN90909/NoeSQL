@@ -39,7 +39,16 @@ static Result run_sqlite(const std::string &path,int n){
  auto at=Clock::now();s.exec("BEGIN IMMEDIATE");for(int i=0;i<n;++i)put(key(i),std::string(120,'x'));s.exec("COMMIT");double batchms=elapsed(at);
  std::vector<double> lookups;lookups.reserve(size_t(n));
  for(int i=0;i<n;++i){std::string k=key(i);at=Clock::now();sqlite3_reset(select);sqlite3_clear_bindings(select);check(sqlite3_bind_text(select,1,k.c_str(),int(k.size()),SQLITE_TRANSIENT),s.db);check(sqlite3_step(select),s.db);if(sqlite3_column_bytes(select,0)!=120)throw std::runtime_error("sqlite lookup incorrect");lookups.push_back(elapsed(at));}
- at=Clock::now();for(int i=0;i<20;++i)put("single"+std::to_string(i),"one");double singlems=elapsed(at);
+ // Close the SELECT cursor before measuring durable independent transactions.
+ check(sqlite3_reset(select),s.db);
+ if(sqlite3_get_autocommit(s.db)!=1)throw std::runtime_error("SQLite read transaction still active");
+ at=Clock::now();
+ for(int i=0;i<20;++i){
+   s.exec("BEGIN IMMEDIATE");
+   put("single"+std::to_string(i),"one");
+   s.exec("COMMIT");
+ }
+ double singlems=elapsed(at);
  sqlite3_finalize(insert);sqlite3_finalize(select);
  return {batchms,singlems,pct(lookups,50),pct(lookups,95),pct(lookups,99)};
 }

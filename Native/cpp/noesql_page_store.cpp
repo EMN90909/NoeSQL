@@ -329,7 +329,18 @@ void commit(const std::string& path,const Bytes& image,uint64_t generation){
 void recover(const std::string& path,const Limits& limits,State& state){
     // Always checkpoint or clear complete stale journal while exclusively locked.
     auto journal=read_file(path+".wal",limits.max_file_bytes+104,true);
-    if(journal.empty())return;
+    if(journal.empty()) {
+        // A crash after O_EXCL creation but before WAL bytes exist must not
+        // wedge every future writer. Cleanup requires the exclusive store lock.
+        struct stat st{};
+        const std::string journal_path=path+".wal";
+        if(::lstat(journal_path.c_str(),&st)==0){
+            check(S_ISREG(st.st_mode)&&st.st_nlink==1&&st.st_size==0,"unsafe empty WAL");
+            check(::unlink(journal_path.c_str())==0,"empty WAL cleanup failed");
+            fsync_dir(path);
+        }else check(errno==ENOENT,"WAL status failed");
+        return;
+    }
     auto wal=parse_wal(journal,limits);
     if(wal && state.wal)atomic_file(path,state.image);
     check(::unlink((path+".wal").c_str())==0,"WAL cleanup failed");fsync_dir(path);
@@ -337,7 +348,8 @@ void recover(const std::string& path,const Limits& limits,State& state){
 uint64_t elapsed_ms(std::chrono::steady_clock::time_point since){return uint64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-since).count());}
 } // namespace
 Store::Store(std::string path,Limits limits):path_(std::move(path)),limits_(limits){
-    check(std::filesystem::path(path_).extension()==".nqd","native store requires .nqd file");
+    const auto ext=std::filesystem::path(path_).extension();
+    check(ext==".nqdb"||ext==".nqd","native store requires .nqdb (or legacy .nqd)");
     check(limits_.max_file_bytes>=2*kPageSize && limits_.max_file_bytes<=1024ull*1024*1024,"invalid file quota");
     check(limits_.max_key_bytes>0&&limits_.max_key_bytes<=128&&limits_.max_value_bytes>0&&limits_.max_value_bytes<=1024,"invalid row quota");
 }

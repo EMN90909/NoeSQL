@@ -4,7 +4,7 @@ import { existsSync, lstatSync, openSync, closeSync, chmodSync } from 'node:fs'
 import { dirname, isAbsolute, extname } from 'node:path'
 import { createAdvancedQueryExecutor } from './noesql-advanced.mjs'
 const VALID = /^[A-Za-z_][A-Za-z0-9_]*$/
-const q = s => {if (typeof s !== 'string' || !VALID.test(s) || s.toLowerCase().startsWith('sqlite_')) throw Error('NOE-EMBED: invalid identifier');return '"'+s+'"'}
+const q = s => {if (typeof s !== 'string' || !VALID.test(s) || (s.toLowerCase().startsWith('sqlite_') || s.toLowerCase().startsWith('_noesql_'))) throw Error('NOE-EMBED: invalid identifier');return '"'+s+'"'}
 const assert = (ok,msg) => {if(!ok)throw Error('NOE-EMBED: '+msg)}
 const bind = v => {
   if(typeof v==='boolean')return Number(v)
@@ -12,7 +12,7 @@ const bind = v => {
   if(typeof v==='string')assert(Buffer.byteLength(v,'utf8')<=256*1024,'bound value exceeds 256KiB')
   return v
 }
-function buildAPI(db,{adapter=null,maxRows=500,maxMutations=1000}={}) {
+function buildAPI(db,{adapter=null,maxRows=500,maxMutations=1000,backend='sqlite'}={}) {
   assert(Number.isSafeInteger(maxMutations)&&maxMutations>0&&maxMutations<=10000,'invalid mutation quota')
   const queries=createAdvancedQueryExecutor(db,{maxRows})
   let closed=false,inside=false
@@ -99,7 +99,7 @@ function buildAPI(db,{adapter=null,maxRows=500,maxMutations=1000}={}) {
     close(){if(!closed){closed=true;invalidate();if(adapter)adapter.close();else db.close()}},
     // Trusted server-side migrations and diagnostics only: NEVER expose over HTTP.
     database:db,
-    backend:'sqlite-wal'
+    backend
   }
   return Object.freeze(api)
 }
@@ -128,13 +128,19 @@ export async function openNoeSQLEmbedded({file=':memory:',maxRows=500,maxMutatio
     const db=adapter.db
     db.exec(`PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA busy_timeout=${busyTimeoutMs}; PRAGMA synchronous=FULL;`)
     if(file!==':memory:')db.exec('PRAGMA journal_mode=WAL')
+    const journal=db.prepare('PRAGMA journal_mode').get().journal_mode
+    const synchronous=db.prepare('PRAGMA synchronous').get().synchronous
+    if(file!==':memory:')assert(journal==='wal'&&synchronous===2,'durable WAL/FULL mode not available')
     db.exec('CREATE TABLE IF NOT EXISTS "_noesql_catalog" (seq INTEGER PRIMARY KEY, definition TEXT NOT NULL)')
     for(const row of db.prepare('SELECT definition FROM "_noesql_catalog" ORDER BY seq').all()) {
       const definition=JSON.parse(row.definition)
       adapter.compiler.compile(definition)
     }
-    return buildAPI(db,{adapter,maxRows,maxMutations})
+    return buildAPI(db,{adapter,maxRows,maxMutations,backend:file===':memory:'?'sqlite-memory':'sqlite-wal'})
   }catch(e){adapter.close();throw e}
 }
 /** Construct from a caller-owned DatabaseSync for integration tests or application-managed pooling. */
-export function fromSQLiteDatabase(db,options={}) {return buildAPI(db,options)}
+export function fromSQLiteDatabase(db,options={}) {
+  const journal=db.prepare('PRAGMA journal_mode').get().journal_mode
+  return buildAPI(db,{...options,backend:'sqlite-'+journal})
+}

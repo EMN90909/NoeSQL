@@ -25,4 +25,11 @@ pub fn build(b: *std.Build) void {
     });
     const page_tests = b.addTest(.{ .root_module = pages });
     step.dependOn(&b.addRunArtifact(page_tests).step);
+    const wal = b.createModule(.{
+        .root_source_file = b.path("src/wal_verify.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const wal_tests = b.addTest(.{ .root_module = wal });
+    step.dependOn(&b.addRunArtifact(wal_tests).step);
 }

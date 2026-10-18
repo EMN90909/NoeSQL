@@ -22,7 +22,7 @@ fn checkPage(page: []const u8) VerifyError!void {
     var bytes: [PAGE_BYTES]u8 = undefined;
     @memcpy(bytes[0..], page);
     var stored: [32]u8 = undefined;
-    @memcpy(stored[0..], page[8..40]);;
+    @memcpy(stored[0..], page[8..40]);
     @memset(bytes[8..40], 0);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes[0..], &digest, .{});
