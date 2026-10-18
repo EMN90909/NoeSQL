@@ -100,3 +100,16 @@ Noqeri main now includes experimental NoeSQL native source modules, JavaScript r
 This repository's WAL frame functions now reject transaction IDs outside the unsigned 64-bit range, sequences outside the unsigned 32-bit range, and non-binary payloads rather than coercing arbitrary strings. Corresponding regression cases are in `tests/noesql-wal-validation.test.mjs`.
 
 Run `npm test` and `make -C Native/cpp test` from a clean checkout, then compare results with Noqeri's embedded reference runtime. A full test run was not possible on the available worker due to GitHub DNS resolution failure. These are **experimental reference components, not a production database**.
+
+
+## Native binary page-storage prototype (18 October 2026)
+
+A separate, POSIX-only **C++17 page-store prototype** now lives at `Native/cpp/noesql_page_store.*`. It provides a 4 KiB versioned binary file format, persisted B+ tree key lookup, single-writer/shared-reader `flock` isolation, full-image redo WAL and checkpoint recovery, password-derived scrypt verifiers with revocable sessions, read-only/write roles, bounded operation quotas, a C storage ABI, crash-injection tests, and a local performance benchmark.
+
+```sh
+npm run test:native
+npm run benchmark:native
+make -C Native/cpp native-cli
+```
+
+**Important:** The C++ storage prototype is **not yet connected to the Noqeri-compiled relational SQL executor**. Its `.nqd` format is incompatible with the JavaScript reference `.nqd` format; no migration exists. This is not MVCC, is not cross-platform certified, and rewrites the complete page image on each commit. It must not store production or irreplaceable data. See [Native page engine technical scope and release gates](Doc/NOESQL_NATIVE_PAGE_ENGINE.md).

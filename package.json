@@ -13,6 +13,8 @@
     "test:cpp-bridge": "make -C Native/cpp test",
     "smoke": "node Runtime/noesql-cli.mjs",
     "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed",
-    "benchmark:reference": "node Benchmarks/reference-relational.mjs 250"
+    "benchmark:reference": "node Benchmarks/reference-relational.mjs 250",
+    "test:native": "make -C Native/cpp test-native",
+    "benchmark:native": "make -C Native/cpp benchmark"
   }
 }
