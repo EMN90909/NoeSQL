@@ -201,7 +201,8 @@ Parsed decode(const Bytes& image,const Limits& lim){
     // DFS traverses the persisted physical tree, validating ordering, fanout,
     // checksum, reachability and duplicate/cyclic references.
     std::vector<uint8_t> seen(pages,0);uint32_t visited=0;
-    std::function<std::pair<std::string,std::string>(uint32_t)> walk=[&](uint32_t id)->std::pair<std::string,std::string>{
+    std::function<std::pair<std::string,std::string>(uint32_t,unsigned)> walk=[&](uint32_t id,unsigned depth)->std::pair<std::string,std::string>{
+        check(depth<=16,"physical index depth limit");
         check(id>0&&id<pages&&!seen[id],"index cycle or invalid page");seen[id]=1;++visited;
         size_t at=size_t(id)*kPageSize;validate_page(image,at);uint8_t type=image[at];uint16_t count=r16(image,at+2);size_t pos=at+H;
         check(count>0,"empty index page");
@@ -215,15 +216,15 @@ Parsed decode(const Bytes& image,const Limits& lim){
                 check(p.map.emplace(std::move(key),std::move(val)).second,"duplicate leaf key");
             }
         }else if(type==2){
-            uint32_t child=r32(image,pos);pos+=4;auto bounds=walk(child);first=bounds.first;last=bounds.second;
+            uint32_t child=r32(image,pos);pos+=4;auto bounds=walk(child,depth+1);first=bounds.first;last=bounds.second;
             for(uint16_t i=1;i<count;++i){
                 std::string separator=page_key(image,pos,at+kPageSize);child=r32(image,pos);pos+=4;
-                auto next=walk(child);check(last<next.first&&separator==next.first,"invalid branch separator");last=next.second;
+                auto next=walk(child,depth+1);check(last<next.first&&separator==next.first,"invalid branch separator");last=next.second;
             }
         }else fail("unknown page type");
         return {first,last};
     };
-    walk(p.root);check(visited==pages-1&&p.map.size()==p.count,"page reachability or row count mismatch");return p;
+    walk(p.root,0);check(visited==pages-1&&p.map.size()==p.count,"page reachability or row count mismatch");return p;
 }
 struct Node {uint32_t id;std::string first;};
 Bytes encode(const Map& map,uint64_t generation,const Limits& lim){
@@ -316,9 +317,13 @@ void commit(const std::string& path,const Bytes& image,uint64_t generation){
         write_all(file.get(),wal.data(),wal.size());check(::fsync(file.get())==0,"WAL fsync failed");
     }
     fsync_dir(path);
+#ifdef NOESQL_TEST_FAULT_INJECTION
     if(std::getenv("NOESQL_TEST_CRASH_AFTER_WAL")!=nullptr)::_exit(93);
+#endif
     atomic_file(path,image);
+#ifdef NOESQL_TEST_FAULT_INJECTION
     if(std::getenv("NOESQL_TEST_CRASH_AFTER_CHECKPOINT")!=nullptr)::_exit(94);
+#endif
     check(::unlink((path+".wal").c_str())==0,"WAL unlink failed");fsync_dir(path);
 }
 void recover(const std::string& path,const Limits& limits,State& state){

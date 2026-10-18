@@ -1,6 +1,6 @@
 {
   "name": "noesql",
-  "version": "0.1.0-dev",
+  "version": "0.7.5-rc.1",
   "private": true,
   "type": "module",
   "description": "Experimental NoeSQL reference runtime with a Noqeri-native engine and C++ ABI bridge in development",
@@ -15,6 +15,7 @@
     "benchmark:policy": "echo Native Noqeri compiler required; no benchmark results claimed",
     "benchmark:reference": "node Benchmarks/reference-relational.mjs 250",
     "test:native": "make -C Native/cpp test-native",
-    "benchmark:native": "make -C Native/cpp benchmark"
+    "benchmark:native": "make -C Native/cpp benchmark",
+    "benchmark:sqlite": "make -C Native/cpp benchmark-compare"
   }
 }

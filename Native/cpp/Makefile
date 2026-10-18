@@ -6,8 +6,10 @@ PAGE_TEST_BIN ?= /tmp/noesql-cpp-page-test
 CLI_BIN ?= /tmp/noesql-native
 BENCH_BIN ?= /tmp/noesql-cpp-page-bench
 ABI_TEST_BIN ?= /tmp/noesql-storage-abi-test
+FAULT_TEST_BIN ?= /tmp/noesql-prod-fault-gate-test
+COMPARE_BIN ?= /tmp/noesql-sqlite-compare
 
-.PHONY: test test-native benchmark native-cli clean
+.PHONY: test test-native benchmark benchmark-compare native-cli clean
 
 test: test-native
 	$(CXX) $(CXXFLAGS) noesql_engine_abi.cpp test_abi.cpp -o $(TEST_BIN)
@@ -15,12 +17,20 @@ test: test-native
 	rm -f $(TEST_BIN)
 
 test-native:
-	$(CXX) $(CXXFLAGS) noesql_page_store.cpp test_page_store.cpp -o $(PAGE_TEST_BIN) $(CRYPTO_LIBS)
+	$(CXX) $(CXXFLAGS) -DNOESQL_TEST_FAULT_INJECTION noesql_page_store.cpp test_page_store.cpp -o $(PAGE_TEST_BIN) $(CRYPTO_LIBS)
 	$(PAGE_TEST_BIN)
 	rm -f $(PAGE_TEST_BIN)
 	$(CXX) $(CXXFLAGS) noesql_page_store.cpp noesql_storage_abi.cpp test_storage_abi.cpp -o $(ABI_TEST_BIN) $(CRYPTO_LIBS)
 	$(ABI_TEST_BIN)
 	rm -f $(ABI_TEST_BIN)
+	$(CXX) $(CXXFLAGS) noesql_page_store.cpp test_production_fault_gate.cpp -o $(FAULT_TEST_BIN) $(CRYPTO_LIBS)
+	$(FAULT_TEST_BIN)
+	rm -f $(FAULT_TEST_BIN)
+
+benchmark-compare:
+	$(CXX) $(CXXFLAGS) noesql_page_store.cpp benchmark_compare_sqlite.cpp -o $(COMPARE_BIN) $(CRYPTO_LIBS) -lsqlite3
+	$(COMPARE_BIN)
+	rm -f $(COMPARE_BIN)
 
 native-cli:
 	$(CXX) $(CXXFLAGS) noesql_page_store.cpp noesql_native_cli.cpp -o $(CLI_BIN) $(CRYPTO_LIBS)
@@ -32,4 +42,4 @@ benchmark:
 	rm -f $(BENCH_BIN)
 
 clean:
-	rm -f $(TEST_BIN) $(PAGE_TEST_BIN) $(BENCH_BIN)
+	rm -f $(TEST_BIN) $(PAGE_TEST_BIN) $(BENCH_BIN) $(FAULT_TEST_BIN) $(COMPARE_BIN) $(ABI_TEST_BIN)

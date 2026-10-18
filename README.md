@@ -113,3 +113,9 @@ make -C Native/cpp native-cli
 ```
 
 **Important:** The C++ storage prototype is **not yet connected to the Noqeri-compiled relational SQL executor**. Its `.nqd` format is incompatible with the JavaScript reference `.nqd` format; no migration exists. This is not MVCC, is not cross-platform certified, and rewrites the complete page image on each commit. It must not store production or irreplaceable data. See [Native page engine technical scope and release gates](Doc/NOESQL_NATIVE_PAGE_ENGINE.md).
+
+## Version 0.7.5 release candidate (18 October 2026)
+
+**0.7.5-rc.1 is not stable or production-ready.** The native page kernel remains a separate experimental key/value layer rather than the compiled Noqeri relational engine. This iteration gates crash-test exits to test builds, caps index verification depth, adds a production-build fault-gate test, and includes an optional on-machine SQLite WAL/FULL comparator. The native tests passed locally; PostgreSQL parity and full cross-platform correctness have not been established.
+
+See [the 0.7.5 release gates](Doc/NOESQL_075_RELEASE_GATES.md), [native SQLite benchmark methodology](Benchmarks/README-native.md), and [language usability comparison](Doc/NOESQL_SYNTAX_COMPARISON.md). No stable v0.7.5 tag is justified by these tests.
