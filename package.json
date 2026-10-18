@@ -33,7 +33,10 @@
     "test:npm-contract": "node --test tests/noesql-npm-package.test.mjs",
     "prepublishOnly": "node scripts/release-preflight.mjs",
     "release:preflight": "node scripts/release-preflight.mjs",
-    "test:release-contract": "node --test tests/noesql-release-preflight.test.mjs"
+    "test:release-contract": "node --test tests/noesql-release-preflight.test.mjs",
+    "benchmark:relational-baseline": "node Benchmarks/qualify-relational-benchmark.mjs --sqlite-only --transactions=200 --repeats=7",
+    "benchmark:relational-compare": "node Benchmarks/qualify-relational-benchmark.mjs --transactions=200 --repeats=7",
+    "test:relational-benchmark": "node --test tests/noesql-relational-benchmark.test.mjs"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",
