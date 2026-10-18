@@ -1,0 +1,21 @@
+const std = @import("std");
+
+pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+    const bridge = b.createModule(.{
+        .root_source_file = b.path("src/bridge.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const library = b.addLibrary(.{
+        .name = "noesql_zig_bridge",
+        .linkage = .static,
+        .root_module = bridge,
+    });
+    b.installArtifact(library);
+    b.installFile("noesql_zig_bridge.h", "include/noesql_zig_bridge.h");
+    const tests = b.addTest(.{ .root_module = bridge });
+    const step = b.step("test", "Exercise the versioned Zig/Noqeri ABI bridge");
+    step.dependOn(&b.addRunArtifact(tests).step);
+}
