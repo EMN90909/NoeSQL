@@ -1,7 +1,7 @@
 {
   "name": "noesql",
   "version": "0.7.6",
-  "private": true,
+  "private": false,
   "type": "module",
   "description": "NoeSQL 0.7.6 experimental SQLite/reference APIs and isolated Zig pager; compiled native Noqeri relational integration not qualified",
   "engines": {
@@ -30,7 +30,10 @@
     "qualify:native-e2e": "node scripts/verify-native-e2e.mjs",
     "test:npm-pack": "node scripts/test-npm-package.mjs",
     "test:native-contract": "node --test tests/noesql-native-contract.test.mjs",
-    "test:npm-contract": "node --test tests/noesql-npm-package.test.mjs"
+    "test:npm-contract": "node --test tests/noesql-npm-package.test.mjs",
+    "prepublishOnly": "node scripts/release-preflight.mjs",
+    "release:preflight": "node scripts/release-preflight.mjs",
+    "test:release-contract": "node --test tests/noesql-release-preflight.test.mjs"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",
@@ -51,5 +54,19 @@
     "README.md",
     "VERSION",
     "LICENSE"
-  ]
+  ],
+  "license": "GPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EMN90909/NoeSQL.git"
+  },
+  "homepage": "https://github.com/EMN90909/NoeSQL#readme",
+  "bugs": {
+    "url": "https://github.com/EMN90909/NoeSQL/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org",
+    "tag": "next"
+  }
 }

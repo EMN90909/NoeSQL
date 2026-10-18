@@ -171,3 +171,10 @@ See [component hardening and outstanding integration gates](Doc/NOESQL_076_COMPO
 `npm run test:npm-pack` tests a **locally packed tarball** by installing it into a fresh offline project and executing the current SQLite-backed NoeSQL API. This is distinct from testing a real npm registry release. NoeSQL remains `private:true`, no verified npm publication credentials are connected, and a production-compatible license file must be selected by the repository owner before releasing sources publicly. `npm run qualify:zig` rejects caller-selected fake conformance commands and retains fail-closed durability and cross-platform gates.
 
 See `Doc/NOESQL_NATIVE_NPM_PUBLICATION_GATE.md`.
+
+
+## Public npm publication preparation
+
+The v0.7.6 package now carries GPL-3.0-only licensing and public npm metadata, matching the upstream Noqeri GPL-3.0-only source license. The prior `private:true` blocker has been removed, **but publication is still blocked by `prepublishOnly`** until a release maintainer explicitly authorizes the exact commit and validates native Noqeri→Zig execution. Distribution of copied upstream or third-party code remains subject to copyright/notice review; this metadata change does not grant rights to code owned by others.
+
+The `npm` trusted-publishing workflow is manually triggered, targets the experimental `next` dist-tag, and cannot succeed without a verified compiler seed, native executable, runner tests, and npm publisher identity. The private GitHub repository cannot generate npm's public-source provenance attestations. No public npm publication is claimed in this source commit.

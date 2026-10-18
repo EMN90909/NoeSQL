@@ -4,11 +4,14 @@ import {readFileSync,existsSync} from 'node:fs'
 import {fileURLToPath} from 'node:url'
 const root=fileURLToPath(new URL('../',import.meta.url))
 const source=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8')
-test('0.7.6 identity is npm packaging-ready but not accidentally published',()=>{
+test('0.7.6 metadata is public-release-ready but protected by a native publication gate',()=>{
   const pkg=JSON.parse(source('package.json'))
   assert.equal(pkg.version,'0.7.6')
   assert.equal(source('VERSION').trim(),pkg.version)
-  assert.equal(pkg.private,true)
+  assert.equal(pkg.private,false)
+  assert.equal(pkg.license,'GPL-3.0-only')
+  assert.equal(pkg.publishConfig.registry,'https://registry.npmjs.org')
+  assert.equal(pkg.scripts.prepublishOnly,'node scripts/release-preflight.mjs')
   for(const value of Object.values(pkg.exports)) assert.equal(existsSync(root+value.slice(1)),true)
 })
 test('benchmark links the actual native pager and component identity is explicit',()=>{
