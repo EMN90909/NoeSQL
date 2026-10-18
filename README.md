@@ -151,3 +151,15 @@ This change begins hardening but does **not** make NoeSQL a unified native Noqer
 ## Stage 2 native Zig pager (experimental)
 
 New `Native/zig/src/pager_v2.zig` adds Linux-only checksummed incremental WAL transactions, replay, checkpoint, bounded in-process snapshots, and a separate v2 C page ABI. `Native/zig/src/index_v2.zig` introduces a bounded physically persisted unique numeric index. `Database/noesql_parser.nqr` is synchronized from the current Noqeri source, while `scripts/verify-noqeri-bootstrap.mjs` validates pinned Stage-2 proof inputs. **No native Noqeri statement compiler/executor has been linked**; the old C++ and JS compatibility paths remain. Do not claim release qualification. See [Stage 2 storage and blockers](Doc/NOESQL_STAGE2_ZIG_STORAGE.md).
+
+## v0.7.6: component API 1.0.0 hardening
+
+The experimental Zig pager, fixed-capacity index, Noqeri compiler-proof checker, and narrow SQLite comparison benchmark have a **component API 1.0.0** development milestone. This does not mean the components are storage-engine production-qualified. The on-disk NQDB0002 magic and C ABI v2 remain unchanged to preserve Stage 2 compatibility.
+
+The Zig build now installs `libnoesql_zig_pages.a` containing `noesql_zig_page_*` exports independently from the Noqeri callback bridge. The C benchmark links the pager library rather than the callback-only library. Test-only fault injection and stricter WAL frame validation cover additional recovery paths, while the index has O(log n) range positioning.
+
+**npm status:** package entry points and CLI are defined for inspection via `npm pack --dry-run`; the repository remains `private:true` and is **not verified to be published to npm**. The command `npm install noesql@0.7.6` must not be advertised as successful until actual registry publication and installation are confirmed.
+
+**Compiler status:** Noqeri's current portable Stage-2 CLI can check source but has not produced a verified, linkable native relational executor targeting the Zig pager. NoeSQL retains explicit experimental adapters; this 0.7.6 update does not silently switch them to the incomplete native path.
+
+See [component hardening and outstanding integration gates](Doc/NOESQL_076_COMPONENT_GATES.md).

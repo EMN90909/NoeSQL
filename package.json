@@ -1,9 +1,9 @@
 {
   "name": "noesql",
-  "version": "0.7.5-rc.2",
+  "version": "0.7.6",
   "private": true,
   "type": "module",
-  "description": "Experimental NoeSQL native engine and readable SQLite-backed embedded/web runtime",
+  "description": "NoeSQL 0.7.6 experimental SQLite/reference APIs and isolated Zig pager; compiled native Noqeri relational integration not qualified",
   "engines": {
     "node": ">=22.13.0"
   },
@@ -24,6 +24,28 @@
     "build:zig": "cd Native/zig && zig build -Doptimize=ReleaseSafe",
     "qualify:zig": "node scripts/qualify-zig.mjs",
     "verify:noqeri": "node scripts/verify-noqeri-bootstrap.mjs",
-    "benchmark:zig-v2": "bash scripts/benchmark-zig-v2.sh"
-  }
+    "benchmark:zig-v2": "bash scripts/benchmark-zig-v2.sh",
+    "pack:inspect": "npm pack --dry-run --json",
+    "test:component-contract": "node --test tests/noesql-076-release-contract.test.mjs"
+  },
+  "exports": {
+    ".": "./Runtime/noesql-embedded.mjs",
+    "./embedded": "./Runtime/noesql-embedded.mjs",
+    "./reference": "./Runtime/noesql-reference.mjs",
+    "./relational": "./Runtime/noesql-relational.mjs",
+    "./cli": "./Runtime/noesql-cli.mjs"
+  },
+  "bin": {
+    "noesql": "./Runtime/noesql-cli.mjs"
+  },
+  "files": [
+    "Runtime/",
+    "Database/",
+    "Native/zig/",
+    "Grammar/",
+    "Doc/",
+    "README.md",
+    "VERSION",
+    "LICENSE"
+  ]
 }
