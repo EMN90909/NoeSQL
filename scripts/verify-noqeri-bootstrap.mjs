@@ -8,6 +8,7 @@ import { resolve, relative, isAbsolute } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 
+export const COMPONENT_VERSION = '1.0.0'
 const requiredSuiteNames = [
   'frontend', 'nir', 'optimizer', 'object-writers', 'formatter', 'lsp',
   'package-manager', 'fuzz', 'race', 'memory', 'overflow',

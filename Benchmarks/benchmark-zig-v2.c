@@ -9,6 +9,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#define NOESQL_BENCHMARK_COMPONENT_VERSION "1.0.0"
 /* Experimental single-writer 4 KiB fsynced page commits vs SQLite WAL/FULL.
  * No comparisons for relational SQL semantics, multi-reader concurrency or
  * PostgreSQL. Includes different engine/file-format semantics, so results
@@ -50,6 +51,9 @@ int main(int argc,char**argv){
  if(sqlite3_step(check)!=SQLITE_ROW||strcmp((const char*)sqlite3_column_text(check,0),"wal")!=0){fprintf(stderr,"SQLite WAL not available\n");return 1;}
  sqlite3_finalize(check);
  sqlcheck(sqlite3_exec(db,"PRAGMA synchronous=FULL;CREATE TABLE pages(id INTEGER PRIMARY KEY, body BLOB NOT NULL)",NULL,NULL,NULL),db);
+ sqlcheck(sqlite3_prepare_v2(db,"PRAGMA synchronous",-1,&check,NULL),db);
+ if(sqlite3_step(check)!=SQLITE_ROW||sqlite3_column_int(check,0)!=2){fprintf(stderr,"SQLite synchronous FULL unavailable\n");return 1;}
+ sqlcheck(sqlite3_finalize(check),db);
  sqlcheck(sqlite3_prepare_v2(db,"INSERT INTO pages(id,body) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",-1,&check,NULL),db);
  for(size_t i=0;i<count;i++){
    memcpy(blob,&i,sizeof(i));

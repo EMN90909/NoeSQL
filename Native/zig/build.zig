@@ -15,6 +15,14 @@ pub fn build(b: *std.Build) void {
         .root_module = bridge,
     });
     b.installArtifact(library);
+    const pages_library_module = b.createModule(.{
+        .root_source_file = b.path("src/storage_abi.zig"),
+        .target = target, .optimize = optimize, .link_libc = true,
+    });
+    const pages_library = b.addLibrary(.{
+        .name = "noesql_zig_pages", .linkage = .static, .root_module = pages_library_module,
+    });
+    b.installArtifact(pages_library);
     b.installFile("noesql_zig_bridge.h", "include/noesql_zig_bridge.h");
     b.installFile("noesql_zig_pages.h", "include/noesql_zig_pages.h");
     const tests = b.addTest(.{ .root_module = bridge });

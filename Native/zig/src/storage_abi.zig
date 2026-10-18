@@ -4,6 +4,7 @@ const storage = @import("pager_v2.zig");
 // Native Zig-owned pager ABI for FUTURE compiled Noqeri callers.
 // ABI v2, experimental Linux-only; must not be treated as a public unauthenticated
 // SQL, multi-tenant, or database-server interface. Caller owns authorization.
+pub const COMPONENT_VERSION = "1.0.0";
 pub const ABI_VERSION: u32 = 2;
 pub const STATUS_OK: i32 = 0;
 pub const STATUS_NOT_FOUND: i32 = 1;

@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+pub const COMPONENT_VERSION = "1.0.0"; // component API, not production qualification
 // Experimental Linux-only WAL pager. No SQL semantics or C++ compatibility.
 // v2 is deliberately incompatible with legacy NQPG0001 and JSON .nqdb files.
 // The directory containing the database MUST be owned by the application and
@@ -47,7 +48,7 @@ const Mutation = struct { id: u32, bytes: Page };
 pub const Error = error{
     UnsupportedPlatform, InvalidPath, Io, Locked, InvalidHeader,
     IncompatibleFormat, CorruptPage, CorruptWal, WalLimit, TooManyPages,
-    TooManyMutations, DuplicatePage, EmptyTransaction, OutOfMemory,
+    TooManyMutations, DuplicatePage, EmptyTransaction, OutOfMemory, FaultInjected,
 };
 
 fn u32put(dst: []u8, v: u32) void {
@@ -143,6 +144,10 @@ pub const Pager = struct {
     pending: [MAX_TX_PAGES]Mutation = undefined,
     pending_count: usize = 0,
     poisoned: bool = false,
+    test_fault: FaultPoint = .none,
+    pub const FaultPoint = enum { none, before_wal_write, after_wal_write, before_checkpoint_rename, after_checkpoint_rename };
+    pub fn injectTestFault(self: *Pager, point: FaultPoint) void { if (builtin.is_test) self.test_fault = point; }
+    fn failAt(self: *Pager, point: FaultPoint) Error!void { if (builtin.is_test and self.test_fault == point) return error.FaultInjected; }
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) Error!*Pager {
         if (builtin.os.tag != .linux) return error.UnsupportedPlatform;
@@ -221,9 +226,11 @@ pub const Pager = struct {
         const digest = sha(frame[0 .. length - 32]);
         @memcpy(frame[length - 32 ..], &digest);
         errdefer self.poisoned = true;
+        try self.failAt(.before_wal_write);
         try seek(self.wal, end);
         // No in-memory changes until the whole commit is durably fsynced.
         try writeAll(self.wal, frame);
+        try self.failAt(.after_wal_write);
         try durable(self.wal);
         for (self.pending[0..count]) |m| {
             self.pages[m.id] = m.bytes;
@@ -281,8 +288,8 @@ pub const Pager = struct {
             if (!std.mem.eql(u8, record[length - 32 ..], &digest)) return error.CorruptWal;
             if (previous != 0 and generation != previous + 1) return error.CorruptWal;
             previous = generation;
-            if (generation > self.generation) {
-                if (generation != self.generation + 1) return error.CorruptWal;
+            { // Always validate historical frame ids, even after checkpoint.
+
                 for (0..count) |i| {
                     const at = TX_HEADER + i * FRAME;
                     const id = u32get(record[at .. at + 4]);
@@ -292,6 +299,9 @@ pub const Pager = struct {
                         if (id == other) return error.CorruptWal;
                     }
                 }
+            }
+            if (generation > self.generation) {
+                if (self.generation == std.math.maxInt(u64) or generation != self.generation + 1) return error.CorruptWal;
                 for (0..count) |i| {
                     const at = TX_HEADER + i * FRAME;
                     const id = u32get(record[at .. at + 4]);
@@ -350,8 +360,10 @@ pub const Pager = struct {
         try durable(fd);
         var db_buf: [4096]u8 = undefined;
         const dbname = try pathZ(self.path, "", &db_buf);
+        try self.failAt(.before_checkpoint_rename);
         if (c.rename(temporary.ptr, dbname.ptr) != 0) return error.Io;
         replaced = true;
+        try self.failAt(.after_checkpoint_rename);
         try syncParent(self.path);
         // A committed checkpoint is visible before WAL truncation.
         if (c.ftruncate(self.wal, 0) != 0) return error.Io;
@@ -451,4 +463,29 @@ test "torn WAL suffix is discarded after a durable completed record" {
     defer restored.close();
     try std.testing.expectEqual(@as(u8, 41), restored.read(7).?[0]);
     try std.testing.expectEqual(before, try size(restored.wal));
+}
+
+test "failed pre-WAL write poisons writer without exposing mutation" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "failed-write");
+    defer allocator.free(path);
+    var data_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const db_name = try pathZ(path, "", &data_buf);
+    const wal_name = try pathZ(path, ".wal", &wal_buf);
+    const lock_name = try pathZ(path, ".lck", &lock_buf);
+    defer { _ = c.unlink(db_name.ptr); _ = c.unlink(wal_name.ptr); _ = c.unlink(lock_name.ptr); }
+    const store = try Pager.open(allocator, path);
+    var bytes = [_]u8{0} ** PAGE_BYTES;
+    bytes[0] = 77;
+    try store.stage(4, &bytes);
+    store.injectTestFault(.before_wal_write);
+    try std.testing.expectError(error.FaultInjected, store.commit());
+    try std.testing.expect(store.read(4) == null);
+    try std.testing.expectError(error.Io, store.commit());
+    store.close();
+    const reopened = try Pager.open(allocator, path);
+    defer reopened.close();
+    try std.testing.expect(reopened.read(4) == null);
 }
