@@ -14,7 +14,7 @@ function run(command,args,cwd){
 }
 export function verifyPackageContents(files){
   const names=files.map(f=>f.path)
-  if(names.some(x=>/(^|\/)(\.npmrc|\.env(?:\.|$)|\.git|id_rsa|node_modules|bootstrap-local\.json)(\/|$)/i.test(x)))
+  if(names.some(x=>/(^|\/)(\.npmrc(?:\.[^/]+)?|\.env(?:\.[^/]+)?|\.git|id_rsa|node_modules|bootstrap-local\.json)(\/|$)/i.test(x)))
     throw Error('sensitive or generated files included in npm archive')
   for(const required of ['package.json','Runtime/noesql-embedded.mjs','Runtime/noesql-adapters.mjs','Runtime/noesql-reference.mjs']){
     if(!names.includes(required))throw Error('npm package missing '+required)
