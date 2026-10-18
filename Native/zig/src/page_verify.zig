@@ -21,7 +21,8 @@ fn readU32(page: []const u8, offset: usize) u32 {
 fn checkPage(page: []const u8) VerifyError!void {
     var bytes: [PAGE_BYTES]u8 = undefined;
     @memcpy(bytes[0..], page);
-    const stored = bytes[8..40].*;
+    var stored: [32]u8 = undefined;
+    @memcpy(stored[0..], page[8..40]);;
     @memset(bytes[8..40], 0);
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes[0..], &digest, .{});
@@ -39,9 +40,9 @@ pub fn verifyLegacyImage(image: []const u8) VerifyError!Header {
     const header = image[0..PAGE_BYTES];
     if (!std.mem.eql(u8, header[0..8], "NQPG0001")) return error.InvalidMagic;
     if (readU32(header, 40) != 1) return error.InvalidVersion;
-    if (readU32(header, 44) != PAGE_BYTES) return error.InvalidPageSize;
+    if (readU32(header, 44) != @as(u32, @intCast(PAGE_BYTES))) return error.InvalidPageSize;
     const root = readU32(header, 56);
-    if (root == 0 or root >= count) return error.InvalidRoot;
+    if (root == 0 or @as(usize, root) >= count) return error.InvalidRoot;
     return .{ .page_count = count, .root_page = root };
 }
 
@@ -61,7 +62,7 @@ test "legacy NQPG0001 image header and page checksums" {
     var image = [_]u8{0} ** (PAGE_BYTES * 2);
     @memcpy(image[0..8], "NQPG0001");
     putU32(image[0..PAGE_BYTES], 40, 1);
-    putU32(image[0..PAGE_BYTES], 44, PAGE_BYTES);
+    putU32(image[0..PAGE_BYTES], 44, @intCast(PAGE_BYTES));
     putU32(image[0..PAGE_BYTES], 56, 1);
     seal(image[0..PAGE_BYTES]);
     seal(image[PAGE_BYTES .. PAGE_BYTES * 2]);
@@ -76,6 +77,6 @@ test "legacy NQPG0001 image header and page checksums" {
     try std.testing.expectError(error.InvalidMagic, verifyLegacyImage(&image));
 }
 test "truncated or over-budget images are rejected before reads" {
-    var too_small = [_]u8{0} ** PAGE_BYTES;
+    const too_small = [_]u8{0} ** PAGE_BYTES;
     try std.testing.expectError(error.InvalidSize, verifyLegacyImage(&too_small));
 }
