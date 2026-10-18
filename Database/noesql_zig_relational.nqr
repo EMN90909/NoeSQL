@@ -1,0 +1,110 @@
+module noqeri.database.noesql.zig_relational
+import "noesql_api.nqr"
+import "noesql_executor.nqr"
+import "noesql_row.nqr"
+import "noesql_pager_abi.nqr"
+
+// Executable Noqeri SOURCE integration slice, deliberately bounded to one
+// two-column (int,bool) row per Zig page. NOT a complete SQL engine/frontend.
+// No unauthenticated C calls or arbitrary SQL strings in this module.
+// ABI v2 Zig pager is the only persistence provider.
+export function noeZigSingleRowExecute(
+    path: string,
+    pageId: u32,
+    ctx: *NoeQueryContext,
+    plan: *NoeIrPlan,
+    columns: []NoeColumn,
+    insertRow: []NoeValue,
+    projections: []usize,
+    output: []NoeValue,
+    result: *NoeExecutionResult
+): isize {
+    if result == null || ctx == null || plan == null { return -210 as isize }
+    result.affected = 0 as usize
+    result.returned = 0 as usize
+    result.rowCount = 0 as usize
+    // Page zero remains reserved for future system/catalog metadata.
+    if pageId == 0 as u32 || !noePagerBounds(pageId,noePagerPageBytes()) { return -211 as isize }
+    if len(columns) != 2 as usize { return -212 as isize }
+    if columns[0].kind != noeTypeInt() || columns[1].kind != noeTypeBool() { return -213 as isize }
+    // Text/nullable fields need an independent pool, not supported by this slice.
+    let pool: [u8; 1] = [0 as u8]
+    let verified: isize = noeApiValidate(ctx,plan,columns,slice(pool),projections)
+    if verified < 0 as isize { return verified }
+    if plan.operation == noePlanInsert() && len(insertRow) != 2 as usize { return -214 as isize }
+    let handle: usize = 0 as usize
+    let opened: int = noesql_zig_page_open(noePagerAbiVersion(),path,&handle)
+    if opened != 0 || !noePagerValidHandle(handle) { return -215 as isize }
+    // A scoped lock closes this handle on every path, including failures.
+    let record: [u8; 4096]
+    let i: usize = 0 as usize
+    while i < 4096 as usize { record[i] = 0 as u8 i = i + 1 as usize }
+    let got: int = noesql_zig_page_get(handle,pageId,&record[0],noePagerPageBytes())
+    if got != 0 && got != 1 { noesql_zig_page_close(handle) return -216 as isize }
+    let present: bool = got == 0
+    if present {
+        // A deleted row remains as an all-zero tombstone page. Do not mistake
+        // a partially corrupted/malformed page for a legitimate tombstone.
+        if record[0] == 0 as u8 && record[1] == 0 as u8 &&
+           record[2] == 0 as u8 && record[3] == 0 as u8 {
+            let allZero: bool = true
+            let pos: usize = 0 as usize
+            while pos < 4096 as usize {
+                if record[pos] != 0 as u8 { allZero = false }
+                pos = pos + 1 as usize
+            }
+            if !allZero { noesql_zig_page_close(handle) return -222 as isize }
+            present = false
+        }
+    }
+    let original: [NoeValue; 4]
+    let scratch: [NoeValue; 4]
+    let rowCount: usize = 0 as usize
+    if present {
+        let decoded: [NoeValue; 2]
+        let used: usize = 0 as usize
+        let status: isize = noeRowDecode(slice(record),columns,ctx.schemaVersion,slice(decoded),slice(pool),&used)
+        if status < 0 as isize { noesql_zig_page_close(handle) return -217 as isize }
+        original[0] = decoded[0]
+        original[1] = decoded[1]
+        rowCount = 1 as usize
+    }
+    let draft: NoeExecutionResult
+    let status: isize = noeExecute(plan,columns,slice(original),slice(scratch),rowCount,insertRow,projections,output,slice(pool),ctx.schemaVersion,&draft)
+    if status < 0 as isize { noesql_zig_page_close(handle) return status }
+    if plan.operation == noePlanGet() || draft.affected == 0 as usize {
+        result.affected = draft.affected
+        result.returned = draft.returned
+        result.rowCount = draft.rowCount
+        noesql_zig_page_close(handle)
+        return 0 as isize
+    }
+    // A change is not visible through result until Zig fsync/commit succeeds.
+    i = 0 as usize
+    while i < 4096 as usize { record[i] = 0 as u8 i = i + 1 as usize }
+    if draft.rowCount == 1 as usize {
+        let one: [NoeValue; 2]
+        one[0] = original[0]
+        one[1] = original[1]
+        let encoded: isize = noeRowEncode(columns,slice(one),slice(pool),ctx.schemaVersion,slice(record))
+        if encoded < 0 as isize { noesql_zig_page_close(handle) return -218 as isize }
+    } else if draft.rowCount != 0 as usize {
+        noesql_zig_page_close(handle)
+        return -219 as isize
+    }
+    if noesql_zig_page_stage(handle,pageId,&record[0],noePagerPageBytes()) != 0 {
+        noesql_zig_page_rollback(handle)
+        noesql_zig_page_close(handle)
+        return -220 as isize
+    }
+    if noesql_zig_page_commit(handle) != 0 {
+        noesql_zig_page_rollback(handle)
+        noesql_zig_page_close(handle)
+        return -221 as isize
+    }
+    result.affected = draft.affected
+    result.returned = draft.returned
+    result.rowCount = draft.rowCount
+    noesql_zig_page_close(handle)
+    return 0 as isize
+}
