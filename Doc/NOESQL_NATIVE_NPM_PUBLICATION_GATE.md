@@ -33,7 +33,7 @@ npm run qualify:zig            # expected FAIL while cross-platform and durabili
 
 ## npm first publication
 
-The source repository is private and `package.json` deliberately still contains `"private": true`. Public `npm publish` is not possible without authorized npm identity and explicit publication approval. We have neither a connected npm publish service nor an authenticated npm publish token here. A local tarball install is **not** public release verification.
+The source repository remains private. The package manifest is now marked publishable, but the prepublishOnly hook denies release until the complete compiler and native qualification succeeds. Public `npm publish` is not possible without authorized npm identity and explicit publication approval. We have neither a connected npm publish service nor an authenticated npm publish token here. A local tarball install is **not** public release verification.
 
 After all native and security gates pass, the repository owner must:
 1. Choose and check in the correct license and verify no proprietary/secret files enter the tarball.
