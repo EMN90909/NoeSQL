@@ -52,4 +52,12 @@ jobs:
         run: npm run test:zig
       - name: ReleaseSafe build
         run: npm run build:zig
+      - name: Verify Zig C ABI declarations compile
+        run: cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
+      - name: Verify Noqeri proof checker rejects missing provenance
+        run: |
+          if npm run verify:noqeri; then
+            echo "Fail-closed provenance gate unexpectedly passed without any pinned compiler" >&2
+            exit 1
+          fi
 

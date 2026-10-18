@@ -7,6 +7,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/bridge.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
     const library = b.addLibrary(.{
         .name = "noesql_zig_bridge",
@@ -15,6 +16,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(library);
     b.installFile("noesql_zig_bridge.h", "include/noesql_zig_bridge.h");
+    b.installFile("noesql_zig_pages.h", "include/noesql_zig_pages.h");
     const tests = b.addTest(.{ .root_module = bridge });
     const step = b.step("test", "Exercise the versioned Zig/Noqeri ABI bridge");
     step.dependOn(&b.addRunArtifact(tests).step);
@@ -32,4 +34,28 @@ pub fn build(b: *std.Build) void {
     });
     const wal_tests = b.addTest(.{ .root_module = wal });
     step.dependOn(&b.addRunArtifact(wal_tests).step);
+    const v2_pager = b.createModule(.{
+        .root_source_file = b.path("src/pager_v2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const pager_tests = b.addTest(.{ .root_module = v2_pager });
+    step.dependOn(&b.addRunArtifact(pager_tests).step);
+    const v2_index = b.createModule(.{
+        .root_source_file = b.path("src/index_v2.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const index_tests = b.addTest(.{ .root_module = v2_index });
+    step.dependOn(&b.addRunArtifact(index_tests).step);
+    const v2_abi = b.createModule(.{
+        .root_source_file = b.path("src/storage_abi.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const abi_tests = b.addTest(.{ .root_module = v2_abi });
+    step.dependOn(&b.addRunArtifact(abi_tests).step);
 }

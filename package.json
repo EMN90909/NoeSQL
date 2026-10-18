@@ -22,6 +22,8 @@
     "example:web": "node Examples/embedded-web.mjs",
     "test:zig": "cd Native/zig && zig build test",
     "build:zig": "cd Native/zig && zig build -Doptimize=ReleaseSafe",
-    "qualify:zig": "node scripts/qualify-zig.mjs"
+    "qualify:zig": "node scripts/qualify-zig.mjs",
+    "verify:noqeri": "node scripts/verify-noqeri-bootstrap.mjs",
+    "benchmark:zig-v2": "bash scripts/benchmark-zig-v2.sh"
   }
 }

@@ -1,3 +1,15 @@
+// Force the v2 page exports into the native bridge library while retaining
+// the versioned v1 query callback ABI. The v2 ABI is storage-only.
+comptime {
+    _ = @import("storage_abi.zig").noesql_zig_page_open;
+    _ = @import("storage_abi.zig").noesql_zig_page_get;
+    _ = @import("storage_abi.zig").noesql_zig_page_stage;
+    _ = @import("storage_abi.zig").noesql_zig_page_commit;
+    _ = @import("storage_abi.zig").noesql_zig_page_rollback;
+    _ = @import("storage_abi.zig").noesql_zig_page_checkpoint;
+    _ = @import("storage_abi.zig").noesql_zig_page_generation;
+    _ = @import("storage_abi.zig").noesql_zig_page_close;
+}
 const std = @import("std");
 
 // This Zig module replaces the historical C++ *dispatch bridge* only.

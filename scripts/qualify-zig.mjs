@@ -40,8 +40,14 @@ else{
 // A callback echo test and a caller-selected zero-exit command are NOT native
 // parser/executor/storage conformance. Keep this gate fail-closed until the
 // Zig pager, compiled Noqeri ABI and independently verified suites are wired.
-gate('Zig-owned durable relational engine linked to compiled Noqeri',false,
-  'BLOCKED: Zig currently provides a bounded ABI bridge and read-only legacy verifier, not durable relational execution')
+// A Zig page store is now implemented, but its tests and compiled Noqeri link
+// must pass before it can be selected as a relational production engine.
+if(process.env.NOQERI_ROOT)run('pinned Noqeri self-hosting proof',process.execPath,['scripts/verify-noqeri-bootstrap.mjs'])
+else gate('pinned Noqeri self-hosting proof',false,'NOQERI_ROOT, NOQERI_COMMIT_SHA and NOQERI_SOURCE_CLOSURE_SHA256 are required')
+gate('compiled Noqeri executor linked to Zig pager with differential results',false,
+  'BLOCKED: no trusted Noqeri-compiled native relational executor is linked and tested')
+gate('native cross-platform durability, recovery and security release suite',false,
+  'BLOCKED: Linux-only experimental Zig v2, no crash-powercut/Windows/macOS qualification')
 run('NoeSQL JavaScript/SQLite reference tests',process.execPath,['--test'])
 console.log(JSON.stringify({status:results.every(x=>x.status==='pass')?'qualified':'blocked',gates:results},null,2))
 if(results.some(x=>x.status==='fail'))process.exitCode=1

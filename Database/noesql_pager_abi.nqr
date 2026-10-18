@@ -1,0 +1,20 @@
+module noqeri.database.noesql_pager_abi
+
+// Experimental ABI-only declarations. Not a compiled or linked engine.
+// Caller must authorize principals and keep handles behind a trusted host.
+// Exact C ABI: Native/zig/noesql_zig_pages.h
+extern function noesql_zig_page_open(version: u32, path: string, out: *usize): int
+extern function noesql_zig_page_close(handle: usize): void
+extern function noesql_zig_page_stage(handle: usize, pageId: u32, bytes: *u8, count: usize): int
+extern function noesql_zig_page_commit(handle: usize): int
+extern function noesql_zig_page_rollback(handle: usize): int
+extern function noesql_zig_page_get(handle: usize, pageId: u32, target: *u8, capacity: usize): int
+extern function noesql_zig_page_generation(handle: usize): u64
+extern function noesql_zig_page_checkpoint(handle: usize): int
+
+export function noePagerAbiVersion(): u32 { return 2 as u32 }
+export function noePagerPageBytes(): usize { return 4096 as usize }
+export function noePagerValidHandle(handle: usize): bool { return handle != 0 as usize }
+export function noePagerBounds(id: u32, count: usize): bool {
+    return id < 256 as u32 && count == noePagerPageBytes()
+}
