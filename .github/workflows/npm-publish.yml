@@ -1,0 +1,71 @@
+name: Publish NoeSQL (owner approval and OIDC)
+on:
+  workflow_dispatch:
+    inputs:
+      reviewed_commit:
+        description: Exact reviewed main commit (40 hex chars)
+        required: true
+        type: string
+      confirm:
+        description: Type publish-noesql@0.7.6 after all native and legal gates
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main' && inputs.confirm == 'publish-noesql@0.7.6'
+    environment: npm-public-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify reviewed main commit
+        env:
+          REVIEWED: ${{ inputs.reviewed_commit }}
+        run: |
+          [[ "$REVIEWED" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$REVIEWED"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - run: npm install --global npm@11
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Verify pinned Noqeri compiler, Zig relational integration, tests and legal review
+        env:
+          NOESQL_APPROVE_PUBLICATION: ${{ inputs.confirm }}
+          NOESQL_APPROVED_COMMIT_SHA: ${{ inputs.reviewed_commit }}
+          NOESQL_LICENSE_REVIEWED: ${{ vars.NOESQL_LICENSE_REVIEWED }}
+          NOQERI_ROOT: ${{ vars.NOQERI_ROOT }}
+          NOQERI_COMMIT_SHA: ${{ vars.NOQERI_COMMIT_SHA }}
+          NOQERI_SOURCE_CLOSURE_SHA256: ${{ vars.NOQERI_SOURCE_CLOSURE_SHA256 }}
+          NOQERI_STAGE0: ${{ vars.NOQERI_STAGE0 }}
+          NOQERI_STAGE0_SHA256: ${{ vars.NOQERI_STAGE0_SHA256 }}
+          NOESQL_NATIVE_BIN: ${{ vars.NOESQL_NATIVE_BIN }}
+          NOESQL_NATIVE_BIN_SHA256: ${{ vars.NOESQL_NATIVE_BIN_SHA256 }}
+        run: npm run release:preflight
+      - name: npm publish to next (OIDC)
+        env:
+          NOESQL_APPROVE_PUBLICATION: ${{ inputs.confirm }}
+          NOESQL_APPROVED_COMMIT_SHA: ${{ inputs.reviewed_commit }}
+          NOESQL_LICENSE_REVIEWED: ${{ vars.NOESQL_LICENSE_REVIEWED }}
+          NOQERI_ROOT: ${{ vars.NOQERI_ROOT }}
+          NOQERI_COMMIT_SHA: ${{ vars.NOQERI_COMMIT_SHA }}
+          NOQERI_SOURCE_CLOSURE_SHA256: ${{ vars.NOQERI_SOURCE_CLOSURE_SHA256 }}
+          NOQERI_STAGE0: ${{ vars.NOQERI_STAGE0 }}
+          NOQERI_STAGE0_SHA256: ${{ vars.NOQERI_STAGE0_SHA256 }}
+          NOESQL_NATIVE_BIN: ${{ vars.NOESQL_NATIVE_BIN }}
+          NOESQL_NATIVE_BIN_SHA256: ${{ vars.NOESQL_NATIVE_BIN_SHA256 }}
+        run: npm publish --access public --tag next
