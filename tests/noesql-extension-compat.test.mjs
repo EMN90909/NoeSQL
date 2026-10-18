@@ -1,6 +1,8 @@
 import {test} from 'node:test'
 import {strict as assert} from 'node:assert'
-import {mkdtemp,rm} from 'node:fs/promises'
+import {mkdtemp,rm,writeFile} from 'node:fs/promises'
+import {execFile} from 'node:child_process'
+import {promisify} from 'node:util'
 import {join} from 'node:path'
 import {tmpdir} from 'node:os'
 import {readNqd,runNqd,verifyNqd} from '../Runtime/noesql-store.mjs'
@@ -22,6 +24,19 @@ test('existing legacy .nqd reference databases remain readable',async()=>{
   const data=join(dir,'legacy.nqd')
   try{
     await runNqd(data,schema)
+    assert.equal((await verifyNqd(data)).ok,true)
+  }finally{await rm(dir,{recursive:true,force:true})}
+})
+
+test('CLI runs .nqd source into .nqdb database without renaming legacy files',async()=>{
+  const dir=await mkdtemp(join(tmpdir(),'noesql-script-'))
+  const data=join(dir,'database.nqdb')
+  const source=join(dir,'program.nqd')
+  const cli=new URL('../Runtime/noesql-cli.mjs',import.meta.url).pathname
+  try{
+    await writeFile(source,schema)
+    const {stdout}=await promisify(execFile)(process.execPath,[cli,'run',data,source])
+    assert.equal(JSON.parse(stdout)[0].kind,'table')
     assert.equal((await verifyNqd(data)).ok,true)
   }finally{await rm(dir,{recursive:true,force:true})}
 })
