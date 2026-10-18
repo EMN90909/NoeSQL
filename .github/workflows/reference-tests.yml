@@ -25,3 +25,31 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: Run reference and security regression tests
         run: npm test
+
+  native-cpp:
+    name: Native C++ compatibility and recovery
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native headers
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev libsqlite3-dev
+      - name: Compile and run native fault, ABI and durability tests
+        run: make -C Native/cpp test
+      - name: Validate corrected SQLite benchmark harness
+        run: make -C Native/cpp benchmark-compare
+
+  zig:
+    name: Zig 0.15.2 bridge and legacy verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - name: Build and test native Zig verification components
+        run: npm run test:zig
+      - name: ReleaseSafe build
+        run: npm run build:zig
+

@@ -36,6 +36,16 @@ int main(){
   std::vector<Mutation> many;for(int i=0;i<800;++i){char key[32];std::snprintf(key,sizeof(key),"row-%04d",i);many.push_back({Mutation::Kind::Put,key,std::string(120,'v')});}
   db.transact("admin",pass,many);
   {noesql::Store reopened(path);assert(reopened.get("reader",readerPass,"row-0799")==std::optional<std::string>(std::string(120,'v')));assert(reopened.scan("reader",readerPass,"row-").size()==800);}
+  // An empty WAL left by a crash after O_EXCL must be removed under writer lock.
+  {const std::string orphan=path+".wal";int f=::open(orphan.c_str(),O_CREAT|O_EXCL|O_WRONLY,0600);
+   assert(f>=0);assert(::close(f)==0);}
+  db.transact("admin",pass,{{Mutation::Kind::Put,"post-empty-wal","recovered"}});
+  assert(db.get("admin",pass,"post-empty-wal")==std::optional<std::string>("recovered"));
+  assert(!std::filesystem::exists(path+".wal"));
+  // v1 data files use .nqdb, while legacy .nqd remains accepted explicitly.
+  {noesql::Store fresh(dir+"/fresh.nqdb");fresh.initialize(pass);
+   fresh.transact("admin",pass,{{Mutation::Kind::Put,"extension","nqdb"}});
+   assert(fresh.get("admin",pass,"extension")==std::optional<std::string>("nqdb"));}
   db.transact("admin",pass,{{Mutation::Kind::Delete,"row-0000",""}});
   assert(!db.get("admin",pass,"row-0000"));
   noesql::Limits small;small.max_mutations=1;noesql::Store limited(path,small);

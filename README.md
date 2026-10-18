@@ -137,3 +137,12 @@ store.close()
 ```
 
 The private HTTP example is in `Examples/embedded-web.mjs`. Never expose database service keys to browsers. To test: `npm run test:embedded`; to benchmark the language overhead against direct prepared SQLite: `npm run benchmark:embedded`. These results are **not a claim that the native NoeSQL engine matches SQLite performance**. The independent native `.nqd` page kernel is unchanged, SQLite WAL must use a persistent local disk, and neither backend has completed all production release gates. Node's `node:sqlite` API remains experimental in Node.js 22.
+
+
+## v1.0 remediation in progress: language/data extensions (18 October 2026)
+
+Language scripts now prefer **`.nqd`** (the former `.noe` remains a CLI compatibility alias). New database data files prefer **`.nqdb`**. Existing experimental JSON or native-binary **`.nqd` data** stays explicitly supported by its respective legacy reader; it is *not* automatically interpreted as a script or converted. Pass script and database paths in the correct CLI positions. **Back up legacy data before migration**; no lossless cross-format migration tool exists yet.
+
+Example reference-only command: `node Runtime/noesql-cli.mjs run ./scratch.nqdb tests/school.nqd`.
+
+This change begins hardening but does **not** make NoeSQL a unified native Noqeri+Zig database. Zig adds a **read-only legacy WAL verifier** alongside its legacy page verifier. C++ remains the compatibility storage kernel; JS and SQLite remain experimental adapters. Native relational integration, incremental WAL, snapshot transactions, cross-platform fault testing, and actual compiler bootstrap proof are still blockers. See [v1 remediation plan](Doc/NOESQL_V1_REMEDIATION_PLAN.md) and [security assessment](Doc/NOESQL_SECURITY_REMEDIATION_REVIEW.md).
