@@ -88,3 +88,25 @@ test('migration refuses overwrite of an existing file',()=>fixture(async db=>{
  await writeZigNoedb(db,insert('A'),empty)
  await assert.rejects(writeZigNoedb(db,insert('B'),empty,async()=>{},{newOnly:true}),/already exists/)
 }))
+test('accepts a zero-byte Zig-initialized .noedb and empty WAL, then writes first commit',()=>fixture(async db=>{
+ await writeFile(db,Buffer.alloc(0));await writeFile(db+'.wal',Buffer.alloc(0))
+ await writeZigNoedb(db,insert('A'),empty)
+ assert.equal((await verifyZigNoedb(db)).storageSequence,1)
+}))
+test('removing large reference rows scrubs obsolete active Zig pages in the same commit',()=>fixture(async db=>{
+ const secret='SUPERSECRET'.repeat(900)
+ await writeZigNoedb(db,async before=>({database:{...before,tables:{t:{fields:[],rows:[{data:secret}],nextId:2}}},results:[]}),empty)
+ assert.ok((await readFile(db)).includes(Buffer.from('SUPERSECRET')))
+ await writeZigNoedb(db,async before=>({database:{...before,tables:{t:{fields:[],rows:[],nextId:2}}},results:[]}),empty)
+ assert.equal((await readFile(db)).includes(Buffer.from('SUPERSECRET')),false)
+}))
+test('subprocess SIGKILL after WAL directory fsync recovers durable new state',()=>fixture(async db=>{
+ await writeZigNoedb(db,insert('Ada'),empty)
+ const url=new URL('../Runtime/noesql-zig-pages.mjs',import.meta.url).href
+ const script=`import {writeZigNoedb} from ${JSON.stringify(url)};\nconst make=()=>({format:'noesql-reference-1',name:null,version:1,tables:{},indexes:{},queries:{}});\nawait writeZigNoedb(${JSON.stringify(db)},async before=>({database:{...before,tables:{people:{...before.tables.people,rows:[...before.tables.people.rows,{name:'Bea'}]}}},results:[]}),make,p=>{if(p==='afterWalDirectorySync')process.kill(process.pid,'SIGKILL')});`
+ const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',timeout:30000})
+ assert.equal(child.signal,'SIGKILL',child.stderr)
+ assert.deepEqual((await readZigNoedb(db,empty)).tables.people.rows.map(r=>r.name),['Ada','Bea'])
+ await writeZigNoedb(db,insert('Cam'),empty)
+ assert.deepEqual((await readZigNoedb(db,empty)).tables.people.rows.map(r=>r.name),['Ada','Bea','Cam'])
+}))

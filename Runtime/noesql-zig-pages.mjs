@@ -147,7 +147,7 @@ export function decodeZigWal(bytes){
   return {commits,validBytes:off,incomplete:off!==bytes.length}
 }
 function recover(checkpoint,wal){
-  const base=checkpoint?decodeZigCheckpoint(checkpoint):{generation:0,pages:new Map()}
+  const base=checkpoint?.length?decodeZigCheckpoint(checkpoint):{generation:0,pages:new Map()}
   const scanned=decodeZigWal(wal||Buffer.alloc(0))
   if(base.generation&&scanned.commits.length&&scanned.commits.at(-1).generation<base.generation)fail('stale WAL generation')
   const pages=new Map(base.pages)
@@ -158,7 +158,7 @@ function recover(checkpoint,wal){
     for(const [id,page] of c.pages)pages.set(id,page)
     generation=c.generation
   }
-  if(!generation){if(checkpoint||wal?.length)fail('no durable reference-state commit');return {state:null,pages,generation,scanned}}
+  if(!generation){if(checkpoint?.length||wal?.length)fail('no durable reference-state commit');return {state:null,pages,generation,scanned}}
   const state=decodeStatePages(pages,generation)
   return {state,pages,generation,scanned}
 }
@@ -172,7 +172,7 @@ export async function readZigNoedb(path,emptyDatabase){
 export async function verifyZigNoedb(path){
   return withZigLock(path,async()=>{
     const checkpoint=await readFileSafe(path,MAX_DB_BYTES),wal=await readFileSafe(path+'.wal',MAX_WAL_BYTES)
-    if(!checkpoint&&!wal)fail('database does not exist')
+    if(!checkpoint?.length&&!wal?.length)fail('database does not exist or has no committed state')
     const recovered=recover(checkpoint,wal)
     return {ok:true,tables:Object.keys(recovered.state.tables).length,walPresent:!!wal?.length,storageSequence:recovered.generation,format:DB_MAGIC}
   })
@@ -234,6 +234,9 @@ export async function writeZigNoedb(path,mutate,makeEmpty,inject=async()=>{},{ne
     if(before.generation>=Number.MAX_SAFE_INTEGER)fail('generation exhausted')
     outcome.database.storageSequence=before.generation+1
     const pages=encodeReferencePages(outcome.database)
+    // Overwrite obsolete pages in the same transaction so deleted data does not
+    // remain in the old active-page slots when the full-state image shrinks.
+    for(let id=pages.size;id<MAX_TX_PAGES;id++)if(before.pages.has(id))pages.set(id,Buffer.alloc(PAGE_BYTES))
     const record=encodeZigTransaction(before.generation+1,pages)
     if(record.length>MAX_WAL_BYTES)fail('WAL exceeds resource budget')
     const f=await open(path+'.wal','a',0o600)
