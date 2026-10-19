@@ -1,0 +1,29 @@
+import "../Database/noesql_native_index.nqr"
+// Native-only smoke fixture. Requires an independently verified Noqeri native
+// compiler producing machine code, plus the Zig pager archive. Never invoke as
+// a Node.js simulator or count as a full relational SQL engine.
+export function noeNativeIndexSmoke(path: string): isize {
+    let handle: usize = 0 as usize
+    if noesql_zig_page_open(noePagerAbiVersion(),path,&handle) != 0 { return -50 as isize }
+    if noeIndexPut(handle,5 as u32,19 as i64,8 as u32) != 0 as isize {
+        noesql_zig_page_close(handle)
+        return -51 as isize
+    }
+    if noeIndexPut(handle,5 as u32,-3 as i64,9 as u32) != 0 as isize {
+        noesql_zig_page_rollback(handle)
+        noesql_zig_page_close(handle)
+        return -52 as isize
+    }
+    if noesql_zig_page_commit(handle) != 0 {
+        noesql_zig_page_close(handle)
+        return -53 as isize
+    }
+    noesql_zig_page_close(handle)
+    handle = 0 as usize
+    if noesql_zig_page_open(noePagerAbiVersion(),path,&handle) != 0 { return -54 as isize }
+    let actual: u32 = 0 as u32
+    let status: isize = noeIndexLookup(handle,5 as u32,-3 as i64,&actual)
+    noesql_zig_page_close(handle)
+    if status != 0 as isize || actual != 9 as u32 { return -55 as isize }
+    return 0 as isize
+}

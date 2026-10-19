@@ -1,5 +1,6 @@
 const std = @import("std");
 const storage = @import("pager_v2.zig");
+const index = @import("index_v2.zig");
 
 // Native Zig-owned pager ABI for FUTURE compiled Noqeri callers.
 // ABI v2, experimental Linux-only; must not be treated as a public unauthenticated
@@ -11,6 +12,8 @@ pub const STATUS_NOT_FOUND: i32 = 1;
 pub const STATUS_INVALID: i32 = -1;
 pub const STATUS_FAILURE: i32 = -2;
 pub const STATUS_BUFFER_TOO_SMALL: i32 = -3;
+pub const STATUS_DUPLICATE: i32 = -4;
+pub const STATUS_INDEX_FULL: i32 = -5;
 
 pub export fn noesql_zig_page_open(version: u32, name: ?[*:0]const u8, out: ?*?*anyopaque) i32 {
     const dest = out orelse return STATUS_INVALID;
@@ -55,6 +58,72 @@ pub export fn noesql_zig_page_get(handle: ?*anyopaque, page_id: u32, output: ?[*
     @memcpy(dest[0..storage.PAGE_BYTES], src);
     return STATUS_OK;
 }
+
+ // Native WAL-backed single-page integer-key index for trusted Noqeri callers.
+ // The caller must reserve an index page distinct from every data/catalog page,
+ // and commit or roll back through the same pager handle. No separate index
+ // fsync exists: index edits join the Zig pager's existing atomic transaction.
+ // Current capacity is one page (337 entries), NOT a B+tree or SQL optimizer.
+fn indexPageValid(id: u32) bool {
+    return id > 0 and id < storage.MAX_PAGES;
+}
+fn indexRead(pager: *storage.Pager, page_id: u32) index.IndexError!index.Index {
+    const bytes = pager.readPending(page_id) orelse return index.Index{};
+    return index.Index.decode(bytes);
+}
+pub export fn noesql_zig_index_find(handle: ?*anyopaque, index_page: u32, key: i64, out_page: ?*u32) i32 {
+    const output = out_page orelse return STATUS_INVALID;
+    output.* = 0;
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    if (!indexPageValid(index_page)) return STATUS_INVALID;
+    const current = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    output.* = current.find(key) orelse return STATUS_NOT_FOUND;
+    return STATUS_OK;
+}
+pub export fn noesql_zig_index_insert(handle: ?*anyopaque, index_page: u32, key: i64, data_page: u32) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    if (!indexPageValid(index_page) or data_page == 0 or data_page >= storage.MAX_PAGES or data_page == index_page) return STATUS_INVALID;
+    var current = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    current.insert(key, data_page) catch |err| return switch (err) {
+        error.Duplicate => STATUS_DUPLICATE,
+        error.IndexFull => STATUS_INDEX_FULL,
+        else => STATUS_FAILURE,
+    };
+    const encoded = current.encode();
+    pager.stage(index_page, &encoded) catch return STATUS_FAILURE;
+    return STATUS_OK;
+}
+pub export fn noesql_zig_index_delete(handle: ?*anyopaque, index_page: u32, key: i64) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    if (!indexPageValid(index_page)) return STATUS_INVALID;
+    var current = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    current.delete(key) catch |err| return switch (err) {
+        error.NotFound => STATUS_NOT_FOUND,
+        else => STATUS_FAILURE,
+    };
+    const encoded = current.encode();
+    pager.stage(index_page, &encoded) catch return STATUS_FAILURE;
+    return STATUS_OK;
+}
+pub export fn noesql_zig_index_range(handle: ?*anyopaque, index_page: u32, minimum: i64, maximum: i64, keys: ?[*]i64, pages: ?[*]u32, capacity: usize, written: ?*usize) i32 {
+    const count = written orelse return STATUS_INVALID;
+    count.* = 0;
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    if (!indexPageValid(index_page) or minimum > maximum or capacity > index.CAPACITY) return STATUS_INVALID;
+    const current = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    const items = current.range(minimum, maximum);
+    count.* = items.len;
+    if (items.len > capacity) return STATUS_BUFFER_TOO_SMALL;
+    if (items.len == 0) return STATUS_OK;
+    const output_keys = keys orelse return STATUS_INVALID;
+    const output_pages = pages orelse return STATUS_INVALID;
+    for (items, 0..) |item, i| {
+        output_keys[i] = item.key;
+        output_pages[i] = item.page_id;
+    }
+    return STATUS_OK;
+}
+
 // Cross-runtime reference-state container validator. The Zig pager owns page,
 // transaction and checksum semantics; the Noqeri executor owns SQL and schema.
 fn little32(bytes: []const u8) u32 {

@@ -189,6 +189,15 @@ pub const Pager = struct {
         if (id >= MAX_PAGES or !self.active[id]) return null;
         return self.pages[id][0..];
     }
+    // Transaction-local visibility: an index may be updated several times in a
+    // single WAL transaction. Readers in the owning handle see staged bytes.
+    pub fn readPending(self: *const Pager, id: u32) ?[]const u8 {
+        if (id >= MAX_PAGES) return null;
+        for (self.pending[0..self.pending_count]) |*mutation| {
+            if (mutation.id == id) return mutation.bytes[0..];
+        }
+        return self.read(id);
+    }
     pub fn snapshot(self: *const Pager) Error!Snapshot {
         const pages = self.allocator.dupe(Page, self.pages) catch return error.OutOfMemory;
         return .{ .allocator = self.allocator, .pages = pages, .generation = self.generation, .active = self.active };

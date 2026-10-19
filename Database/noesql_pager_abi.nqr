@@ -11,6 +11,10 @@ extern function noesql_zig_page_rollback(handle: usize): int
 extern function noesql_zig_page_get(handle: usize, pageId: u32, target: *u8, capacity: usize): int
 extern function noesql_zig_page_generation(handle: usize): u64
 extern function noesql_zig_page_checkpoint(handle: usize): int
+extern function noesql_zig_index_find(handle: usize, indexPage: u32, key: i64, outPage: *u32): int
+extern function noesql_zig_index_insert(handle: usize, indexPage: u32, key: i64, dataPage: u32): int
+extern function noesql_zig_index_delete(handle: usize, indexPage: u32, key: i64): int
+extern function noesql_zig_index_range(handle: usize, indexPage: u32, minimum: i64, maximum: i64, keys: *i64, pages: *u32, capacity: usize, written: *usize): int
 
 export function noePagerComponentMajor(): u32 { return 1 as u32 }
 export function noePagerComponentMinor(): u32 { return 0 as u32 }
