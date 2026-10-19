@@ -19,3 +19,7 @@ These are **bounded guarantees**, not a declaration of production-grade ACID: da
 ## Grouped reference execution optimization (19 October 2026)
 
 The bounded reference relational selector now computes grouped count, sum, min and max in streaming per-group state, preserving NULL semantics, checked integer overflow, and the 100,000 matching-row safety limit. A pure predicate on base-table columns is evaluated before an inner join only when the expression is a safe combination of comparisons and boolean operators. Query-local hash join remains the equality-join path. These improvements avoid retaining every matched row solely to aggregate it; they are not evidence of native SQL parity or a cost-based optimizer comparable to established databases.
+
+## Monotonic reference commit sequence
+
+New reference checkpoints include a safe-integer `storageSequence` that increases once per committed write (legacy checkpoints without the field are treated as sequence zero). When both a valid checkpoint and a committed WAL exist, the reader refuses a lower WAL sequence and refuses conflicting same-sequence images. A complete WAL can still recover a corrupted checkpoint. These checks protect against accidental stale-WAL replay, but **not** malicious rollback of both files or authenticated tampering. A future generation-linked Zig-native format is still required for unified storage.

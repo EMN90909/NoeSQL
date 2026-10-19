@@ -52,7 +52,13 @@ function decode(content) {
   if(file?.magic!=='NOESQL-NQD-EXPERIMENTAL'||file.version!==1||typeof file.payload!=='string'||file.checksum!==checksum(file.payload))throw Error('NoeSQL snapshot checksum/version mismatch')
   try {state=JSON.parse(file.payload)}catch{throw Error('NoeSQL snapshot payload invalid')}
   if(state?.format!=='noesql-reference-1')throw Error('NoeSQL snapshot state version mismatch')
+  sequence(state) // validate optional monotonic reference commit sequence
   return state
+}
+function sequence(state) {
+  const n=state.storageSequence??0
+  if(!Number.isSafeInteger(n)||n<0)throw Error('NoeSQL invalid storage commit sequence')
+  return n
 }
 async function baseState(path) {
   const bytes = await boundedRead(path, MAX_FILE)
@@ -67,7 +73,18 @@ async function walState(path) {
 export async function readNqd(path) {
   pathCheck(path)
   const wal=await walState(path)
-  return wal || await baseState(path)
+  if(!wal)return baseState(path)
+  // Replay is never allowed to roll a valid newer checkpoint backward.
+  // A corrupt base image can still be recovered from a valid committed WAL.
+  const bytes=await boundedRead(path,MAX_FILE)
+  if(bytes!==null){
+    let snapshot
+    try{snapshot=decode(bytes)}catch{return wal}
+    if(sequence(wal)<sequence(snapshot))throw Error('NOE-WAL: stale WAL generation')
+    if(sequence(wal)===sequence(snapshot)&&checksum(JSON.stringify(wal))!==checksum(JSON.stringify(snapshot)))
+      throw Error('NOE-WAL: WAL/checkpoint generation conflict')
+  }
+  return wal
 }
 async function syncDirectory(path) {
   if(process.platform==='win32')return
@@ -126,8 +143,8 @@ export async function verifyNqd(path) {
   const recovered=journal===null?null:replayWal(journal).committed
   if(snapshot===null && !recovered)
     throw Error('NoeSQL database has no committed snapshot or WAL image')
-  const state=recovered?decode(recovered):decode(snapshot)
-  return {ok:true,tables:Object.keys(state.tables).length,walPresent:journal!==null}
+  const state=await readNqd(path)
+  return {ok:true,tables:Object.keys(state.tables).length,walPresent:journal!==null,storageSequence:sequence(state)}
 }
 export async function runNqd(path, source, params={}, options={}) {
   pathCheck(path)
@@ -144,6 +161,8 @@ export async function runNqd(path, source, params={}, options={}) {
     const outcome=execute(source,before,params)
     // Read-only transactions should neither grow the WAL nor rewrite the database.
     if(JSON.stringify(outcome.database)===JSON.stringify(before))return outcome.results
+    if(sequence(before)===Number.MAX_SAFE_INTEGER)throw Error('NOE-WAL: commit sequence exhausted')
+    outcome.database.storageSequence=sequence(before)+1
     await walAppend(path,outcome.database,inject)
     await checkpoint(path,outcome.database,inject)
     return outcome.results
