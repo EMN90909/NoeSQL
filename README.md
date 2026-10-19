@@ -63,6 +63,15 @@ The reference `.noedb` store and native Zig pager now share **NQDB0002 checkpoin
 
 Legacy reference `.nqd`/`.nqdb` files remain separate and are converted explicitly: `node Runtime/noesql-cli.mjs migrate old.nqdb new.noedb`. The source is preserved, and an existing destination is rejected. The reference bridge supports at most 15 payload pages per atomic write and is not suitable for production data. See [wire format, migration and limitations](Doc/NOESQL_UNIFIED_NOEDB_FORMAT.md).
 
+### 19 October 2026: native SQL integration and durability qualifications
+
+- Native compiler/link smoke now retains real assembly, a Noqeri-generated object, the Zig-linked executable and SHA-256 provenance **only after its trusted Stage-2 compiler and actual execution gates pass**. No eligible compiler is currently available to produce these artifacts here.
+- The reference query planner chooses bounded hash joins for safe equality conjunctions and nested loops for tiny relations; queries continue to recheck their complete ON predicates. SQL join/group/left-join differential tests and regression cases were added. This is **not** a native cost-based optimizer.
+- The Zig pager and Node `.noedb` codec now allow up to 256 modified pages in one transaction (255 reference payload pages, roughly 1 MiB). The Zig recovery path rejects stale and conflicting WAL/checkpoint generations. Linux crash-boundary and competing-writer tests have been added but the native Zig test suite could not run locally without Zig 0.15.2.
+- `npm run qualify:native-e2e` now requires native parser and executor parity for joins, grouped and left-join aggregates, typed references, bound parameters, atomic rollback, generation stability and cold restart. The native executable is **not complete or release-qualified**. GitHub CI remains failing with unavailable job logs/steps.
+
+See [native qualification report](Doc/NOESQL_NATIVE_QUALIFICATION_2026-10-19.md), [WAL hardening](Doc/NOESQL_ZIG_WAL_HARDENING.md), and [full native SQL contract](Doc/NOESQL_NATIVE_E2E_SCOPE.md).
+
 ## Layout
 
 - `Database/*.nqr`: native Noqeri source, unverified until compiled.

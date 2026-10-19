@@ -21,7 +21,7 @@
     "benchmark:embedded": "node Benchmarks/embedded-vs-sqlite.mjs 10000 3000",
     "example:web": "node Examples/embedded-web.mjs",
     "test:zig": "cd Native/zig && zig build test",
-    "test:noedb": "node --test tests/noesql-zig-pages.test.mjs tests/noesql-migrate-noedb.test.mjs tests/noesql-format-recovery.test.mjs tests/noesql-wal-sequence.test.mjs",
+    "test:noedb": "node --test tests/noesql-zig-pages.test.mjs tests/noesql-migrate-noedb.test.mjs tests/noesql-format-recovery.test.mjs tests/noesql-wal-sequence.test.mjs tests/noesql-large-noedb.test.mjs tests/noesql-native-acid-matrix.test.mjs",
     "test:zig-page-roundtrip": "node scripts/verify-zig-page-roundtrip.mjs",
     "build:zig": "cd Native/zig && zig build -Doptimize=ReleaseSafe",
     "qualify:zig": "node scripts/qualify-zig.mjs",
@@ -40,7 +40,8 @@
     "benchmark:relational-compare": "node Benchmarks/qualify-relational-benchmark.mjs --transactions=200 --repeats=7",
     "test:relational-benchmark": "node --test tests/noesql-relational-benchmark.test.mjs",
     "build:native-link": "node scripts/build-noqeri-zig-link.mjs",
-    "test:native-link-contract": "node --test tests/noesql-native-link.test.mjs"
+    "test:native-link-contract": "node --test tests/noesql-native-link.test.mjs tests/noesql-native-artifact-contract.test.mjs",
+    "test:query-planner": "node --test tests/noesql-query-planner.test.mjs tests/noesql-query-plan-integration.test.mjs"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",
