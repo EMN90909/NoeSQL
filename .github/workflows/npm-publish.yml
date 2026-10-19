@@ -55,6 +55,8 @@ jobs:
           NOQERI_STAGE0_SHA256: ${{ vars.NOQERI_STAGE0_SHA256 }}
           NOESQL_NATIVE_BIN: ${{ vars.NOESQL_NATIVE_BIN }}
           NOESQL_NATIVE_BIN_SHA256: ${{ vars.NOESQL_NATIVE_BIN_SHA256 }}
+          NOQERI_NATIVE_COMPILER: ${{ vars.NOQERI_NATIVE_COMPILER }}
+          NOQERI_NATIVE_COMPILER_SHA256: ${{ vars.NOQERI_NATIVE_COMPILER_SHA256 }}
         run: npm run release:preflight
       - name: npm publish to next (OIDC)
         env:
@@ -68,4 +70,6 @@ jobs:
           NOQERI_STAGE0_SHA256: ${{ vars.NOQERI_STAGE0_SHA256 }}
           NOESQL_NATIVE_BIN: ${{ vars.NOESQL_NATIVE_BIN }}
           NOESQL_NATIVE_BIN_SHA256: ${{ vars.NOESQL_NATIVE_BIN_SHA256 }}
+          NOQERI_NATIVE_COMPILER: ${{ vars.NOQERI_NATIVE_COMPILER }}
+          NOQERI_NATIVE_COMPILER_SHA256: ${{ vars.NOQERI_NATIVE_COMPILER_SHA256 }}
         run: npm publish --access public --tag next
