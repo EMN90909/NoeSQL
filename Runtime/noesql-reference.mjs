@@ -224,8 +224,10 @@ export function execute(source, database=emptyDatabase(), bindings={}) {
   const program = typeof source==='string'?parse(source):source
   if (database.format!=='noesql-reference-1') fail('NOE200',atUnknown,'unsupported database format')
   const results=[]
-  // The caller owns persistence. Execute against a clone, then publish only on success.
-  const db=structuredClone(database)
+  // Pure SELECT programs never mutate catalog/rows, so avoid copying the entire
+  // database on every read. Writes still execute against an isolated clone and
+  // publish only after all statements (including atomic scopes) succeed.
+  const db=program.every(statement=>statement.k==='get') ? database : structuredClone(database)
   function tableFor(s) { const t=db.tables[s.table]; if(!Object.hasOwn(db.tables,s.table)) fail('NOE100',s.at,`unknown table ${s.table}`);return t }
   function fieldsFor(t) { return Object.fromEntries(t.fields.map(f=>[f.name,f])) }
   function validExpr(e,t,params,expected) {const got=infer(e,fieldsFor(t),params);if(expected&&got!==expected&&got!=='null')fail('NOE124',e.at,`expected ${expected}, got ${got}`)}

@@ -60,7 +60,7 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
     for(const row of other.rows){
       const v=row[joinKey[1]]
       if(v===null)continue
-      const key=JSON.stringify([typeof v,v])
+      const key=v
       const bucket=hash.get(key)
       if(bucket)bucket.push(row)
       else hash.set(key,[row])
@@ -106,7 +106,7 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
     if(pushdown&&value(s.where,baseRow,params)!==true)continue
     if(other){
       const leftValue=joinKey?source[joinKey[0]]:null
-      const candidates=plan.join==='hash'?(leftValue===null?[]:(hash.get(JSON.stringify([typeof leftValue,leftValue]))||[])):other.rows
+      const candidates=plan.join==='hash'?(leftValue===null?[]:(hash.get(leftValue)||[])):other.rows
       let matchedJoin=false
       for(const target of candidates){
         if(++pairs>MAX_PAIRS)fail('NOE238',s.at,'join exceeds one million evaluated row pairs')
@@ -164,5 +164,6 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
   const take=s.take?value(s.take,{},params):result.length
   if(!Number.isSafeInteger(skip)||!Number.isSafeInteger(take)||skip<0||take<0)
     fail('NOE206',s.at,'skip/take must be nonnegative integers')
-  return {kind:'get',rows:structuredClone(result.slice(skip,skip+take))}
+  // Projection and aggregation build fresh result objects; no deep clone is needed.
+  return {kind:'get',rows:result.slice(skip,skip+take)}
 }
