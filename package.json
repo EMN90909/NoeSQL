@@ -43,7 +43,9 @@
     "test:native-link-contract": "node --test tests/noesql-native-link.test.mjs tests/noesql-native-artifact-contract.test.mjs",
     "test:query-planner": "node --test tests/noesql-query-planner.test.mjs tests/noesql-query-plan-integration.test.mjs",
     "test:readonly-fastpath": "node --test tests/noesql-readonly-fastpath.test.mjs",
-    "test:native-index-contract": "node --test tests/noesql-native-index-contract.test.mjs"
+    "test:native-index-contract": "node --test tests/noesql-native-index-contract.test.mjs",
+    "benchmark:read-path": "node Benchmarks/read-path-profile.mjs 1000 7",
+    "test:read-path-profile": "node --test tests/noesql-read-path-profile.test.mjs"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",

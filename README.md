@@ -7,7 +7,7 @@ NoeSQL is an experimental, beginner-friendly database language and a developing 
 ## Current architecture and the Noqeri + Zig migration
 
 - **Noqeri (`Database/*.nqr`)** is intended to own the parser, IR verification, execution semantics, and future native storage/WAL implementation. Follow the compiler and language conventions in [the Noqeri repository](https://github.com/EMN90909/Noqeri).
-- **Zig 0.15.2 (`Native/zig/`)** is the new versioned C ABI bridge for a future compiled Noqeri engine. It enforces callback, ABI and buffer bounds. The Zig bridge does **not** yet run relational NoeSQL or persist pages.
+- **Zig 0.15.2 (`Native/zig/`)** provides a Linux WAL pager with NQDB0002 persistence, plus an experimental single-page 337-entry integer index C ABI for trusted Noqeri callers. This is not a general indexed SQL engine or a verified native executable.
 - **C++17 (`Native/cpp/`)** remains the existing experimental native page-store and legacy bridge until byte-compatible Zig storage, recovery, auth, and fault tests are proven. The C++ kernel is not removed in this increment to avoid risking existing `.nqd` data.
 - **JavaScript (`Runtime/noesql-reference.mjs`)** remains the reference oracle for semantic tests and future differential testing against the native engine.
 

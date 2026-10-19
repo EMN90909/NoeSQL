@@ -24,3 +24,20 @@ compiled Noqeri executable. Noqeri's Stage-2 native compiler and Zig linkage
 must pass the repository's strict proof and native E2E gates before release.
 Native Zig/Noqeri binaries were not built in an environment without Zig and a
 trusted Stage-2 compiler seed; the ABI needs compilation and integration tests.
+## Reference profiling (not the native engine)
+
+After the pure-SELECT no-copy changes, profile realistic bounded reads with:
+
+```bash
+npm run benchmark:read-path
+node Benchmarks/read-path-profile.mjs 5000 7
+node --cpu-prof Benchmarks/read-path-profile.mjs 1000 15
+```
+
+The profiler builds valid synthetic rows directly so SQL insertion time is not
+mixed into SELECT timings. It measures a selective equality scan, a filter
+scan and a hash-join/group query, and separately measures the deep database
+clone removed from pure reads. It verifies result sizes on every trial.
+The indexed physical Zig single-page API is not yet used by the reference SQL
+optimizer. This profiler **does not measure a native Noqeri executable or
+SQLite** and cannot justify cross-engine speed claims.
