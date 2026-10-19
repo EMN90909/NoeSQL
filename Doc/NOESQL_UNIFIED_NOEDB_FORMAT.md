@@ -17,7 +17,7 @@ The Zig pager's `page_get` can retrieve this same page 0 and the payload pages; 
 
 On Linux the reference writer uses system `flock` to hold the **same persistent** `.noedb.lck` inode and exclusive lock as Zig. Never unlink that lockfile. Writers stage a checksummed full-state page mutation transaction, sync WAL and directory, fsync a temporary checkpoint, rename, sync parent, then truncate and fsync the WAL. Replay accepts complete checksummed committed transactions, rejects stale WAL generations, and discards partial tails before appending. Failure injection and checksum/locking regression tests are included.
 
-This reference bridge intentionally uses **at most 16 mutated pages per transaction**, with one manifest plus at most 15 UTF-8 data pages (~60 KiB JSON). Larger database states reject before any disk change. An eventual native incremental row/index encoding and transaction machinery must remove this limit and improve write amplification.
+This reference bridge intentionally uses **at most 16 mutated pages per transaction**, with one manifest plus at most 15 UTF-8 data pages (~60 KiB JSON). Larger database states reject before any new transaction begins. Shrinking state zeroes previously occupied reference payload pages atomically, and a reference writer fails closed if the native database contains page ids outside the reserved reference application area. Matching-generation WAL records must match the checkpoint's already committed page bytes. An eventual native incremental row/index encoding and transaction machinery must remove this limit and improve write amplification.
 
 ## Migration
 

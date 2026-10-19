@@ -110,3 +110,20 @@ test('subprocess SIGKILL after WAL directory fsync recovers durable new state',(
  await writeZigNoedb(db,insert('Cam'),empty)
  assert.deepEqual((await readZigNoedb(db,empty)).tables.people.rows.map(r=>r.name),['Ada','Bea','Cam'])
 }))
+test('rejects WAL at checkpoint generation with conflicting page payload',()=>fixture(async db=>{
+ await writeZigNoedb(db,insert('Ada'),empty)
+ const content=await readFile(db)
+ const pages=decodeZigCheckpoint(content).pages
+ const malicious=new Map([[0,Buffer.from(pages.get(0))]])
+ malicious.get(0)[100]=1
+ await writeFile(db+'.wal',encodeZigTransaction(1,malicious))
+ await assert.rejects(readZigNoedb(db,empty),/generation conflict/)
+}))
+test('reference refuses to overwrite native pages outside its bounded application area',()=>fixture(async db=>{
+ await writeZigNoedb(db,insert('Ada'),empty)
+ const contents=await readFile(db)
+ const snapshot=decodeZigCheckpoint(contents)
+ snapshot.pages.set(17,Buffer.alloc(PAGE_BYTES,42))
+ await writeFile(db,encodeZigCheckpoint(snapshot.generation,snapshot.pages))
+ await assert.rejects(writeZigNoedb(db,insert('Bea'),empty),/native pages beyond reference payload limit/)
+}))

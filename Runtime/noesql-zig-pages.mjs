@@ -150,6 +150,14 @@ function recover(checkpoint,wal){
   const base=checkpoint?.length?decodeZigCheckpoint(checkpoint):{generation:0,pages:new Map()}
   const scanned=decodeZigWal(wal||Buffer.alloc(0))
   if(base.generation&&scanned.commits.length&&scanned.commits.at(-1).generation<base.generation)fail('stale WAL generation')
+  // A WAL record at the checkpoint generation must agree with that durable
+  // checkpoint; otherwise two conflicting histories would be silently merged.
+  const repeated=scanned.commits.find(c=>c.generation===base.generation)
+  if(repeated){
+    for(const [id,page] of repeated.pages){
+      if(!base.pages.get(id)?.equals(page))fail('WAL/checkpoint generation conflict')
+    }
+  }
   const pages=new Map(base.pages)
   let generation=base.generation
   for(const c of scanned.commits){
@@ -220,6 +228,8 @@ export async function writeZigNoedb(path,mutate,makeEmpty,inject=async()=>{},{ne
     const dbBytes=await readFileSafe(path,MAX_DB_BYTES),walBytes=await readFileSafe(path+'.wal',MAX_WAL_BYTES)
     if(newOnly&&(dbBytes!==null||walBytes!==null))fail('destination database already exists')
     const before=recover(dbBytes,walBytes)
+    if([...before.pages.keys()].some(id=>id>=MAX_TX_PAGES))
+      fail('native pages beyond reference payload limit; reference mutation refused')
     // Never append after a torn WAL suffix; remove only the proven incomplete tail.
     if(before.scanned.incomplete){
       const f=await open(path+'.wal','r+')
