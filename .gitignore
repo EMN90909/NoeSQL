@@ -9,3 +9,6 @@
 *.env
 .env.*
 !*.env.example
+
+# Verified CI-only native toolchain checkout (never publish)
+.ci-noqeri/

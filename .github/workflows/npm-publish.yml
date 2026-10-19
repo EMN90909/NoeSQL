@@ -10,6 +10,10 @@ on:
         description: Type publish-noesql@0.7.6 after all native and legal gates
         required: true
         type: string
+      native_artifact_run:
+        description: Reviewed NoeSQL GitHub Actions run with native toolchain artifact
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -43,19 +47,45 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
+      # Artifacts must be produced by a prior, owner-reviewed build run.
+      # A GitHub environment variable naming a runner filesystem path is NOT
+      # an artifact: download exact bits and verify their pinned SHA-256 in preflight.
+      - uses: actions/checkout@v4
+        with:
+          repository: EMN90909/Noqeri
+          ref: ${{ vars.NOQERI_COMMIT_SHA }}
+          path: .ci-noqeri
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: noqeri-native-qualified
+          run-id: ${{ inputs.native_artifact_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/native-approved
+      - name: Stage independently reviewed Noqeri compiler proof
+        env:
+          ARTIFACT: ${{ runner.temp }}/native-approved
+        run: |
+          test -s "$ARTIFACT/noqeri-stage0"
+          test -s "$ARTIFACT/noqeri-native-compiler"
+          test -s "$ARTIFACT/noesql-native"
+          test -s "$ARTIFACT/noqeri-build/stage2-proof.json"
+          mkdir -p .ci-noqeri/build
+          cp -a "$ARTIFACT/noqeri-build/." .ci-noqeri/build/
+          chmod 0700 "$ARTIFACT/noqeri-stage0" "$ARTIFACT/noqeri-native-compiler" "$ARTIFACT/noesql-native"
       - name: Verify pinned Noqeri compiler, Zig relational integration, tests and legal review
         env:
           NOESQL_APPROVE_PUBLICATION: ${{ inputs.confirm }}
           NOESQL_APPROVED_COMMIT_SHA: ${{ inputs.reviewed_commit }}
           NOESQL_LICENSE_REVIEWED: ${{ vars.NOESQL_LICENSE_REVIEWED }}
-          NOQERI_ROOT: ${{ vars.NOQERI_ROOT }}
+          NOQERI_ROOT: ${{ github.workspace }}/.ci-noqeri
           NOQERI_COMMIT_SHA: ${{ vars.NOQERI_COMMIT_SHA }}
           NOQERI_SOURCE_CLOSURE_SHA256: ${{ vars.NOQERI_SOURCE_CLOSURE_SHA256 }}
-          NOQERI_STAGE0: ${{ vars.NOQERI_STAGE0 }}
+          NOQERI_STAGE0: ${{ runner.temp }}/native-approved/noqeri-stage0
           NOQERI_STAGE0_SHA256: ${{ vars.NOQERI_STAGE0_SHA256 }}
-          NOESQL_NATIVE_BIN: ${{ vars.NOESQL_NATIVE_BIN }}
+          NOESQL_NATIVE_BIN: ${{ runner.temp }}/native-approved/noesql-native
           NOESQL_NATIVE_BIN_SHA256: ${{ vars.NOESQL_NATIVE_BIN_SHA256 }}
-          NOQERI_NATIVE_COMPILER: ${{ vars.NOQERI_NATIVE_COMPILER }}
+          NOQERI_NATIVE_COMPILER: ${{ runner.temp }}/native-approved/noqeri-native-compiler
           NOQERI_NATIVE_COMPILER_SHA256: ${{ vars.NOQERI_NATIVE_COMPILER_SHA256 }}
         run: npm run release:preflight
       - name: npm publish to next (OIDC)
@@ -63,13 +93,13 @@ jobs:
           NOESQL_APPROVE_PUBLICATION: ${{ inputs.confirm }}
           NOESQL_APPROVED_COMMIT_SHA: ${{ inputs.reviewed_commit }}
           NOESQL_LICENSE_REVIEWED: ${{ vars.NOESQL_LICENSE_REVIEWED }}
-          NOQERI_ROOT: ${{ vars.NOQERI_ROOT }}
+          NOQERI_ROOT: ${{ github.workspace }}/.ci-noqeri
           NOQERI_COMMIT_SHA: ${{ vars.NOQERI_COMMIT_SHA }}
           NOQERI_SOURCE_CLOSURE_SHA256: ${{ vars.NOQERI_SOURCE_CLOSURE_SHA256 }}
-          NOQERI_STAGE0: ${{ vars.NOQERI_STAGE0 }}
+          NOQERI_STAGE0: ${{ runner.temp }}/native-approved/noqeri-stage0
           NOQERI_STAGE0_SHA256: ${{ vars.NOQERI_STAGE0_SHA256 }}
-          NOESQL_NATIVE_BIN: ${{ vars.NOESQL_NATIVE_BIN }}
+          NOESQL_NATIVE_BIN: ${{ runner.temp }}/native-approved/noesql-native
           NOESQL_NATIVE_BIN_SHA256: ${{ vars.NOESQL_NATIVE_BIN_SHA256 }}
-          NOQERI_NATIVE_COMPILER: ${{ vars.NOQERI_NATIVE_COMPILER }}
+          NOQERI_NATIVE_COMPILER: ${{ runner.temp }}/native-approved/noqeri-native-compiler
           NOQERI_NATIVE_COMPILER_SHA256: ${{ vars.NOQERI_NATIVE_COMPILER_SHA256 }}
         run: npm publish --access public --tag next
