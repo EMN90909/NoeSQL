@@ -62,6 +62,62 @@ export function qualifyNative(env=process.env){
     command(executable,['checkpoint',data],workspace)
     demand(readFileSync(data).subarray(0,8).toString('ascii')==='NQDB0002','not a Zig NQDB0002 database')
     demand(decoded(executable,['verify',data],workspace).ok===true,'native post-checkpoint verification failed')
+    // Native relational conformance must include more than single-table CRUD.
+    // Every native invocation is a fresh process against a real Zig database.
+    const nativeMore=join(workspace,'relational.noedb'),referenceMore=join(workspace,'relational-oracle.noedb')
+    const relationalSchema=join(workspace,'relational-schema.nqds')
+    const relationalWrites=join(workspace,'relational-writes.nqds')
+    const invalidBatch=join(workspace,'relational-invalid.nqds')
+    writeFileSync(relationalSchema,`table departments { id: int key auto
+ label: text required
+}
+table employees { id: int key auto
+ department_id: ref departments required
+ salary: int required
+}
+query payroll() { departments get departments.label, count(employees.id) as people, sum(employees.salary) as salary join employees on departments.id == employees.department_id group departments.label having people >= 1 sort departments.label }
+query coverage() { departments get departments.label, count(employees.id) as people left join employees on departments.id == employees.department_id group departments.label sort departments.label }
+query paid(min: int = 1) { employees get id, salary where salary >= $min sort id }
+`)
+    writeFileSync(relationalWrites,`departments add {label:"Engineering"}
+departments add {label:"Research"}
+departments add {label:"Unstaffed"}
+employees add {department_id:1,salary:60}
+employees add {department_id:1,salary:40}
+employees add {department_id:2,salary:30}
+`)
+    writeFileSync(invalidBatch,`atomic {
+ employees add {department_id:1,salary:25}
+ employees add {department_id:999,salary:55}
+}
+`)
+    for(const program of [relationalSchema,relationalWrites]){
+      command(executable,['run',nativeMore,program],workspace)
+      command(process.execPath,[cli,'run',referenceMore,program],workspace)
+    }
+    const compareQuery=(name,args=[])=>{
+      const nativeResult=decoded(executable,['query',nativeMore,name,...args],workspace)
+      const oracleResult=decoded(process.execPath,[cli,'query',referenceMore,name,...args],workspace)
+      demand(JSON.stringify(nativeResult)===JSON.stringify(oracleResult),'native relational mismatch: '+name)
+      return nativeResult
+    }
+    demand(compareQuery('payroll').rows.length===2,'native grouped inner join returned wrong count')
+    const coverage=compareQuery('coverage').rows
+    demand(coverage.length===3&&coverage.some(r=>r['departments.label']==='Unstaffed'&&r.people===0),
+      'native left join did not preserve unmatched NULL/COUNT semantics')
+    demand(compareQuery('paid',['{"min":40}']).rows.length===2,'native parameterized filter mismatch')
+    const beforeInvalid=decoded(executable,['verify',nativeMore],workspace)
+    demand(Number.isSafeInteger(beforeInvalid.storageSequence)&&beforeInvalid.storageSequence>=2,
+      'native verify must report durable monotonic storage generation')
+    command(executable,['run',nativeMore,invalidBatch],workspace,false)
+    command(process.execPath,[cli,'run',referenceMore,invalidBatch],workspace,false)
+    compareQuery('payroll');compareQuery('coverage');compareQuery('paid',['{"min":40}'])
+    demand(decoded(executable,['verify',nativeMore],workspace).storageSequence===beforeInvalid.storageSequence,
+      'failed native transaction advanced durable generation')
+    command(executable,['checkpoint',nativeMore],workspace)
+    demand(readFileSync(nativeMore).subarray(0,8).toString('ascii')==='NQDB0002',
+      'native relational checkpoint did not use Zig page format')
+    compareQuery('coverage') // fresh-process read after checkpoint
     return {qualified:true, rows:rows.rows?.length||0, native_sha256:env.NOESQL_NATIVE_BIN_SHA256, compiler_sha256:proof.stage2_sha256}
   }finally{rmSync(workspace,{recursive:true,force:true})}
 }

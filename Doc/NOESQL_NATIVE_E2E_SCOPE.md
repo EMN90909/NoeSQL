@@ -1,0 +1,7 @@
+# Genuine native SQL acceptance contract
+
+The release `qualify:native-e2e` gate is deliberately separate from `build:native-link`: the latter proves a single compiled Noqeri typed-row/Pager call only, and **must never** substitute for full CLI execution.
+
+A qualifying independent native executable must accept `.nqds` schema, inserts, named queries, parameterized queries, typed foreign keys, inner and left equality joins, aggregates, grouping and HAVING, reject an invalid multi-statement transaction without any partial effects, maintain monotonic commit generations, preserve read-only generations, checkpoint the physical NQDB0002 image and reopen state in fresh processes. Every result must match the independently implemented reference executor under a separate database path. The native executable must be compiled from reviewed Noqeri source with verified Stage-2 machine-code provenance, linked against the real Zig pager, and pinned by SHA-256.
+
+There is no eligible compiled native CLI in the current checkout and the actual Noqeri Stage-2 build pipeline is not independently verified. Adding or expanding a test contract does **not** satisfy this gate. None of the reference Node tests, Zig component tests, or isolated assembly/object smoke runs establishes full SQL, database durability or production performance by itself.
