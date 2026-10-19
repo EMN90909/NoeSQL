@@ -69,10 +69,10 @@ export function buildNoqeriZigLink(env=process.env){
     run(compiler,['build',join(root,'tests','noesql_native_index.nqr'),indexAsm])
     need(existsSync(indexAsm)&&statSync(indexAsm).size>0,'Noqeri generated no native index assembly')
     run('clang',['-c','-x','assembler',indexAsm,'-o',indexObj])
-    need(/\\bnoeNativeIndexSmoke\\b/.test(run('nm',['-g','--defined-only',indexObj])),'Noqeri object lacks exported index symbol')
+    need(run('nm',['-g','--defined-only',indexObj]).split(/\s+/).includes('noeNativeIndexSmoke'),'Noqeri object lacks exported index symbol')
     const unresolvedIndex=run('nm',['-u',indexObj])
     for(const symbol of ['noesql_zig_index_insert','noesql_zig_index_find','noesql_zig_page_commit'])
-      need(new RegExp('\\\\b'+symbol+'\\\\b').test(unresolvedIndex),'compiled Noqeri index object does not call Zig pager: '+symbol)
+      need(unresolvedIndex.split(/\s+/).includes(symbol),'compiled Noqeri index object does not call Zig pager: '+symbol)
     run('clang',['-std=c11','-Wall','-Wextra','-Werror',
       join(root,'Native','link-tests','noqeri_index_smoke.c'),indexObj,lib,'-pthread','-o',indexExe])
     run(indexExe,[indexDb])
