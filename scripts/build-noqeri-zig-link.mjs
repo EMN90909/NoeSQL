@@ -62,21 +62,39 @@ export function buildNoqeriZigLink(env=process.env){
     run(exe,['write',data])
     run(exe,['verify',data])
     need(readFileSync(data).subarray(0,8).toString('ascii')==='NQDB0002','native checkpoint bytes are not Zig NQDB0002')
+    // Independently compile and LINK native Noqeri index code. A static ABI
+    // declaration alone cannot satisfy this test: nm checks real call sites.
+    const indexAsm=join(dir,'index.s'),indexObj=join(dir,'index.o')
+    const indexExe=join(dir,'index-smoke'),indexDb=join(dir,'index.noedb')
+    run(compiler,['build',join(root,'tests','noesql_native_index.nqr'),indexAsm])
+    need(existsSync(indexAsm)&&statSync(indexAsm).size>0,'Noqeri generated no native index assembly')
+    run('clang',['-c','-x','assembler',indexAsm,'-o',indexObj])
+    need(/\\bnoeNativeIndexSmoke\\b/.test(run('nm',['-g','--defined-only',indexObj])),'Noqeri object lacks exported index symbol')
+    const unresolvedIndex=run('nm',['-u',indexObj])
+    for(const symbol of ['noesql_zig_index_insert','noesql_zig_index_find','noesql_zig_page_commit'])
+      need(new RegExp('\\\\b'+symbol+'\\\\b').test(unresolvedIndex),'compiled Noqeri index object does not call Zig pager: '+symbol)
+    run('clang',['-std=c11','-Wall','-Wextra','-Werror',
+      join(root,'Native','link-tests','noqeri_index_smoke.c'),indexObj,lib,'-pthread','-o',indexExe])
+    run(indexExe,[indexDb])
+    need(readFileSync(indexDb).subarray(0,8).toString('ascii')==='NQDB0002','native index checkpoint bytes are not Zig NQDB0002')
     // Keep the binary AND the assembly/object/provenance for independent review.
     const out=resolve(env.NOESQL_NATIVE_OUT_DIR||join(root,'build','noesql-native-smoke'))
     need(!existsSync(out),'native artifact output already exists; choose a fresh NOESQL_NATIVE_OUT_DIR')
     mkdirSync(dirname(out),{recursive:true})
     mkdirSync(out,{mode:0o700})
     try{
-      for(const [src,name] of [[asm,'relational.s'],[obj,'relational.o'],[exe,'relational-smoke']])copyFileSync(src,join(out,name))
+      for(const [src,name] of [[asm,'relational.s'],[obj,'relational.o'],[exe,'relational-smoke'],[indexAsm,'index.s'],[indexObj,'index.o'],[indexExe,'index-smoke']])copyFileSync(src,join(out,name))
       const evidence={kind:'noesql-noqeri-zig-native-smoke',verified:true,
         compiler_sha256:digest(compiler),stage2_sha256:proof.stage2_sha256,
         noqeri_source_sha256:proof.source_closure_sha256,
         source_sha256:digest(join(root,'tests','noesql_zig_relational.nqr')),
         assembly_sha256:digest(asm),object_sha256:digest(obj),
+        index_source_sha256:digest(join(root,'tests','noesql_native_index.nqr')),
+        index_assembly_sha256:digest(indexAsm),index_object_sha256:digest(indexObj),
+        index_executable_sha256:digest(indexExe),
         zig_library_sha256:digest(lib),executable_sha256:digest(exe),
-        format:'NQDB0002',cold_restart:true,
-        scope:'bounded typed single-row Noqeri-generated smoke; NOT full relational SQL'}
+        format:'NQDB0002',cold_restart:true,index_cold_restart:true,
+        scope:'bounded typed single-row and 337-key-index Noqeri-generated smokes; NOT full relational SQL'}
       writeFileSync(join(out,'provenance.json'),JSON.stringify(evidence,null,2)+'\n',{flag:'wx',mode:0o600})
       return {...evidence,artifacts:out}
     }catch(e){rmSync(out,{recursive:true,force:true});throw e}

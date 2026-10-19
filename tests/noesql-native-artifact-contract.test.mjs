@@ -11,7 +11,9 @@ test('build artifact retains machine code and verifiable hash manifest',()=>{
  const code=readFileSync(new URL('../scripts/build-noqeri-zig-link.mjs',import.meta.url),'utf8')
  for(const symbol of ['relational.o','relational.s','relational-smoke','provenance.json',
     'noesql_zig_page_stage','noesql_zig_page_commit','NQDB0002','NOESQL_NATIVE_OUT_DIR',
-    'producer_stage2_sha256','sha256','cold_restart'])assert.match(code,new RegExp(symbol.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')))
+    'producer_stage2_sha256','sha256','cold_restart',
+    'noesql_native_index.nqr','noesql_zig_index_insert','noesql_zig_index_find',
+    'index-smoke','index_cold_restart'])assert.match(code,new RegExp(symbol.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')))
  assert.match(code,/verified:true/)
  assert.match(code,/rmSync\(dir,\{recursive:true,force:true\}\)/)
  assert.doesNotMatch(code,/libnoesql_zig_bridge\.a/)
