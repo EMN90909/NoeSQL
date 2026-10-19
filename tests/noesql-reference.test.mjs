@@ -52,7 +52,7 @@ test('reference validation and restrict delete',()=>{
 test('source and parameter diagnostics',()=>{
   assert.throws(()=>apply('table t { id: money key }'),e=>e.code==='NOE104')
   assert.throws(()=>apply('table t { id: int key\nid: bool }'),e=>e.code==='NOE103')
-  assert.throws(()=>apply('table t { id: int key\n'),e=>e.code==='NOE011')
+  assert.throws(()=>apply('table t { id: int key\n'),e=>e.code==='NOE017')
   assert.throws(()=>apply('table t { id: int key }\nquery q(x: int){t get id where id == $missing}'),e=>e.code==='NOE121')
 })
 
