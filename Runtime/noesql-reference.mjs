@@ -128,14 +128,16 @@ export function parse(source) {
     }
     if(eat('*'))columns.push('*')
     else{columns.push(projection());while(eat(','))columns.push(projection())}
-    let join=null,where=null,group=[],sort=null,skip=null,takeCount=null
-    if(eat('join')){const at=cur(),table=id();need('on');join={table,on:expr(),at}}
+    let join=null,where=null,group=[],having=null,sort=null,skip=null,takeCount=null
+    if(eat('left')){need('join');const at=cur(),table=id();need('on');join={table,type:'left',on:expr(),at}}
+    else if(eat('join')){const at=cur(),table=id();need('on');join={table,type:'inner',on:expr(),at}}
     if(eat('where'))where=expr()
     if(eat('group')){group.push(qualified());while(eat(','))group.push(qualified())}
+    if(eat('having'))having=expr()
     if(eat('sort'))sort=qualified()
     if(eat('skip'))skip=expr()
     if(eat('take'))takeCount=expr()
-    return {k:'get',table,columns,join,where,group,sort,skip,take:takeCount,at}
+    return {k:'get',table,columns,join,where,group,having,sort,skip,take:takeCount,at}
   }
   const stmt = () => {
     nl(); const at = cur()

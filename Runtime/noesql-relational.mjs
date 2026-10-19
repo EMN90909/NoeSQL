@@ -35,6 +35,15 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
       if(p.fn==='sum'&&fieldType(fields[p.arg])!=='int')fail('NOE236',p.at,'sum requires int column')
     }
   }
+  if(s.having){
+    if(!aggregate)fail('NOE245',s.having.at,'having requires grouping or aggregation')
+    const columns={}
+    for(const p of s.columns){
+      if(typeof p==='string')columns[p]=fields[p]
+      else columns[p.alias]={type:p.fn==='count'?'int':p.fn==='sum'?'int':fieldType(fields[p.arg])}
+    }
+    if(infer(s.having,columns,types)!=='bool')fail('NOE246',s.having.at,'having must be boolean')
+  }
   if(s.sort){
     if(aggregate&&!output.has(s.sort))fail('NOE237',s.at,'grouped sort must name an output column or alias')
     if(!aggregate&&!Object.hasOwn(fields,s.sort))fail('NOE119',s.at,'unknown sort field '+s.sort)
@@ -116,13 +125,20 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
     if(other){
       const leftValue=joinKey?source[joinKey[0]]:null
       const candidates=joinKey?(leftValue===null?[]:(hash.get(JSON.stringify([typeof leftValue,leftValue]))||[])):other.rows
+      let matchedJoin=false
       for(const target of candidates){
         if(++pairs>MAX_PAIRS)fail('NOE238',s.at,'join exceeds one million evaluated row pairs')
         const joined={...baseRow}
         for(const [k,v] of Object.entries(target))joined[s.join.table+'.'+k]=v
         if(value(s.join.on,joined,params)!==true)continue
+        matchedJoin=true
         if(!pushdown&&s.where&&value(s.where,joined,params)!==true)continue
         emit(joined)
+      }
+      if(s.join.type==='left'&&!matchedJoin){
+        const joined={...baseRow}
+        for(const field of other.fields)joined[s.join.table+'.'+field.name]=null
+        if(pushdown||!s.where||value(s.where,joined,params)===true)emit(joined)
       }
     }else if(!s.where||value(s.where,baseRow,params)===true)emit(baseRow)
   }
@@ -136,7 +152,7 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
         if(typeof p==='string')out[p]=state.first[p]
         else out[p.alias]=state.values[i]
       }
-      result.push(out)
+      if(!s.having||value(s.having,out,params)===true)result.push(out)
     }
   }else{
     result=rows
