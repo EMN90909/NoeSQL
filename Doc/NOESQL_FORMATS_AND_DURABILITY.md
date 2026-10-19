@@ -15,3 +15,7 @@ These are **bounded guarantees**, not a declaration of production-grade ACID: da
 ## Native qualification
 
 `npm run test:zig` verifies the isolated Zig pager. `npm run build:native-link` still requires pinned self-hosted Noqeri Stage-2 compiler provenance and actual machine-code generation and linking. `npm run qualify:native-e2e` demands a real native CLI that accepts `.nqds` and `.noedb`, executes the relational workflow, recovers storage, and produces genuine `NQDB0002` bytes. Neither script may fall back to the JS reference or an untrusted compiler. Native SQL and public npm publication remain blocked until these gates pass on verified artifacts.
+
+## Grouped reference execution optimization (19 October 2026)
+
+The bounded reference relational selector now computes grouped count, sum, min and max in streaming per-group state, preserving NULL semantics, checked integer overflow, and the 100,000 matching-row safety limit. A pure predicate on base-table columns is evaluated before an inner join only when the expression is a safe combination of comparisons and boolean operators. Query-local hash join remains the equality-join path. These improvements avoid retaining every matched row solely to aggregate it; they are not evidence of native SQL parity or a cost-based optimizer comparable to established databases.

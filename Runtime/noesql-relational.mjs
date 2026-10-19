@@ -63,11 +63,56 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
       }
     }
   }
-  const rows=[]
-  let pairs=0
+  // Aggregate on the fly: O(distinct groups) state, not O(join output) rows.
+  // This remains a bounded reference executor, not a cost-based native optimizer.
+  const rows=[],buckets=new Map()
+  const startValues=()=>s.columns.map(p=>typeof p==='string'?null:p.fn==='count'?0:null)
+  if(aggregate&&!groups.length)buckets.set('[]',{first:null,values:startValues()})
+  let pairs=0,matched=0
+  function emit(row){
+    if(++matched>MAX_ROWS)fail('NOE239',s.at,'query exceeds 100000 matching rows')
+    if(!aggregate){rows.push(row);return}
+    const key=JSON.stringify(groups.map(g=>row[g]))
+    let state=buckets.get(key)
+    if(!state){
+      if(buckets.size===MAX_ROWS)fail('NOE239',s.at,'query exceeds 100000 groups')
+      state={first:row,values:startValues()}
+      buckets.set(key,state)
+    }
+    if(state.first===null)state.first=row
+    for(let i=0;i<s.columns.length;i++){
+      const p=s.columns[i]
+      if(typeof p==='string')continue
+      const val=p.arg===null||p.arg==='*'?1:row[p.arg]
+      if(p.fn==='count'){
+        if(val!==null)state.values[i]++
+      }else if(val!==null){
+        const old=state.values[i]
+        if(p.fn==='sum'){
+          const sum=(old===null?0:old)+val
+          if(!Number.isSafeInteger(sum))fail('NOE212',p.at,'sum integer overflow')
+          state.values[i]=sum
+        }else if(old===null||(p.fn==='min'?val<old:val>old))state.values[i]=val
+      }
+    }
+  }
+  // Only safe column comparisons and logical operators may move ahead of
+  // an inner join: do not move arithmetic that could throw (e.g. division by 0).
+  const safeOperand=e=>e.k==='column'||e.k==='literal'||e.k==='param'
+  const pushdownSafe=e=>e.k==='binary'&&(
+    ['&&','||'].includes(e.op)?pushdownSafe(e.left)&&pushdownSafe(e.right):
+    ['==','!=','<','<=','>','>='].includes(e.op)&&safeOperand(e.left)&&safeOperand(e.right))
+  const baseOnly=e=>{
+    if(e.k==='column')return !e.name.includes('.')||e.name.startsWith(s.table+'.')
+    if(e.k==='binary')return baseOnly(e.left)&&baseOnly(e.right)
+    if(e.k==='unary')return baseOnly(e.arg)
+    return true
+  }
+  const pushdown=Boolean(other&&s.where&&baseOnly(s.where)&&pushdownSafe(s.where))
   for(const source of base.rows){
     const baseRow={...source}
     for(const [k,v] of Object.entries(source))baseRow[s.table+'.'+k]=v
+    if(pushdown&&value(s.where,baseRow,params)!==true)continue
     if(other){
       const leftValue=joinKey?source[joinKey[0]]:null
       const candidates=joinKey?(leftValue===null?[]:(hash.get(JSON.stringify([typeof leftValue,leftValue]))||[])):other.rows
@@ -76,48 +121,20 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
         const joined={...baseRow}
         for(const [k,v] of Object.entries(target))joined[s.join.table+'.'+k]=v
         if(value(s.join.on,joined,params)!==true)continue
-        if(s.where&&value(s.where,joined,params)!==true)continue
-        if(rows.length===MAX_ROWS)fail('NOE239',s.at,'query exceeds 100000 matching rows')
-        rows.push(joined)
+        if(!pushdown&&s.where&&value(s.where,joined,params)!==true)continue
+        emit(joined)
       }
-    }else if(!s.where||value(s.where,baseRow,params)===true){
-      if(rows.length===MAX_ROWS)fail('NOE239',s.at,'query exceeds 100000 matching rows')
-      rows.push(baseRow)
-    }
+    }else if(!s.where||value(s.where,baseRow,params)===true)emit(baseRow)
   }
   let result
   if(aggregate){
-    const buckets=new Map()
-    if(!groups.length)buckets.set('[]',[])
-    for(const row of rows){
-      const key=JSON.stringify(groups.map(g=>row[g]))
-      if(!buckets.has(key)){
-        if(buckets.size===MAX_ROWS)fail('NOE239',s.at,'query exceeds 100000 groups')
-        buckets.set(key,[])
-      }
-      buckets.get(key).push(row)
-    }
     result=[]
-    for(const members of buckets.values()){
+    for(const state of buckets.values()){
       const out={}
-      for(const p of s.columns){
-        if(typeof p==='string'){out[p]=members[0][p];continue}
-        const items=p.arg===null||p.arg==='*'?members.map(()=>1):members.map(m=>m[p.arg]).filter(v=>v!==null)
-        let answer=null
-        if(p.fn==='count')answer=items.length
-        else if(p.fn==='sum'){
-          if(items.length){
-            answer=0
-            for(const n of items){
-              answer+=n
-              if(!Number.isSafeInteger(answer))fail('NOE212',p.at,'sum integer overflow')
-            }
-          }
-        }else if(items.length){
-          answer=items[0]
-          for(let i=1;i<items.length;i++)if(p.fn==='min'?items[i]<answer:items[i]>answer)answer=items[i]
-        }
-        out[p.alias]=answer
+      for(let i=0;i<s.columns.length;i++){
+        const p=s.columns[i]
+        if(typeof p==='string')out[p]=state.first[p]
+        else out[p.alias]=state.values[i]
       }
       result.push(out)
     }
