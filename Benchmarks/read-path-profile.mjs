@@ -24,7 +24,7 @@ db.tables.orders.nextId=n+1
 const queries=[
   {name:'point-lookup-scan',sql:`customers get id,name where id == ${Math.ceil(n/2)}`,expected:1},
   {name:'filter-scan',sql:'orders get id,amount where amount >= 15 take 250',
-   expected:Math.min(250,Math.floor(n/20)*6+Math.max(0,n%20-14))},
+   expected:Math.min(250,db.tables.orders.rows.filter(row=>row.amount>=15).length)},
   {name:'join-and-group',sql:'orders get customers.name, count(*) as n, sum(amount) as total join customers on customer_id == customers.id group customers.name sort customers.name',expected:n},
 ]
 function measure(fn){
