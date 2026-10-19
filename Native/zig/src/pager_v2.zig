@@ -33,7 +33,7 @@ const LOCK_NB: c_int = 4;
 
 pub const PAGE_BYTES: usize = 4096;
 pub const MAX_PAGES: usize = 256;
-pub const MAX_TX_PAGES: usize = 16;
+pub const MAX_TX_PAGES: usize = 256;
 pub const MAX_WAL_BYTES: usize = 64 * 1024 * 1024;
 const FRAME: usize = 4 + PAGE_BYTES;
 const TX_HEADER: usize = 24;

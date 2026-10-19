@@ -6,7 +6,7 @@ import {constants} from 'node:fs'
 import {spawn} from 'node:child_process'
 import {dirname,resolve} from 'node:path'
 
-export const PAGE_BYTES=4096,MAX_PAGES=256,MAX_TX_PAGES=16
+export const PAGE_BYTES=4096,MAX_PAGES=256,MAX_TX_PAGES=256
 const DB_HEADER=96, DB_FRAME=PAGE_BYTES+32, TX_HEADER=24,TX_FRAME=PAGE_BYTES+4,TX_TRAILER=40
 const MAX_WAL_BYTES=64*1024*1024,MAX_DB_BYTES=DB_HEADER+MAX_PAGES*DB_FRAME
 const DB_MAGIC='NQDB0002',TX_MAGIC='NQTX0002',COMMIT_MAGIC='NQCM0002',STATE_MAGIC='NQRS0001'
@@ -37,7 +37,7 @@ async function readFileSafe(file,max){
 export function encodeReferencePages(state){
   const content=Buffer.from(JSON.stringify(state),'utf8')
   const count=Math.ceil(content.length/PAGE_BYTES)
-  if(!count||count+1>MAX_TX_PAGES)fail('reference image exceeds atomic 15-page payload limit')
+  if(!count||count+1>MAX_TX_PAGES)fail('reference image exceeds atomic 255-page payload limit')
   const header=Buffer.alloc(PAGE_BYTES)
   header.write(STATE_MAGIC,0,'ascii')
   header.writeUInt32LE(1,8)
