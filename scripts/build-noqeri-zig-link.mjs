@@ -30,6 +30,16 @@ export function checkNativeCompiler(env=process.env){
     proofFile:env.NOQERI_STAGE2_PROOF||'build/stage2-proof.json'
   })
   need(proof.verified===true,'Noqeri proof incomplete')
+  // A pin alone cannot distinguish a self-hosted compiler from the archived
+  // C++ seed. Require this exact native binary to be bound to the independently
+  // reviewed Stage-2 proof, not simply to exit successfully.
+  const proofDocument=JSON.parse(readFileSync(
+    resolve(noqeri,env.NOQERI_STAGE2_PROOF||'build/stage2-proof.json'),'utf8'))
+  const origin=proofDocument.artifacts?.native_compiler
+  need(origin?.built_by_stage2===true&&
+    origin?.producer_stage2_sha256===proof.stage2_sha256&&
+    origin?.sha256===digest(compiler),
+    'no verified Stage-2 to native-compiler artifact linkage (archival C++ bootstrap is not accepted)')
   return {compiler,proof}
 }
 export function buildNoqeriZigLink(env=process.env){
