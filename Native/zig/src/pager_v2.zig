@@ -273,6 +273,9 @@ pub const Pager = struct {
         try readAll(self.wal, journal);
         var offset: usize = 0;
         var previous: u64 = 0;
+        // Snapshot generation is the rollback floor for a replayed journal.
+        // A crashed checkpoint may leave same-generation frames behind.
+        const checkpoint_generation = self.generation;
         while (offset + TX_HEADER <= n) {
             const h = journal[offset..];
             if (!std.mem.eql(u8, h[0..8], TX_MAGIC)) return error.CorruptWal;
@@ -300,6 +303,17 @@ pub const Pager = struct {
                     }
                 }
             }
+            // A committed record at the checkpoint generation must describe
+            // exactly the same page bytes. Matching SHA-256 frames alone do not
+            // establish that two same-generation histories are consistent.
+            if (generation == checkpoint_generation) {
+                for (0..count) |i| {
+                    const at = TX_HEADER + i * FRAME;
+                    const id = u32get(record[at .. at + 4]);
+                    if (!self.active[id] or
+                        !std.mem.eql(u8, self.pages[id][0..], record[at + 4 .. at + FRAME])) return error.CorruptWal;
+                }
+            }
             if (generation > self.generation) {
                 if (self.generation == std.math.maxInt(u64) or generation != self.generation + 1) return error.CorruptWal;
                 for (0..count) |i| {
@@ -312,6 +326,9 @@ pub const Pager = struct {
             }
             offset += length;
         }
+        // Do not silently accept a complete older WAL against a newer
+        // checkpoint; that can hide rollback or stale-file substitution.
+        if (previous != 0 and previous < checkpoint_generation) return error.CorruptWal;
         if (offset != n) {
             // Never erase a complete foreign-version or malformed record. Only
             // remove an incomplete suffix that begins with a v2 magic prefix.
@@ -488,4 +505,71 @@ test "failed pre-WAL write poisons writer without exposing mutation" {
     const reopened = try Pager.open(allocator, path);
     defer reopened.close();
     try std.testing.expect(reopened.read(4) == null);
+}
+
+test "stale complete WAL older than checkpoint fails closed" {
+    const a = std.testing.allocator;
+    const path = try testPath(a, "stale-wal");
+    defer a.free(path);
+    var dbbuf: [4096]u8 = undefined;
+    var walbuf: [4096]u8 = undefined;
+    var lockbuf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &dbbuf);
+    const wal = try pathZ(path, ".wal", &walbuf);
+    const lock = try pathZ(path, ".lck", &lockbuf);
+    defer { _ = c.unlink(data.ptr); _ = c.unlink(wal.ptr); _ = c.unlink(lock.ptr); }
+    const pager = try Pager.open(a, path);
+    var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+    page[0] = 11;
+    try pager.stage(3, &page);
+    try pager.commit();
+    var old_record: [TX_HEADER + FRAME + TX_TRAILER]u8 = undefined;
+    try seek(pager.wal, 0);
+    try readAll(pager.wal, &old_record);
+    try pager.checkpoint();
+    page[0] = 22;
+    try pager.stage(3, &page);
+    try pager.commit();
+    try pager.checkpoint();
+    pager.close();
+    const fd = try openFile(wal, false);
+    if (c.ftruncate(fd, 0) != 0) return error.Io;
+    try seek(fd, 0);
+    try writeAll(fd, &old_record);
+    try durable(fd);
+    _ = c.close(fd);
+    try std.testing.expectError(error.CorruptWal, Pager.open(a, path));
+}
+
+test "same generation checksum-valid but inconsistent WAL is rejected" {
+    const a = std.testing.allocator;
+    const path = try testPath(a, "conflicting-wal");
+    defer a.free(path);
+    var dbbuf: [4096]u8 = undefined;
+    var walbuf: [4096]u8 = undefined;
+    var lockbuf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &dbbuf);
+    const wal = try pathZ(path, ".wal", &walbuf);
+    const lock = try pathZ(path, ".lck", &lockbuf);
+    defer { _ = c.unlink(data.ptr); _ = c.unlink(wal.ptr); _ = c.unlink(lock.ptr); }
+    const pager = try Pager.open(a, path);
+    var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+    page[7] = 17;
+    try pager.stage(3, &page);
+    try pager.commit();
+    var record: [TX_HEADER + FRAME + TX_TRAILER]u8 = undefined;
+    try seek(pager.wal, 0);
+    try readAll(pager.wal, &record);
+    try pager.checkpoint();
+    pager.close();
+    record[TX_HEADER + 4 + 7] = 99;
+    const digest = sha(record[0 .. record.len - 32]);
+    @memcpy(record[record.len - 32 ..], &digest);
+    const fd = try openFile(wal, false);
+    if (c.ftruncate(fd, 0) != 0) return error.Io;
+    try seek(fd, 0);
+    try writeAll(fd, &record);
+    try durable(fd);
+    _ = c.close(fd);
+    try std.testing.expectError(error.CorruptWal, Pager.open(a, path));
 }
