@@ -4,6 +4,7 @@ import { dirname, extname, resolve } from 'node:path'
 import { randomUUID, createHash } from 'node:crypto'
 import { execute, emptyDatabase, runNamed } from './noesql-reference.mjs'
 import { newWalTransaction, replayWal } from './noesql-wal.mjs'
+import {readZigNoedb,verifyZigNoedb,writeZigNoedb} from './noesql-zig-pages.mjs'
 const MAX_FILE = 16 * 1024 * 1024
 const MAX_WAL = MAX_FILE + 3 * 56 + 64
 const checksum = payload => createHash('sha256').update(payload).digest('hex')
@@ -72,6 +73,7 @@ async function walState(path) {
 }
 export async function readNqd(path) {
   pathCheck(path)
+  if(extname(path)==='.noedb')return readZigNoedb(path,emptyDatabase)
   const wal=await walState(path)
   if(!wal)return baseState(path)
   // Replay is never allowed to roll a valid newer checkpoint backward.
@@ -136,6 +138,7 @@ async function checkpoint(path,state,inject) {
 }
 export async function verifyNqd(path) {
   pathCheck(path)
+  if(extname(path)==='.noedb')return verifyZigNoedb(path)
   const snapshot=await boundedRead(path,MAX_FILE)
   const journal=await boundedRead(path+'.wal',MAX_WAL)
   if(snapshot===null && journal===null)
@@ -151,6 +154,7 @@ export async function runNqd(path, source, params={}, options={}) {
   if (typeof source === 'string' && Buffer.byteLength(source, 'utf8') > 1024 * 1024)
     throw Error('NOE-SEC: query source exceeds 1 MiB')
   const inject=options.inject || (async()=>{})
+  if(extname(path)==='.noedb')return writeZigNoedb(path,before=>execute(source,before,params),emptyDatabase,inject)
   let holder
   try{holder=await open(path+'.lock','wx',0o600)}catch(e){if(e.code==='EEXIST')throw Error('NoeSQL locked; inspect stale lock manually');throw e}
   try {
@@ -169,3 +173,12 @@ export async function runNqd(path, source, params={}, options={}) {
   } finally {await holder.close();await unlink(path+'.lock')}
 }
 export async function namedNqd(path,name,params={}) {return runNamed(await readNqd(path),name,params)}
+
+/** One-way explicit migration: legacy checksummed JSON -> Zig NQDB0002 pages. */
+export async function migrateLegacyNoedb(source,destination){
+  if(!['.nqd','.nqdb'].includes(extname(source))||extname(destination)!=='.noedb')
+    throw Error('NOE-ZIG: migrate requires legacy .nqd/.nqdb source and new .noedb destination')
+  await verifyNqd(source)
+  const state=await readNqd(source)
+  return writeZigNoedb(destination,()=>({database:state,results:{migrated:true,format:'NQDB0002',tables:Object.keys(state.tables).length}}),emptyDatabase,undefined,{newOnly:true})
+}

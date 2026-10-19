@@ -8,6 +8,7 @@ comptime {
     _ = @import("storage_abi.zig").noesql_zig_page_rollback;
     _ = @import("storage_abi.zig").noesql_zig_page_checkpoint;
     _ = @import("storage_abi.zig").noesql_zig_page_generation;
+    _ = @import("storage_abi.zig").noesql_zig_page_validate_reference_state;
     _ = @import("storage_abi.zig").noesql_zig_page_close;
 }
 const std = @import("std");

@@ -55,6 +55,36 @@ pub export fn noesql_zig_page_get(handle: ?*anyopaque, page_id: u32, output: ?[*
     @memcpy(dest[0..storage.PAGE_BYTES], src);
     return STATUS_OK;
 }
+// Cross-runtime reference-state container validator. The Zig pager owns page,
+// transaction and checksum semantics; the Noqeri executor owns SQL and schema.
+fn little32(bytes: []const u8) u32 {
+    return @as(u32,bytes[0]) | (@as(u32,bytes[1])<<8) |
+        (@as(u32,bytes[2])<<16) | (@as(u32,bytes[3])<<24);
+}
+pub export fn noesql_zig_page_validate_reference_state(handle: ?*anyopaque) i32 {
+    const pager=cast(handle) orelse return STATUS_INVALID;
+    const manifest=pager.read(0) orelse return STATUS_NOT_FOUND;
+    if (!std.mem.eql(u8,manifest[0..8],"NQRS0001") or little32(manifest[8..12])!=1) return STATUS_INVALID;
+    const count:usize=@intCast(little32(manifest[12..16]));
+    const length:usize=@intCast(little32(manifest[16..20]));
+    if (count==0 or count>=storage.MAX_TX_PAGES or length==0 or
+        length>(count*storage.PAGE_BYTES) or length<=((count-1)*storage.PAGE_BYTES)) return STATUS_INVALID;
+    for (manifest[52..]) |byte| {if (byte!=0) return STATUS_INVALID;}
+    var hasher=std.crypto.hash.sha2.Sha256.init(.{});
+    var remaining=length;
+    for (0..count) |i| {
+        const page=pager.read(@intCast(i+1)) orelse return STATUS_NOT_FOUND;
+        const used=@min(remaining,storage.PAGE_BYTES);
+        hasher.update(page[0..used]);
+        for (page[used..]) |byte| {if (byte!=0) return STATUS_FAILURE;}
+        remaining-=used;
+    }
+    var digest:[32]u8=undefined;
+    hasher.final(&digest);
+    if (!std.mem.eql(u8,manifest[20..52],&digest)) return STATUS_FAILURE;
+    return STATUS_OK;
+}
+
 pub export fn noesql_zig_page_generation(handle: ?*anyopaque) u64 {
     const pager = cast(handle) orelse return 0;
     return pager.generation;
@@ -73,4 +103,5 @@ test "native ABI rejects untrusted arguments without dereferencing page buffers"
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_commit(null));
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_rollback(null));
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_get(null, 0, null, 0));
+    try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_validate_reference_state(null));
 }

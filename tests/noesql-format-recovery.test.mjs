@@ -45,5 +45,5 @@ test('durable WAL recovers after checkpoint failure and later writer reopens',()
   await runNqd(db,'people add {name:"Cam"}')
   assert.deepEqual((await readNqd(db)).tables.people.rows.map(r=>r.name),['Ada','Bea','Cam'])
   const journal=await readFile(db+'.wal').catch(e=>e.code==='ENOENT'?null:Promise.reject(e))
-  assert.equal(journal,null)
+  assert.equal(journal?.length??0,0) // Native Zig retains an empty WAL inode after checkpoint
 }))

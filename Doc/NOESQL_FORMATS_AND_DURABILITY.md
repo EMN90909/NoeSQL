@@ -1,3 +1,7 @@
+# NoeSQL storage format update (19 October 2026)
+
+**Canonical .noedb format is now Zig NQDB0002 with NQTX0002 WAL**, including the reference engine path. The old statement in this document that reference and Zig .noedb are incompatible is superseded by [NOESQL_UNIFIED_NOEDB_FORMAT.md](NOESQL_UNIFIED_NOEDB_FORMAT.md). Legacy reference .nqd/.nqdb JSON remains supported separately. Runtime Noqeri native SQL qualification is still blocked by compiler provenance and cross-platform crash testing.
+
 # NoeSQL .nqds source and .noedb storage (19 October 2026)
 
 ## Naming contract

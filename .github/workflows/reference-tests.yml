@@ -64,6 +64,10 @@ jobs:
         run: npm run build:zig
       - name: Verify Zig C ABI declarations compile
         run: cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
+      - name: Node to native Zig pager round trip
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -I Native/zig Native/link-tests/zig_page_roundtrip.c Native/zig/zig-out/lib/libnoesql_zig_pages.a -pthread -lm -ldl -o /tmp/noesql-zig-roundtrip
+          node scripts/verify-zig-page-roundtrip.mjs /tmp/noesql-zig-roundtrip
       - name: Verify Noqeri proof checker rejects missing provenance
         run: node --test tests/noqeri-bootstrap.test.mjs
 

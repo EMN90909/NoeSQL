@@ -23,6 +23,7 @@ int32_t noesql_zig_page_commit(void* handle);
 int32_t noesql_zig_page_rollback(void* handle);
 int32_t noesql_zig_page_get(void* handle,uint32_t id,uint8_t* output,size_t capacity);
 uint64_t noesql_zig_page_generation(void* handle);
+int32_t noesql_zig_page_validate_reference_state(void* handle);
 int32_t noesql_zig_page_checkpoint(void* handle);
 #ifdef __cplusplus
 }

@@ -21,6 +21,8 @@
     "benchmark:embedded": "node Benchmarks/embedded-vs-sqlite.mjs 10000 3000",
     "example:web": "node Examples/embedded-web.mjs",
     "test:zig": "cd Native/zig && zig build test",
+    "test:noedb": "node --test tests/noesql-zig-pages.test.mjs tests/noesql-migrate-noedb.test.mjs tests/noesql-format-recovery.test.mjs tests/noesql-wal-sequence.test.mjs",
+    "test:zig-page-roundtrip": "node scripts/verify-zig-page-roundtrip.mjs",
     "build:zig": "cd Native/zig && zig build -Doptimize=ReleaseSafe",
     "qualify:zig": "node scripts/qualify-zig.mjs",
     "verify:noqeri": "node scripts/verify-noqeri-bootstrap.mjs",
