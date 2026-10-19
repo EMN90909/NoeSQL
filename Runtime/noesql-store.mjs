@@ -8,7 +8,7 @@ const MAX_FILE = 16 * 1024 * 1024
 const MAX_WAL = MAX_FILE + 3 * 56 + 64
 const checksum = payload => createHash('sha256').update(payload).digest('hex')
 const pathCheck = path => {
-  if(!['.nqdb','.nqd'].includes(extname(path))) throw Error('NoeSQL reference store path must end in .nqdb (or legacy .nqd)')
+  if(!['.noedb','.nqdb','.nqd'].includes(extname(path))) throw Error('NoeSQL reference store path must end in .noedb (legacy .nqdb/.nqd supported)')
 }
 async function boundedRead(file, maximum) {
   const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW || 0)
@@ -142,6 +142,8 @@ export async function runNqd(path, source, params={}, options={}) {
     const before=await readNqd(path)
     try{await lstat(path+'.wal');await checkpoint(path,before,async()=>{})}catch(e){if(e.code!=='ENOENT')throw e}
     const outcome=execute(source,before,params)
+    // Read-only transactions should neither grow the WAL nor rewrite the database.
+    if(JSON.stringify(outcome.database)===JSON.stringify(before))return outcome.results
     await walAppend(path,outcome.database,inject)
     await checkpoint(path,outcome.database,inject)
     return outcome.results

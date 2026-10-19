@@ -109,7 +109,7 @@ fn syncParent(path: []const u8) Error!void {
     try durable(dfd);
 }
 fn pathZ(path: []const u8, suffix: []const u8, buf: *[4096]u8) Error![:0]const u8 {
-    if (!std.mem.endsWith(u8, path, ".nqdb") or path.len == 0 or
+    if (!(std.mem.endsWith(u8, path, ".noedb") or std.mem.endsWith(u8, path, ".nqdb")) or path.len == 0 or
         std.mem.indexOfScalar(u8, path, 0) != null) return error.InvalidPath;
     return std.fmt.bufPrintZ(buf, "{s}{s}", .{ path, suffix }) catch error.InvalidPath;
 }

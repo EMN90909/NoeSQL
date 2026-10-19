@@ -5,7 +5,7 @@ import { runNqd, namedNqd, verifyNqd } from './noesql-store.mjs'
 try {
   const [verb, database, input, ...args]=process.argv.slice(2)
   if(verb==='run' && database && input && args.length===0) {
-    if(!input.endsWith('.nqd')&&!input.endsWith('.noe')) throw Error('source must be .nqd (legacy .noe supported)')
+    if(!input.endsWith('.nqds')&&!input.endsWith('.nqd')&&!input.endsWith('.noe')) throw Error('source must be .nqds (legacy .nqd/.noe supported)')
     const text=await readFile(input,'utf8')
     console.log(JSON.stringify(await runNqd(database,text),null,2))
   } else if(verb==='verify' && database && !input && args.length===0) {
@@ -14,7 +14,7 @@ try {
     const params=args.length===1?JSON.parse(args[0]):{}
     console.log(JSON.stringify(await namedNqd(database,input,params),null,2))
   } else {
-    console.error('Usage: node Runtime/noesql-cli.mjs run <data.nqdb> <source.nqd>\n       node Runtime/noesql-cli.mjs query <data.nqdb> <query_name> [json_parameters]\n       node Runtime/noesql-cli.mjs verify <data.nqdb>')
+    console.error('Usage: node Runtime/noesql-cli.mjs run <data.noedb> <source.nqds>\n       node Runtime/noesql-cli.mjs query <data.noedb> <query_name> [json_parameters]\n       node Runtime/noesql-cli.mjs verify <data.noedb>')
     process.exitCode=2
   }
 } catch(e) { console.error(e.message);process.exitCode=1 }

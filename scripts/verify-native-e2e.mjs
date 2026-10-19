@@ -38,8 +38,8 @@ export function qualifyNative(env=process.env){
     expectedClosure:env.NOQERI_SOURCE_CLOSURE_SHA256,proofFile:env.NOQERI_STAGE2_PROOF||'build/stage2-proof.json'})
   const executable=validateExecutable(env.NOESQL_NATIVE_BIN,env.NOESQL_NATIVE_BIN_SHA256)
   const workspace=mkdtempSync(join(tmpdir(),'noesql-native-e2e-'))
-  const data=join(workspace,'actual.nqdb'),oracle=join(workspace,'oracle.nqdb')
-  const schema=join(workspace,'schema.nqd'),writes=join(workspace,'writes.nqd'),bad=join(workspace,'bad.nqd')
+  const data=join(workspace,'actual.noedb'),oracle=join(workspace,'oracle.noedb')
+  const schema=join(workspace,'schema.nqds'),writes=join(workspace,'writes.nqds'),bad=join(workspace,'bad.nqds')
   const cli=fileURLToPath(new URL('../Runtime/noesql-cli.mjs',import.meta.url))
   try{
     writeFileSync(schema,'table users {\n id: int key auto\n name: text required\n age: int\n}\nquery everyone() { users get id, name, age sort name }\n')

@@ -24,7 +24,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
       - name: Run reference and security regression tests
-        run: npm test
+        shell: bash
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee node-tests.log
+      - name: Upload test diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-test-log-${{ matrix.node }}
+          path: node-tests.log
+          if-no-files-found: ignore
 
   native-cpp:
     name: Native C++ compatibility and recovery
@@ -55,9 +65,5 @@ jobs:
       - name: Verify Zig C ABI declarations compile
         run: cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
       - name: Verify Noqeri proof checker rejects missing provenance
-        run: |
-          if npm run verify:noqeri; then
-            echo "Fail-closed provenance gate unexpectedly passed without any pinned compiler" >&2
-            exit 1
-          fi
+        run: node --test tests/noqeri-bootstrap.test.mjs
 
