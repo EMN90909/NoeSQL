@@ -1,3 +1,4 @@
+import { chooseRelationalPlan } from './noesql-query-planner.mjs'
 // Experimental, bounded relational SELECT executor. It is a conformance
 // reference, NOT a native database engine or a performance claim.
 const MAX_PAIRS=1_000_000
@@ -50,26 +51,19 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
   }
   for(const limit of [s.skip,s.take])if(limit&&infer(limit,{},types)!=='int')fail('NOE124',limit.at,'skip/take must be integer constants or parameters')
   if(validateOnly)return
-  // Equality joins use an ephemeral hash index instead of quadratic scans.
-  // The index is query-local, so it cannot become stale across transactions.
-  let hash=null,joinKey=null
-  if(other && s.join.on?.k==='binary' && s.join.on.op==='==' &&
-     s.join.on.left.k==='column' && s.join.on.right.k==='column'){
-    const baseName=name=>name.startsWith(s.table+'.')?name.slice(s.table.length+1):!name.includes('.')?name:null
-    const rightName=name=>name.startsWith(s.join.table+'.')?name.slice(s.join.table.length+1):null
-    const left=s.join.on.left.name,right=s.join.on.right.name
-    if(baseName(left)&&rightName(right))joinKey=[baseName(left),rightName(right)]
-    else if(baseName(right)&&rightName(left))joinKey=[baseName(right),rightName(left)]
-    if(joinKey){
-      hash=new Map()
-      for(const row of other.rows){
-        const v=row[joinKey[1]]
-        if(v===null)continue
-        const key=JSON.stringify([typeof v,v])
-        const bucket=hash.get(key)
-        if(bucket)bucket.push(row)
-        else hash.set(key,[row])
-      }
+  // Choose a bounded cardinality-aware join and recheck every ON candidate.
+  const plan=chooseRelationalPlan(s,base,other)
+  const joinKey=plan.leftKey!==null?[plan.leftKey,plan.rightKey]:null
+  let hash=null
+  if(plan.join==='hash'){
+    hash=new Map()
+    for(const row of other.rows){
+      const v=row[joinKey[1]]
+      if(v===null)continue
+      const key=JSON.stringify([typeof v,v])
+      const bucket=hash.get(key)
+      if(bucket)bucket.push(row)
+      else hash.set(key,[row])
     }
   }
   // Aggregate on the fly: O(distinct groups) state, not O(join output) rows.
@@ -105,26 +99,14 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
       }
     }
   }
-  // Only safe column comparisons and logical operators may move ahead of
-  // an inner join: do not move arithmetic that could throw (e.g. division by 0).
-  const safeOperand=e=>e.k==='column'||e.k==='literal'||e.k==='param'
-  const pushdownSafe=e=>e.k==='binary'&&(
-    ['&&','||'].includes(e.op)?pushdownSafe(e.left)&&pushdownSafe(e.right):
-    ['==','!=','<','<=','>','>='].includes(e.op)&&safeOperand(e.left)&&safeOperand(e.right))
-  const baseOnly=e=>{
-    if(e.k==='column')return !e.name.includes('.')||e.name.startsWith(s.table+'.')
-    if(e.k==='binary')return baseOnly(e.left)&&baseOnly(e.right)
-    if(e.k==='unary')return baseOnly(e.arg)
-    return true
-  }
-  const pushdown=Boolean(other&&s.where&&baseOnly(s.where)&&pushdownSafe(s.where))
+  const pushdown=plan.pushWhere
   for(const source of base.rows){
     const baseRow={...source}
     for(const [k,v] of Object.entries(source))baseRow[s.table+'.'+k]=v
     if(pushdown&&value(s.where,baseRow,params)!==true)continue
     if(other){
       const leftValue=joinKey?source[joinKey[0]]:null
-      const candidates=joinKey?(leftValue===null?[]:(hash.get(JSON.stringify([typeof leftValue,leftValue]))||[])):other.rows
+      const candidates=plan.join==='hash'?(leftValue===null?[]:(hash.get(JSON.stringify([typeof leftValue,leftValue]))||[])):other.rows
       let matchedJoin=false
       for(const target of candidates){
         if(++pairs>MAX_PAIRS)fail('NOE238',s.at,'join exceeds one million evaluated row pairs')
@@ -165,7 +147,7 @@ export function relationalSelect(s,db,params,types,validateOnly,{fail,infer,valu
         if(a[pk]!==b[pk])return a[pk]<b[pk]?-1:1
         if(fk){
           const ka=a[s.join.table+'.'+fk],kb=b[s.join.table+'.'+fk]
-          return ka===kb?0:ka<kb?-1:1
+          return ka===kb?0:ka===null?1:kb===null?-1:ka<kb?-1:1
         }
         return 0
       })
