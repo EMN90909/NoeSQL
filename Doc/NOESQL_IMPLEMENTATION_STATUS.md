@@ -1,3 +1,7 @@
+# 19 October 2026 unified .noedb storage increment
+
+The **reference `.noedb` path now uses native Zig NQDB0002/NQTX0002 page and WAL bytes**, read/write flock locking on Linux, generation checking and explicitly versioned NQRS0001 application payloads. `Native/zig/src/storage_abi.zig` validates the application payload, and a two-way C ABI fixture exercises Node-to-Zig and Zig-to-Node compatibility when compiled. Legacy `.nqd` / `.nqdb` JSON remains supported and must be migrated explicitly. This is a bounded experimental storage interoperability implementation. Verified Noqeri Stage-2 native SQL, full ACID release qualification and green GitHub CI remain outstanding. See [wire-format documentation](NOESQL_UNIFIED_NOEDB_FORMAT.md).
+
 # NoeSQL — implementation status and release gates
 
 ## Decision for the Noqeri 1.0 request

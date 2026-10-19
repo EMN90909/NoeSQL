@@ -48,7 +48,7 @@ tickets get teams.name, count(*) as tickets, sum(effort) as effort join teams on
 alter tickets add { resolved: bool required = false }
 ```
 
-This preview implements bounded **inner joins**, typed **count/sum/min/max**, `group`, and safe **add-column** migrations in the JavaScript reference engine and optional SQL adapters. Joined columns use `table.column` names. It does **not** implement native Noqeri compilation, outer joins, physical persisted indexes, decimal/currency types, concurrent snapshot isolation, authenticated principals or production WAL recovery.
+This preview implements bounded **inner and left joins**, typed **count/sum/min/max**, `group`, aggregate `having`, and safe **add-column** migrations in the JavaScript reference engine and optional SQL adapters. Joined columns use `table.column` names. It does **not** implement the verified native Noqeri SQL executor, a cost-based SQL planner, physical reference indexes, decimal/currency types, MVCC, or production-qualified crash recovery.
 
 ```sh
 npm test
@@ -56,6 +56,12 @@ npm run benchmark:reference
 ```
 
 The benchmark runs an in-memory reference/SQLite parity workload and prints measurements for the current machine; it is **not** a native Noqeri or durability benchmark.
+
+## Unified `.noedb` Zig page format (experimental)
+
+The reference `.noedb` store and native Zig pager now share **NQDB0002 checkpoints and NQTX0002 WAL framing**. On Linux the reference adapter uses the same persistent flock lock as Zig. Native pages expose a checksummed `NQRS0001` application-state envelope, which the Zig ABI can validate. To test the Node codec: `npm run test:noedb`. The actual compiled Zig read/write round trip is checked by the Zig CI job using `scripts/verify-zig-page-roundtrip.mjs`, and must run successfully before claiming native interoperability qualification. `npm run qualify:native-e2e` still fails closed without the trusted Noqeri Stage-2 compiler and full compiled native SQL engine.
+
+Legacy reference `.nqd`/`.nqdb` files remain separate and are converted explicitly: `node Runtime/noesql-cli.mjs migrate old.nqdb new.noedb`. The source is preserved, and an existing destination is rejected. The reference bridge supports at most 15 payload pages per atomic write and is not suitable for production data. See [wire format, migration and limitations](Doc/NOESQL_UNIFIED_NOEDB_FORMAT.md).
 
 ## Layout
 
