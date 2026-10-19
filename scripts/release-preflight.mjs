@@ -22,7 +22,7 @@ export function releasePolicy({manifest,env,licenseText}){
   must(env.NOESQL_APPROVE_PUBLICATION==='publish-noesql@0.7.6','explicit publication approval missing')
   must(env.NOESQL_LICENSE_REVIEWED==='GPL-3.0-only','owner legal review missing')
   must(/^[0-9a-f]{40}$/.test(env.NOESQL_APPROVED_COMMIT_SHA||''),'reviewed exact commit SHA missing')
-  for(const name of ['NOQERI_ROOT','NOQERI_COMMIT_SHA','NOQERI_SOURCE_CLOSURE_SHA256','NOESQL_NATIVE_BIN','NOESQL_NATIVE_BIN_SHA256','NOQERI_STAGE0','NOQERI_STAGE0_SHA256']){
+  for(const name of ['NOQERI_ROOT','NOQERI_COMMIT_SHA','NOQERI_SOURCE_CLOSURE_SHA256','NOESQL_NATIVE_BIN','NOESQL_NATIVE_BIN_SHA256','NOQERI_NATIVE_COMPILER','NOQERI_NATIVE_COMPILER_SHA256','NOQERI_STAGE0','NOQERI_STAGE0_SHA256']){
     must(Boolean(env[name]),name+' required: native compiler and Zig relational proof not provided')
   }
   return {sha:env.NOESQL_APPROVED_COMMIT_SHA,tag:manifest.publishConfig.tag}
@@ -34,6 +34,7 @@ export function qualifyPublicRelease(env=process.env){
   must(command('git',['rev-parse','HEAD'])===policy.sha,'Git checkout does not match reviewed commit')
   must(command('git',['status','--porcelain'])==='','Git checkout must be clean')
   // The compiled language, pager and durable SQL tests must actually run.
+  command(process.execPath,['scripts/build-noqeri-zig-link.mjs'])
   command(process.execPath,['scripts/verify-native-e2e.mjs'])
   command(process.execPath,['scripts/qualify-zig.mjs'])
   command('npm',['test','--ignore-scripts'])
