@@ -174,3 +174,59 @@ test "native ABI rejects untrusted arguments without dereferencing page buffers"
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_get(null, 0, null, 0));
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_validate_reference_state(null));
 }
+
+test "index ABI stages read-your-writes, rollback, WAL commit, cold reopen and range" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-index-abi-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var path_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&wal_buf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lock_buf, "{s}.lck", .{path});
+    const c = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = c.unlink(data.ptr);
+        _ = c.unlink(journal.ptr);
+        _ = c.unlink(mutex.ptr);
+    }
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+    var row: u32 = 0;
+    try std.testing.expectEqual(STATUS_INVALID, noesql_zig_index_insert(handle, 0, 5, 8));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_insert(handle, 7, 12, 8));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_insert(handle, 7, -4, 9));
+    try std.testing.expectEqual(STATUS_DUPLICATE, noesql_zig_index_insert(handle, 7, -4, 11));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_find(handle, 7, -4, &row));
+    try std.testing.expectEqual(@as(u32, 9), row);
+    var keys: [2]i64 = undefined;
+    var pages: [2]u32 = undefined;
+    var count: usize = 0;
+    try std.testing.expectEqual(STATUS_BUFFER_TOO_SMALL, noesql_zig_index_range(handle, 7, -10, 20, &keys, &pages, 1, &count));
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_range(handle, 7, -10, 20, &keys, &pages, 2, &count));
+    try std.testing.expectEqual(@as(i64, -4), keys[0]);
+    try std.testing.expectEqual(@as(i64, 12), keys[1]);
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_rollback(handle));
+    try std.testing.expectEqual(STATUS_NOT_FOUND, noesql_zig_index_find(handle, 7, 12, &row));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_insert(handle, 7, -4, 9));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_insert(handle, 7, 12, 8));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_commit(handle));
+    noesql_zig_page_close(handle);
+    handle = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_find(handle, 7, 12, &row));
+    try std.testing.expectEqual(@as(u32, 8), row);
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_delete(handle, 7, -4));
+    try std.testing.expectEqual(STATUS_NOT_FOUND, noesql_zig_index_find(handle, 7, -4, &row));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_commit(handle));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_checkpoint(handle));
+    noesql_zig_page_close(handle);
+    handle = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    try std.testing.expectEqual(STATUS_NOT_FOUND, noesql_zig_index_find(handle, 7, -4, &row));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_index_find(handle, 7, 12, &row));
+}

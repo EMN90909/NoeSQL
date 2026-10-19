@@ -41,7 +41,9 @@
     "test:relational-benchmark": "node --test tests/noesql-relational-benchmark.test.mjs",
     "build:native-link": "node scripts/build-noqeri-zig-link.mjs",
     "test:native-link-contract": "node --test tests/noesql-native-link.test.mjs tests/noesql-native-artifact-contract.test.mjs",
-    "test:query-planner": "node --test tests/noesql-query-planner.test.mjs tests/noesql-query-plan-integration.test.mjs"
+    "test:query-planner": "node --test tests/noesql-query-planner.test.mjs tests/noesql-query-plan-integration.test.mjs",
+    "test:readonly-fastpath": "node --test tests/noesql-readonly-fastpath.test.mjs",
+    "test:native-index-contract": "node --test tests/noesql-native-index-contract.test.mjs"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",
