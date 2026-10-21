@@ -1,5 +1,5 @@
 module noqeri.database.noesql_native_index
-import "noesql_pager_abi.nqr"
+import "noesql_pager_abi.noqeri"
 
 // Trusted internal Noqeri -> Zig WAL index interface. Index keys are signed
 // 64-bit integers and the index occupies one reserved page per tree. The caller
