@@ -1,4 +1,4 @@
-import "../Database/noesql_zig_relational.nqr"
+import "../Database/noesql_zig_relational.noqeri"
 
 // Compiled native smoke fixture. Caller supplies a fresh private .nqdb path.
 // This is source only until a trusted Noqeri native toolchain links it.
