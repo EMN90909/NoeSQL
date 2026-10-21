@@ -2,11 +2,19 @@
 
 NoeSQL is an experimental, beginner-friendly database language and a developing native database engine for [Noqeri](https://github.com/EMN90909/Noqeri).
 
-> **Development snapshot — NOT production ready.** The JavaScript reference parser/storage and optional SQLite/PostgreSQL adapters are experimental. The Noqeri-native `.nqr` lexer/IR/executor/WAL/security modules have **not** been compiled and integrated with a verified Noqeri bootstrap compiler. Do not store important production data in the reference `.nqd` format.
+> **Development snapshot — NOT production ready.** The JavaScript reference parser/storage and optional SQLite/PostgreSQL adapters are experimental. All 21 active Noqeri lexer/IR/executor/WAL/security modules and fixtures have been migrated to **`.noqeri`**; the Stage-2-native compile/link integration has **not** yet been qualified. Do not store important production data in the reference `.nqd` format.
+
+## Canonical source migration (October 2026)
+
+Active language sources, database policy modules and Noqeri fixtures use `.noqeri`; this repository's `main` contains **21 `.noqeri` sources and zero `.nqr` files**. NoeSQL's canonical new storage extension is `.noedb` (Zig NQDB0002 pages). Legacy `.nqd` and `.nqdb` are supported **only for explicit checked migration**, and must not be treated as interchangeable file formats.
+
+`Runtime/noesql-session.mjs` exports a reference application boundary `database(path)` backed by the NoeSQL store. The new `Native/cpp/noesql_session_abi.h` / `.cpp` define a versioned native connection and prepared-query ABI, but a production native implementation and Noqeri Stage-2 linking **remain unqualified**. Interactive transactions fail closed until a real driver is available.
+
+The reference-store/session and C++ tests can be run locally with `bash scripts/verify-ecosystem-local.sh`. GitHub-hosted private-repository Actions jobs have previously failed before runner provisioning (no executed steps), so those statuses are **not** test failures or successful test evidence. See [CI runner diagnosis](Doc/CI_RUNNER_DIAGNOSIS.md).
 
 ## Current architecture and the Noqeri + Zig migration
 
-- **Noqeri (`Database/*.nqr`)** is intended to own the parser, IR verification, execution semantics, and future native storage/WAL implementation. Follow the compiler and language conventions in [the Noqeri repository](https://github.com/EMN90909/Noqeri).
+- **Noqeri (`Database/*.noqeri`)** is intended to own the parser, IR verification, execution semantics, and future native storage/WAL implementation. Follow the compiler and language conventions in [the Noqeri repository](https://github.com/EMN90909/Noqeri).
 - **Zig 0.15.2 (`Native/zig/`)** provides a Linux WAL pager with NQDB0002 persistence, plus an experimental single-page 337-entry integer index C ABI for trusted Noqeri callers. This is not a general indexed SQL engine or a verified native executable.
 - **C++17 (`Native/cpp/`)** remains the existing experimental native page-store and legacy bridge until byte-compatible Zig storage, recovery, auth, and fault tests are proven. The C++ kernel is not removed in this increment to avoid risking existing `.nqd` data.
 - **JavaScript (`Runtime/noesql-reference.mjs`)** remains the reference oracle for semantic tests and future differential testing against the native engine.
