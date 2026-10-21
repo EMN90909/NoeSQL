@@ -1,0 +1,39 @@
+name: One-time branch archival and consolidation
+on:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/one-time-branch-consolidation.yml']
+permissions:
+  contents: write
+jobs:
+  consolidate:
+    if: "${{ github.event.head_commit.message == 'chore: archive and remove superseded branches' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Archive every non-main branch before deleting any
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t branches < <(gh api --paginate "repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name')
+          for branch in "${branches[@]}"; do
+            [[ "$branch" == "main" ]] && continue
+            sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${branch}" --jq '.object.sha')
+            tag="refs/tags/archive/consolidation-20261021/${branch}"
+            tag_path="${tag#refs/}"
+            if ! gh api "repos/${GITHUB_REPOSITORY}/git/ref/${tag_path}" >/dev/null 2>&1; then
+              gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" -f ref="$tag" -f sha="$sha"
+            fi
+            saved=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/${tag_path}" --jq '.object.sha')
+            [[ "$saved" == "$sha" ]] || { echo "::error::Could not verify archive of $branch"; exit 1; }
+            echo "ARCHIVED $branch -> $tag ($sha)"
+          done
+          for branch in "${branches[@]}"; do
+            [[ "$branch" == "main" ]] && continue
+            gh api --method DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${branch}"
+            echo "DELETED branch $branch (recoverable from archive tag)"
+          done
+          echo "Branches now:"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/branches?per_page=100" --jq '.[].name'
