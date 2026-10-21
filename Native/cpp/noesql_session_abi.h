@@ -39,17 +39,17 @@ typedef struct noesql_session_v2 {
                         uint8_t *output, size_t cap, size_t *out_len);
 } noesql_session_v2;
 
-int32_t noesql_cpp_validate_session(const noesql_session_v2 *session);
-int32_t noesql_cpp_open(const noesql_session_v2 *session,const uint8_t *path,size_t path_len,noesql_connection_handle *out);
-int32_t noesql_cpp_close(const noesql_session_v2 *session,noesql_connection_handle conn);
-int32_t noesql_cpp_prepare(const noesql_session_v2 *session,noesql_connection_handle conn,const uint8_t *source,size_t size,noesql_statement_handle *out);
-int32_t noesql_cpp_release(const noesql_session_v2 *session,noesql_connection_handle conn,noesql_statement_handle stmt);
-int32_t noesql_cpp_execute(const noesql_session_v2 *session,noesql_connection_handle conn,noesql_statement_handle stmt,const uint8_t *params,size_t size,uint8_t *buffer,size_t cap,size_t *written);
-int32_t noesql_cpp_query(const noesql_session_v2 *session,noesql_connection_handle conn,noesql_statement_handle stmt,const uint8_t *params,size_t size,uint8_t *buffer,size_t cap,size_t *written);
-int32_t noesql_cpp_begin(const noesql_session_v2 *session,noesql_connection_handle conn);
-int32_t noesql_cpp_commit(const noesql_session_v2 *session,noesql_connection_handle conn);
-int32_t noesql_cpp_rollback(const noesql_session_v2 *session,noesql_connection_handle conn);
-int32_t noesql_cpp_last_error(const noesql_session_v2 *session,noesql_connection_handle conn,uint8_t *output,size_t cap,size_t *written);
+int32_t noesql_cpp_session_validate(const noesql_session_v2 *session);
+int32_t noesql_cpp_session_open(const noesql_session_v2 *session,const uint8_t *path,size_t path_len,noesql_connection_handle *out);
+int32_t noesql_cpp_session_close(const noesql_session_v2 *session,noesql_connection_handle conn);
+int32_t noesql_cpp_session_prepare(const noesql_session_v2 *session,noesql_connection_handle conn,const uint8_t *source,size_t size,noesql_statement_handle *out);
+int32_t noesql_cpp_session_release(const noesql_session_v2 *session,noesql_connection_handle conn,noesql_statement_handle stmt);
+int32_t noesql_cpp_session_execute(const noesql_session_v2 *session,noesql_connection_handle conn,noesql_statement_handle stmt,const uint8_t *params,size_t size,uint8_t *buffer,size_t cap,size_t *written);
+int32_t noesql_cpp_session_query(const noesql_session_v2 *session,noesql_connection_handle conn,noesql_statement_handle stmt,const uint8_t *params,size_t size,uint8_t *buffer,size_t cap,size_t *written);
+int32_t noesql_cpp_session_begin(const noesql_session_v2 *session,noesql_connection_handle conn);
+int32_t noesql_cpp_session_commit(const noesql_session_v2 *session,noesql_connection_handle conn);
+int32_t noesql_cpp_session_rollback(const noesql_session_v2 *session,noesql_connection_handle conn);
+int32_t noesql_cpp_session_last_error(const noesql_session_v2 *session,noesql_connection_handle conn,uint8_t *output,size_t cap,size_t *written);
 #ifdef __cplusplus
 }
 #endif
