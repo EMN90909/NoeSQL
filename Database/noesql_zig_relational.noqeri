@@ -1,8 +1,8 @@
 module noqeri.database.noesql.zig_relational
-import "noesql_api.nqr"
-import "noesql_executor.nqr"
-import "noesql_row.nqr"
-import "noesql_pager_abi.nqr"
+import "noesql_api.noqeri"
+import "noesql_executor.noqeri"
+import "noesql_row.noqeri"
+import "noesql_pager_abi.noqeri"
 
 // Executable Noqeri SOURCE integration slice, deliberately bounded to one
 // two-column (int,bool) row per Zig page. NOT a complete SQL engine/frontend.
