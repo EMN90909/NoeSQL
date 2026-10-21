@@ -1,0 +1,23 @@
+module noqeri.database.noesql_native_index
+import "noesql_pager_abi.noqeri"
+
+// Trusted internal Noqeri -> Zig WAL index interface. Index keys are signed
+// 64-bit integers and the index occupies one reserved page per tree. The caller
+// must hold the pager handle, keep catalog/index/data page ids disjoint and
+// commit or rollback the index together with corresponding row mutations.
+// This API does not supply a SQL planner, B+tree or general native executor.
+export function noeIndexPageValid(page: u32): bool {
+    return page != 0 as u32 && noePagerBounds(page, noePagerPageBytes())
+}
+export function noeIndexPut(handle: usize, indexPage: u32, key: i64, rowPage: u32): isize {
+    if !noePagerValidHandle(handle) || !noeIndexPageValid(indexPage) || rowPage == indexPage || !noeIndexPageValid(rowPage) { return -1 as isize }
+    return noesql_zig_index_insert(handle, indexPage, key, rowPage) as isize
+}
+export function noeIndexLookup(handle: usize, indexPage: u32, key: i64, rowPage: *u32): isize {
+    if !noePagerValidHandle(handle) || !noeIndexPageValid(indexPage) || rowPage == null { return -1 as isize }
+    return noesql_zig_index_find(handle, indexPage, key, rowPage) as isize
+}
+export function noeIndexRemove(handle: usize, indexPage: u32, key: i64): isize {
+    if !noePagerValidHandle(handle) || !noeIndexPageValid(indexPage) { return -1 as isize }
+    return noesql_zig_index_delete(handle, indexPage, key) as isize
+}
