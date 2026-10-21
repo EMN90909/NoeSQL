@@ -1,7 +1,7 @@
 module noqeri.database.noesql.api
-import "noesql_ir.nqr"
-import "noesql_auth.nqr"
-import "noesql_limits.nqr"
+import "noesql_ir.noqeri"
+import "noesql_auth.noqeri"
+import "noesql_limits.noqeri"
 
 // Compiler/runtime contract v1. The caller MUST authenticate principal at
 // trusted host boundary. No raw query text, SQL interpolation, or unchecked
