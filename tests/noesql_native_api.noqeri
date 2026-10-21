@@ -1,4 +1,4 @@
-import "../Database/noesql_api.nqr"
+import "../Database/noesql_api.noqeri"
 function require(valid: bool): void {
     if !valid {
         let bad: *u8 = 0 as *u8

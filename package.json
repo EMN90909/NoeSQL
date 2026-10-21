@@ -52,7 +52,9 @@
     "./embedded": "./Runtime/noesql-embedded.mjs",
     "./reference": "./Runtime/noesql-reference.mjs",
     "./relational": "./Runtime/noesql-relational.mjs",
-    "./cli": "./Runtime/noesql-cli.mjs"
+    "./cli": "./Runtime/noesql-cli.mjs",
+    "./store": "./Runtime/noesql-store.mjs",
+    "./session": "./Runtime/noesql-session.mjs"
   },
   "bin": {
     "noesql": "./Runtime/noesql-cli.mjs"
@@ -60,6 +62,7 @@
   "files": [
     "Runtime/",
     "Database/",
+    "Native/cpp/",
     "Native/zig/",
     "Grammar/",
     "Doc/",

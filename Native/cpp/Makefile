@@ -12,6 +12,9 @@ COMPARE_BIN ?= /tmp/noesql-sqlite-compare
 .PHONY: test test-native benchmark benchmark-compare native-cli clean
 
 test: test-native
+	$(CXX) $(CXXFLAGS) noesql_session_abi.cpp test_session_abi.cpp -o /tmp/noesql-session-abi-test
+	/tmp/noesql-session-abi-test
+	rm -f /tmp/noesql-session-abi-test
 	$(CXX) $(CXXFLAGS) noesql_engine_abi.cpp test_abi.cpp -o $(TEST_BIN)
 	$(TEST_BIN)
 	rm -f $(TEST_BIN)

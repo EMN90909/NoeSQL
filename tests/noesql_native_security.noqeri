@@ -1,6 +1,6 @@
-import "../Database/noesql_isolation.nqr"
-import "../Database/noesql_auth.nqr"
-import "../Database/noesql_limits.nqr"
+import "../Database/noesql_isolation.noqeri"
+import "../Database/noesql_auth.noqeri"
+import "../Database/noesql_limits.noqeri"
 
 function require(ok: bool): void {
     if !ok {

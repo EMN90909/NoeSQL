@@ -1,5 +1,5 @@
 module noqeri.database.noesql.executor
-import "noesql_ir.nqr"
+import "noesql_ir.noqeri"
 
 // A bounded, caller-owned, copy-on-write in-memory relational executor.
 // Invariants: rows are flattened [row][column]; schema, slices and version

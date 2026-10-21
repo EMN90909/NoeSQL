@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import {readFileSync} from 'node:fs'
 const source=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8')
 test('Noqeri owns authorization, typed IR execution and calls Zig pager for commits',()=>{
-  const s=source('Database/noesql_zig_relational.nqr')
+  const s=source('Database/noesql_zig_relational.noqeri')
   assert.match(s,/noeApiValidate\(/)
   assert.match(s,/noeExecute\(/)
   assert.match(s,/noeRowDecode\(/)
@@ -15,7 +15,7 @@ test('Noqeri owns authorization, typed IR execution and calls Zig pager for comm
   assert.doesNotMatch(s,/sqlite3_|DatabaseSync|createSqliteAdapter/)
 })
 test('compiled smoke input requires signed-in scope before storage access',()=>{
-  const f=source('tests/noesql_zig_relational.nqr')
+  const f=source('tests/noesql_zig_relational.noqeri')
   assert.match(f,/noeZigRelationalSmoke/)
   assert.match(f,/ctx\.principal\.authenticated = false/)
   assert.match(f,/status != -83/)
