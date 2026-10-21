@@ -1,0 +1,127 @@
+module noqeri.database.noesql.executor
+import "noesql_ir.nqr"
+
+// A bounded, caller-owned, copy-on-write in-memory relational executor.
+// Invariants: rows are flattened [row][column]; schema, slices and version
+// are checked before mutation; duplicate unique values reject the batch.
+// This is a native execution kernel, not a persistent database driver.
+record NoeExecutionResult {
+    affected: usize
+    returned: usize
+    rowCount: usize
+}
+function noeRowsValid(values: []NoeValue, rows: usize, cols: usize): bool {
+    if cols == 0 as usize { return false }
+    return rows <= len(values) / cols
+}
+function noeRowMatches(plan: *NoeIrPlan, values: []NoeValue, row: usize, cols: usize, bytes: []u8): bool {
+    if plan.predicateOperator == noePredicateNone() { return true }
+    return noePredicateMatches(plan.predicateOperator, &values[row * cols + plan.predicateColumn], &plan.predicateValue, bytes)
+}
+function noeValidateCells(columns: []NoeColumn, values: []NoeValue, rows: usize, bytes: []u8): bool {
+    let cols: usize = len(columns)
+    let r: usize = 0 as usize
+    while r < rows {
+        let c: usize = 0 as usize
+        while c < cols {
+            let v: *NoeValue = &values[r * cols + c]
+            if !noeValueValid(v, columns[c].kind, bytes) { return false }
+            if columns[c].required && v.isNull { return false }
+            if columns[c].primary && v.isNull { return false }
+            c = c + 1 as usize
+        }
+        r = r + 1 as usize
+    }
+    return true
+}
+function noeUniqueCells(columns: []NoeColumn, values: []NoeValue, rows: usize, bytes: []u8): bool {
+    let cols: usize = len(columns)
+    let c: usize = 0 as usize
+    while c < cols {
+        if columns[c].unique || columns[c].primary {
+            let left: usize = 0 as usize
+            while left < rows {
+                let right: usize = left + 1 as usize
+                while right < rows {
+                    let a: *NoeValue = &values[left * cols + c]
+                    let b: *NoeValue = &values[right * cols + c]
+                    if !a.isNull && !b.isNull && noeCompare(a,b,bytes) == 0 { return false }
+                    right = right + 1 as usize
+                }
+                left = left + 1 as usize
+            }
+        }
+        c = c + 1 as usize
+    }
+    return true
+}
+// Results contain flattened projected values for GET. INSERT input is one
+// full schema row. No user data is copied to the destination until all checks
+// succeed. Write predicates are mandatory; full-table mutation is rejected.
+export function noeExecute(plan: *NoeIrPlan, columns: []NoeColumn, original: []NoeValue, scratch: []NoeValue, rowCount: usize, insertRow: []NoeValue, projections: []usize, output: []NoeValue, bytes: []u8, version: u32, result: *NoeExecutionResult): isize {
+    if result == null { return -20 as isize }
+    result.affected = 0 as usize
+    result.returned = 0 as usize
+    result.rowCount = rowCount
+    let checked: isize = noeIrVerify(plan, columns, version, bytes, projections)
+    if checked < 0 as isize { return checked }
+    let cols: usize = len(columns)
+    if !noeRowsValid(original, rowCount, cols) || !noeRowsValid(scratch, rowCount, cols) { return -21 as isize }
+    if !noeValidateCells(columns, original, rowCount, bytes) { return -22 as isize }
+    let capacity: usize = len(original) / cols
+    if len(scratch) / cols < capacity { return -23 as isize }
+    let i: usize = 0 as usize
+    while i < rowCount * cols { scratch[i] = original[i] i = i + 1 as usize }
+    if plan.operation == noePlanInsert() {
+        if len(insertRow) != cols || rowCount >= capacity { return -24 as isize }
+        i = 0 as usize
+        while i < cols { scratch[rowCount * cols + i] = insertRow[i] i = i + 1 as usize }
+        result.affected = 1 as usize
+        result.rowCount = rowCount + 1 as usize
+    } else if plan.operation == noePlanGet() {
+        let matches: usize = 0 as usize
+        let r: usize = 0 as usize
+        while r < rowCount {
+            if noeRowMatches(plan, original, r, cols, bytes) {
+                if matches >= len(output) / len(projections) { return -25 as isize }
+                let j: usize = 0 as usize
+                while j < len(projections) {
+                    output[matches * len(projections) + j] = original[r * cols + projections[j]]
+                    j = j + 1 as usize
+                }
+                matches = matches + 1 as usize
+            }
+            r = r + 1 as usize
+        }
+        result.returned = matches
+        return 0 as isize
+    } else if plan.operation == noePlanSet() {
+        let r: usize = 0 as usize
+        while r < rowCount {
+            if noeRowMatches(plan, original, r, cols, bytes) {
+                scratch[r * cols + plan.mutationColumn] = plan.mutationValue
+                result.affected = result.affected + 1 as usize
+            }
+            r = r + 1 as usize
+        }
+    } else if plan.operation == noePlanDelete() {
+        let r: usize = 0 as usize
+        let keep: usize = 0 as usize
+        while r < rowCount {
+            if noeRowMatches(plan, original, r, cols, bytes) {
+                result.affected = result.affected + 1 as usize
+            } else {
+                let c: usize = 0 as usize
+                while c < cols { scratch[keep * cols + c] = original[r * cols + c] c = c + 1 as usize }
+                keep = keep + 1 as usize
+            }
+            r = r + 1 as usize
+        }
+        result.rowCount = keep
+    }
+    if !noeValidateCells(columns, scratch, result.rowCount, bytes) { return -26 as isize }
+    if !noeUniqueCells(columns, scratch, result.rowCount, bytes) { return -27 as isize }
+    i = 0 as usize
+    while i < result.rowCount * cols { original[i] = scratch[i] i = i + 1 as usize }
+    return 0 as isize
+}
