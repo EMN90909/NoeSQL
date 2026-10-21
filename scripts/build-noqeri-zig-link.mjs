@@ -50,7 +50,7 @@ export function buildNoqeriZigLink(env=process.env){
   try{
     const asm=join(dir,'relational.s'),obj=join(dir,'relational.o')
     const exe=join(dir,'relational-smoke'),data=join(dir,'data.noedb')
-    run(compiler,['build',join(root,'tests','noesql_zig_relational.nqr'),asm])
+    run(compiler,['build',join(root,'tests','noesql_zig_relational.noqeri'),asm])
     need(existsSync(asm)&&statSync(asm).size>0,'Noqeri generated no machine-code assembly')
     run('clang',['-c','-x','assembler',asm,'-o',obj])
     need(/\bnoeZigRelationalSmoke\b/.test(run('nm',['-g','--defined-only',obj])),'Noqeri object lacks exported relational symbol')
@@ -66,7 +66,7 @@ export function buildNoqeriZigLink(env=process.env){
     // declaration alone cannot satisfy this test: nm checks real call sites.
     const indexAsm=join(dir,'index.s'),indexObj=join(dir,'index.o')
     const indexExe=join(dir,'index-smoke'),indexDb=join(dir,'index.noedb')
-    run(compiler,['build',join(root,'tests','noesql_native_index.nqr'),indexAsm])
+    run(compiler,['build',join(root,'tests','noesql_native_index.noqeri'),indexAsm])
     need(existsSync(indexAsm)&&statSync(indexAsm).size>0,'Noqeri generated no native index assembly')
     run('clang',['-c','-x','assembler',indexAsm,'-o',indexObj])
     need(run('nm',['-g','--defined-only',indexObj]).split(/\s+/).includes('noeNativeIndexSmoke'),'Noqeri object lacks exported index symbol')
@@ -87,9 +87,9 @@ export function buildNoqeriZigLink(env=process.env){
       const evidence={kind:'noesql-noqeri-zig-native-smoke',verified:true,
         compiler_sha256:digest(compiler),stage2_sha256:proof.stage2_sha256,
         noqeri_source_sha256:proof.source_closure_sha256,
-        source_sha256:digest(join(root,'tests','noesql_zig_relational.nqr')),
+        source_sha256:digest(join(root,'tests','noesql_zig_relational.noqeri')),
         assembly_sha256:digest(asm),object_sha256:digest(obj),
-        index_source_sha256:digest(join(root,'tests','noesql_native_index.nqr')),
+        index_source_sha256:digest(join(root,'tests','noesql_native_index.noqeri')),
         index_assembly_sha256:digest(indexAsm),index_object_sha256:digest(indexObj),
         index_executable_sha256:digest(indexExe),
         zig_library_sha256:digest(lib),executable_sha256:digest(exe),
