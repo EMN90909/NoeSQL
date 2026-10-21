@@ -1,6 +1,6 @@
 module noqeri.database.noesql_parser
-import "noesql_lexer.nqr"
-import "noesql_ir.nqr"
+import "noesql_lexer.noqeri"
+import "noesql_ir.noqeri"
 
 // Native precedence parser for expressions in the shared .noe language.
 // The reference host handles complete statements until Stage-2 can execute
