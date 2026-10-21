@@ -1,7 +1,7 @@
 module noqeri.database.noesql.secure_executor
-import "noesql_executor.nqr"
-import "noesql_auth.nqr"
-import "noesql_limits.nqr"
+import "noesql_executor.noqeri"
+import "noesql_auth.noqeri"
+import "noesql_limits.noqeri"
 
 // Authorized entry point for the bounded in-memory NoeSQL executor.
 // Security checks run before any caller-owned row buffer is mutated.
