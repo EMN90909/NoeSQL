@@ -2,6 +2,7 @@ CXX ?= c++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror
 CRYPTO_LIBS ?= -lcrypto
 TEST_BIN ?= /tmp/noesql-cpp-abi-test
+RUNTIME_ABI_TEST_BIN ?= /tmp/noesql-cpp-runtime-abi-test
 PAGE_TEST_BIN ?= /tmp/noesql-cpp-page-test
 CLI_BIN ?= /tmp/noesql-native
 BENCH_BIN ?= /tmp/noesql-cpp-page-bench
@@ -14,6 +15,9 @@ COMPARE_BIN ?= /tmp/noesql-sqlite-compare
 test: test-native
 	$(CXX) $(CXXFLAGS) noesql_engine_abi.cpp test_abi.cpp -o $(TEST_BIN)
 	$(TEST_BIN)
+	$(CXX) $(CXXFLAGS) noesql_runtime_abi.cpp test_runtime_abi.cpp -o $(RUNTIME_ABI_TEST_BIN)
+	$(RUNTIME_ABI_TEST_BIN)
+	rm -f $(RUNTIME_ABI_TEST_BIN)
 	rm -f $(TEST_BIN)
 
 test-native:
