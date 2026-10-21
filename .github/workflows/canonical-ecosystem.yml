@@ -1,0 +1,17 @@
+name: Canonical NoeSQL qualification
+on:
+  pull_request:
+  push:
+    branches: [integration/canonical-ecosystem-v1]
+permissions:
+  contents: read
+jobs:
+  native-bridge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: make -C Native/cpp test
+      - run: node --test tests/noesql-extension-compat.test.mjs tests/noesql-migrate-noedb.test.mjs tests/noesql-zig-pages.test.mjs
