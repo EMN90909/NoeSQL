@@ -14,7 +14,7 @@ The reference-store/session and C++ tests can be run locally with `bash scripts/
 
 ## Branch consolidation (private repository)
 
-All open PRs have been reviewed and closed/merged. The private GitHub Actions runner still fails **before any job steps begin**, so the automated one-time branch-prune workflow could not execute. To finish branch cleanup from an authenticated developer machine without losing history, use the checked-in script:
+There are currently **no open PRs**. The remaining non-`main` branches are historical development branches, not live proposed integrations. Do not merge them wholesale merely to eliminate their names. Archive each head SHA before deleting a branch. The private GitHub Actions runner still fails **before any job steps begin**, so the automated one-time branch-prune workflow could not execute. To finish branch cleanup from an authenticated developer machine without losing history, use the checked-in script:
 
 ```sh
 gh auth login
