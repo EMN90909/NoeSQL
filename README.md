@@ -1,3 +1,5 @@
+**Canonical Noqeri integration:** [NoeSQL-owned runtime ABI, `.noedb` storage, migration rules and qualification gates](Doc/CANONICAL_ECOSYSTEM.md). Native compiled Noqeri linkage is not yet verified.
+
 # NoeSQL
 
 NoeSQL is an experimental, beginner-friendly database language and a developing native database engine for [Noqeri](https://github.com/EMN90909/Noqeri).
