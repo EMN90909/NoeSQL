@@ -45,14 +45,16 @@
     "test:readonly-fastpath": "node --test tests/noesql-readonly-fastpath.test.mjs",
     "test:native-index-contract": "node --test tests/noesql-native-index-contract.test.mjs",
     "benchmark:read-path": "node Benchmarks/read-path-profile.mjs 1000 7",
-    "test:read-path-profile": "node --test tests/noesql-read-path-profile.test.mjs"
+    "test:read-path-profile": "node --test tests/noesql-read-path-profile.test.mjs",
+    "test:runtime-abi": "make -C Native/cpp test"
   },
   "exports": {
     ".": "./Runtime/noesql-embedded.mjs",
     "./embedded": "./Runtime/noesql-embedded.mjs",
     "./reference": "./Runtime/noesql-reference.mjs",
     "./relational": "./Runtime/noesql-relational.mjs",
-    "./cli": "./Runtime/noesql-cli.mjs"
+    "./cli": "./Runtime/noesql-cli.mjs",
+    "./store": "./Runtime/noesql-store.mjs"
   },
   "bin": {
     "noesql": "./Runtime/noesql-cli.mjs"
