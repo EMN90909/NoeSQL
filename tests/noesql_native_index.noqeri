@@ -1,4 +1,4 @@
-import "../Database/noesql_native_index.nqr"
+import "../Database/noesql_native_index.noqeri"
 // Native-only smoke fixture. Requires an independently verified Noqeri native
 // compiler producing machine code, plus the Zig pager archive. Never invoke as
 // a Node.js simulator or count as a full relational SQL engine.
