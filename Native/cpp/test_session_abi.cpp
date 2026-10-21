@@ -2,9 +2,11 @@
 #include <cassert>
 #include <cstring>
 #include <cstdint>
-static int32_t open_fn(void*,const uint8_t*,size_t,noesql_connection_handle*out){*out=(void*)0x1;return 0;}
+static int fake_connection = 1;
+static int fake_statement = 2;
+static int32_t open_fn(void*,const uint8_t*,size_t,noesql_connection_handle*out){*out=&fake_connection;return 0;}
 static int32_t close_fn(void*,noesql_connection_handle){return 0;}
-static int32_t prepare_fn(void*,noesql_connection_handle,const uint8_t*,size_t,noesql_statement_handle*out){*out=(void*)0x2;return 0;}
+static int32_t prepare_fn(void*,noesql_connection_handle,const uint8_t*,size_t,noesql_statement_handle*out){*out=&fake_statement;return 0;}
 static int32_t release_fn(void*,noesql_connection_handle,noesql_statement_handle){return 0;}
 static int32_t statement_fn(void*,noesql_connection_handle,noesql_statement_handle,const uint8_t*,size_t,uint8_t*out,size_t cap,size_t*written){if(cap<2)return -3;out[0]='[';out[1]=']';*written=2;return 0;}
 static int32_t trans_fn(void*,noesql_connection_handle){return 0;}
@@ -27,7 +29,7 @@ int main(){
  api.abi_version=3;
  assert(noesql_cpp_session_validate(&api)==NOESQL_BRIDGE_UNSUPPORTED_ABI);
  api.abi_version=NOESQL_SESSION_ABI_VERSION;
- assert(noesql_cpp_session_release(&api,(void*)1,(void*)2)==0);
- assert(noesql_cpp_session_close(&api,(void*)1)==0);
+ assert(noesql_cpp_session_release(&api,&fake_connection,&fake_statement)==0);
+ assert(noesql_cpp_session_close(&api,&fake_connection)==0);
  return 0;
 }
