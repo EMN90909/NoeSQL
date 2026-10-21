@@ -1,0 +1,27 @@
+module noqeri.database.noesql.limits
+
+// Pure request-budget accounting: caller enforces this at every scan/row step.
+// Host must also enforce wall-clock deadlines, cancellation and allocations.
+record NoeBudget {
+    maxSteps: u64
+    usedSteps: u64
+    maxRows: usize
+    usedRows: usize
+    cancelled: bool
+}
+export function noeBudgetInit(out: *NoeBudget, maxSteps: u64, maxRows: usize): bool {
+    if out == null || maxSteps == 0 as u64 || maxRows == 0 as usize { return false }
+    out.maxSteps = maxSteps
+    out.usedSteps = 0 as u64
+    out.maxRows = maxRows
+    out.usedRows = 0 as usize
+    out.cancelled = false
+    return true
+}
+export function noeBudgetConsume(out: *NoeBudget, steps: u64, rows: usize): bool {
+    if out == null || out.cancelled { return false }
+    if steps > out.maxSteps - out.usedSteps || rows > out.maxRows - out.usedRows { return false }
+    out.usedSteps = out.usedSteps + steps
+    out.usedRows = out.usedRows + rows
+    return true
+}
