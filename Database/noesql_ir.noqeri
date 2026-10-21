@@ -1,0 +1,121 @@
+module noqeri.database.noesql.ir
+
+// Typed NoeIR for the first native relational execution slice. All identifiers
+// are resolved to catalog column indices before execution. Never store SQL text
+// or interpolate parameters in a plan.
+record NoeValue {
+    kind: int
+    isNull: bool
+    number: i64
+    textStart: usize
+    textLength: usize
+}
+record NoeColumn {
+    kind: int
+    required: bool
+    unique: bool
+    primary: bool
+}
+record NoeIrPlan {
+    operation: int
+    schemaVersion: u32
+    predicateColumn: usize
+    predicateOperator: int
+    predicateValue: NoeValue
+    mutationColumn: usize
+    mutationValue: NoeValue
+}
+export function noeTypeInt(): int { return 1 }
+export function noeTypeBool(): int { return 2 }
+export function noeTypeText(): int { return 3 }
+export function noePlanGet(): int { return 1 }
+export function noePlanInsert(): int { return 2 }
+export function noePlanSet(): int { return 3 }
+export function noePlanDelete(): int { return 4 }
+export function noePredicateNone(): int { return 0 }
+export function noePredicateEqual(): int { return 1 }
+export function noePredicateNotEqual(): int { return 2 }
+export function noePredicateLess(): int { return 3 }
+export function noePredicateLessEqual(): int { return 4 }
+export function noePredicateGreater(): int { return 5 }
+export function noePredicateGreaterEqual(): int { return 6 }
+export function noeValueTypeValid(kind: int): bool { return kind >= noeTypeInt() && kind <= noeTypeText() }
+export function noeValueValid(v: *NoeValue, kind: int, bytes: []u8): bool {
+    if v == null || v.kind != kind || !noeValueTypeValid(kind) { return false }
+    if v.isNull { return true }
+    if kind == noeTypeBool() { return v.number == 0 as i64 || v.number == 1 as i64 }
+    if kind == noeTypeText() {
+        return v.textStart <= len(bytes) && v.textLength <= len(bytes) - v.textStart
+    }
+    return true
+}
+export function noeIrVerify(plan: *NoeIrPlan, columns: []NoeColumn, version: u32, bytes: []u8, projections: []usize): isize {
+    if plan == null || version == 0 as u32 || plan.schemaVersion != version { return -1 as isize }
+    if len(columns) == 0 as usize || len(columns) > 256 as usize { return -2 as isize }
+    if plan.operation < noePlanGet() || plan.operation > noePlanDelete() { return -3 as isize }
+    let p: usize = 0 as usize
+    while p < len(columns) {
+        if !noeValueTypeValid(columns[p].kind) { return -4 as isize }
+        p = p + 1 as usize
+    }
+    if plan.predicateOperator < noePredicateNone() || plan.predicateOperator > noePredicateGreaterEqual() { return -5 as isize }
+    if plan.operation == noePlanSet() || plan.operation == noePlanDelete() {
+        if plan.predicateOperator == noePredicateNone() { return -6 as isize }
+    }
+    if plan.predicateOperator != noePredicateNone() {
+        if plan.predicateColumn >= len(columns) { return -7 as isize }
+        if !noeValueValid(&plan.predicateValue, columns[plan.predicateColumn].kind, bytes) { return -8 as isize }
+    }
+    if plan.operation == noePlanSet() {
+        if plan.mutationColumn >= len(columns) { return -9 as isize }
+        if columns[plan.mutationColumn].primary { return -10 as isize }
+        if !noeValueValid(&plan.mutationValue, columns[plan.mutationColumn].kind, bytes) { return -11 as isize }
+    }
+    if plan.operation == noePlanGet() {
+        if len(projections) == 0 as usize || len(projections) > len(columns) { return -12 as isize }
+        let i: usize = 0 as usize
+        while i < len(projections) {
+            if projections[i] >= len(columns) { return -13 as isize }
+            let j: usize = 0 as usize
+            while j < i { if projections[j] == projections[i] { return -14 as isize } j = j + 1 as usize }
+            i = i + 1 as usize
+        }
+    }
+    return 0 as isize
+}
+// -2 indicates an unknown comparison due to NULL; query predicates match only true.
+export function noeCompare(a: *NoeValue, b: *NoeValue, bytes: []u8): int {
+    if a == null || b == null || a.kind != b.kind { return -2 }
+    if !noeValueValid(a, a.kind, bytes) || !noeValueValid(b, b.kind, bytes) { return -2 }
+    if a.isNull || b.isNull { return -2 }
+    if a.kind != noeTypeText() {
+        if a.number < b.number { return -1 }
+        if a.number > b.number { return 1 }
+        return 0
+    }
+    let i: usize = 0 as usize
+    let common: usize = a.textLength
+    if b.textLength < common { common = b.textLength }
+    while i < common {
+        let left: u8 = bytes[a.textStart + i]
+        let right: u8 = bytes[b.textStart + i]
+        if left < right { return -1 }
+        if left > right { return 1 }
+        i = i + 1 as usize
+    }
+    if a.textLength < b.textLength { return -1 }
+    if a.textLength > b.textLength { return 1 }
+    return 0
+}
+export function noePredicateMatches(operatorCode: int, left: *NoeValue, right: *NoeValue, bytes: []u8): bool {
+    if operatorCode == noePredicateNone() { return true }
+    let ordering: int = noeCompare(left, right, bytes)
+    if ordering == -2 { return false }
+    if operatorCode == noePredicateEqual() { return ordering == 0 }
+    if operatorCode == noePredicateNotEqual() { return ordering != 0 }
+    if operatorCode == noePredicateLess() { return ordering < 0 }
+    if operatorCode == noePredicateLessEqual() { return ordering <= 0 }
+    if operatorCode == noePredicateGreater() { return ordering > 0 }
+    if operatorCode == noePredicateGreaterEqual() { return ordering >= 0 }
+    return false
+}
