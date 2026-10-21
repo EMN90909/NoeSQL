@@ -1,6 +1,6 @@
-import "../Database/noesql_ir.nqr"
-import "../Database/noesql_executor.nqr"
-import "../Database/noesql_row.nqr"
+import "../Database/noesql_ir.noqeri"
+import "../Database/noesql_executor.noqeri"
+import "../Database/noesql_row.noqeri"
 
 // Native conformance fixture: compile and execute once a trusted Noqeri stage-0
 // is available. Not counted among local Node.js tests.
