@@ -20,9 +20,9 @@ test('bootstrap proof checks actual source closure and artifact bytes, not statu
   try {
     mkdirSync(join(root,'Compiler/selfhost'),{recursive:true})
     mkdirSync(join(root,'build'),{recursive:true})
-    writeFileSync(join(root,'Compiler/selfhost/compiler-sources.txt'),'Compiler/selfhost/main.nqr\n')
-    writeFileSync(join(root,'Compiler/selfhost/main.nqr'),'module test')
-    const closure = h('Compiler/selfhost/main.nqr\0module test\0')
+    writeFileSync(join(root,'Compiler/selfhost/compiler-sources.txt'),'Compiler/selfhost/main.noqeri\n')
+    writeFileSync(join(root,'Compiler/selfhost/main.noqeri'),'module test')
+    const closure = h('Compiler/selfhost/main.noqeri\0module test\0')
     writeFileSync(join(root,'build/stage2'),'compiler-a')
     writeFileSync(join(root,'build/rebuilt'),'compiler-a')
     const artifactSha = h('compiler-a')
@@ -33,7 +33,7 @@ test('bootstrap proof checks actual source closure and artifact bytes, not statu
       object_writers_passed:true,formatter_passed:true,lsp_passed:true,package_manager_passed:true,
       hardening: Object.fromEntries(['fuzz_passed','race_passed','memory_passed','overflow_passed','reproducible_build_passed','practical_corpus_passed'].map(x=>[x,true])),
       stages:[stage('stage1-builds-stage2'),stage('stage2-rebuilds-compiler')],
-      suites:suiteNames.map(stage),source_files:['Compiler/selfhost/main.nqr'],source_closure_sha256:closure,
+      suites:suiteNames.map(stage),source_files:['Compiler/selfhost/main.noqeri'],source_closure_sha256:closure,
       stage2_output_sha256:artifactSha,rebuilt_output_sha256:artifactSha,
       artifacts:{stage2:{path:'build/stage2'},rebuilt:{path:'build/rebuilt'}}
     }
@@ -50,7 +50,7 @@ test('bootstrap proof checks actual source closure and artifact bytes, not statu
     writeFileSync(join(root,'build/rebuilt'),'compiler-b')
     assert.throws(()=>verifyNoqeriProof(args),/artifact/)
     writeFileSync(join(root,'build/rebuilt'),'compiler-a')
-    writeFileSync(join(root,'Compiler/selfhost/main.nqr'),'changed')
+    writeFileSync(join(root,'Compiler/selfhost/main.noqeri'),'changed')
     assert.throws(()=>verifyNoqeriProof(args),/closure/)
   }finally{rmSync(root,{recursive:true,force:true})}
 })
