@@ -1,5 +1,5 @@
 module noqeri.database.noesql.row
-import "noesql_ir.nqr"
+import "noesql_ir.noqeri"
 
 // ROW1 portable row encoding, versioned separately from pages and WAL.
 // Header (14 bytes): magic "NROW", schema-version u32 little-endian,
