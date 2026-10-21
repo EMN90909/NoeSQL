@@ -6,12 +6,30 @@ on:
 permissions:
   contents: read
 jobs:
-  native-bridge:
+  runtime-abi:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile only the new versioned bridge and execute its contract test
+        run: |
+          c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror Native/cpp/noesql_runtime_abi.cpp Native/cpp/test_runtime_abi.cpp -o /tmp/noesql-runtime-abi-contract
+          /tmp/noesql-runtime-abi-contract
+  canonical-store:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - run: make -C Native/cpp test
-      - run: node --test tests/noesql-extension-compat.test.mjs tests/noesql-migrate-noedb.test.mjs tests/noesql-zig-pages.test.mjs
+      - name: Verify explicit legacy migration into Zig-formatted .noedb
+        run: node --test tests/noesql-migrate-noedb.test.mjs
+      - name: Verify reference Zig page/WAL durability
+        run: node --test tests/noesql-zig-pages.test.mjs
+      - name: Verify legacy extension compat
+        run: node --test tests/noesql-extension-compat.test.mjs
+  native-full:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run existing native security, pager and compiler bridge qualification
+        run: make -C Native/cpp test
