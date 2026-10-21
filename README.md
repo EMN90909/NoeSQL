@@ -12,6 +12,18 @@ Active language sources, database policy modules and Noqeri fixtures use `.noqer
 
 The reference-store/session and C++ tests can be run locally with `bash scripts/verify-ecosystem-local.sh`. GitHub-hosted private-repository Actions jobs have previously failed before runner provisioning (no executed steps), so those statuses are **not** test failures or successful test evidence. See [CI runner diagnosis](Doc/CI_RUNNER_DIAGNOSIS.md).
 
+## Branch consolidation (private repository)
+
+All open PRs have been reviewed and closed/merged. The private GitHub Actions runner still fails **before any job steps begin**, so the automated one-time branch-prune workflow could not execute. To finish branch cleanup from an authenticated developer machine without losing history, use the checked-in script:
+
+```sh
+gh auth login
+bash scripts/archive-delete-branches.sh --dry-run
+bash scripts/archive-delete-branches.sh --apply
+```
+
+The script first archives **all** non-`main` branch commits under `refs/tags/archive/consolidation-20261021/`, validates the saved hashes, then deletes only the old branch refs. Never delete the tags until release history has been reviewed. No secret or personal access token is checked into this repository.
+
 ## Current architecture and the Noqeri + Zig migration
 
 - **Noqeri (`Database/*.noqeri`)** is intended to own the parser, IR verification, execution semantics, and future native storage/WAL implementation. Follow the compiler and language conventions in [the Noqeri repository](https://github.com/EMN90909/Noqeri).
