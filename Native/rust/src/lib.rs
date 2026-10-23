@@ -3,6 +3,8 @@ pub mod reference;
 pub mod value;
 #[cfg(feature = "zig-pager")]
 pub mod zig_pager;
+#[cfg(feature = "noqeri-native")]
+pub mod noqeri_native;
 
 use core::ffi::c_void;
 use core::fmt;
