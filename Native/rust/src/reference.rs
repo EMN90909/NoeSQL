@@ -738,21 +738,92 @@ impl Database {
         Ok(ExecutionReport { affected: 0, rows: rows[start..end].to_vec() })
     }
     fn update(&mut self, name: &str, filter: &Expr, values: &[(String, Expr)], params: &Params) -> Result<ExecutionReport, ReferenceError> {
-        let table = self.tables.get_mut(name).ok_or_else(|| db_failure("NOE202", format!("unknown table {name}")))?;
-        let original = table.rows.clone(); let mut affected = 0usize;
+        let table = self.tables.get(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
+        let original = table.rows.clone();
+        let key_name = table.fields.iter().find(|field| field.key).map(|field| field.name.clone());
+        let field_names: BTreeSet<String> = table.fields.iter().map(|field| field.name.clone()).collect();
+
+        let mut seen = BTreeSet::new();
+        for (field, _) in values {
+            if !seen.insert(field.clone()) { return db_error("NOE116", format!("duplicate assignment {field}")); }
+            if !field_names.contains(field) { return db_error("NOE117", format!("unknown field {field}")); }
+            if key_name.as_ref() == Some(field) { return db_error("NOE118", "cannot update primary key"); }
+        }
+
+        let mut affected = 0usize;
         for index in 0..original.len() {
             if !predicate(Some(filter), &qualified(name, &original[index]), params)? { continue; }
-            let mut candidate = original[index].clone();
-            for (field, expr) in values { let context = qualified(name, &candidate); candidate.insert(field.clone(), eval(expr, &context, params)?); }
-            Self::validate(name, table, &candidate, Some(index))?; table.rows[index] = candidate; affected += 1;
+            let mut candidate = self.tables.get(name).expect("table exists").rows[index].clone();
+            for (field, expr) in values {
+                let context = qualified(name, &candidate);
+                candidate.insert(field.clone(), eval(expr, &context, params)?);
+            }
+            self.validate(name, &candidate, Some(index))?;
+            self.tables.get_mut(name).expect("table exists").rows[index] = candidate;
+            affected += 1;
         }
         Ok(ExecutionReport { affected, rows: Vec::new() })
     }
+
     fn delete(&mut self, name: &str, filter: &Expr, params: &Params) -> Result<ExecutionReport, ReferenceError> {
-        let table = self.tables.get_mut(name).ok_or_else(|| db_failure("NOE202", format!("unknown table {name}")))?;
-        let mut kept = Vec::new(); let mut affected = 0usize;
-        for row in table.rows.drain(..) { if predicate(Some(filter), &qualified(name, &row), params)? { affected += 1; } else { kept.push(row); } }
-        table.rows = kept; Ok(ExecutionReport { affected, rows: Vec::new() })
+        let table = self.tables.get(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
+        let key = table.fields.iter().find(|field| field.key)
+            .ok_or_else(|| db_failure("NOE108", "table has no primary key"))?
+            .name.clone();
+
+        let mut hit_keys = Vec::new();
+        for row in &table.rows {
+            if predicate(Some(filter), &qualified(name, row), params)? {
+                if let Some(value) = row.get(&key) { hit_keys.push(value.clone()); }
+            }
+        }
+
+        if !hit_keys.is_empty() {
+            for (other_name, other) in &self.tables {
+                if other_name == name { continue; }
+                for field in &other.fields {
+                    if field.reference.as_deref() == Some(name) {
+                        for row in &other.rows {
+                            if let Some(value) = row.get(&field.name) {
+                                if hit_keys.iter().any(|key_value| key_value == value) {
+                                    return db_error("NOE208", format!("delete blocked by reference {}.{}", other_name, field.name));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let table = self.tables.get_mut(name).expect("table exists");
+        let before = table.rows.len();
+        table.rows.retain(|row| !hit_keys.iter().any(|key_value| row.get(&key) == Some(key_value)));
+        Ok(ExecutionReport { affected: before - table.rows.len(), rows: Vec::new() })
+    }
+
+    pub fn run_named(&self, name: &str, args: &Params) -> Result<ExecutionReport, ReferenceError> {
+        let definition = self.queries.get(name).ok_or_else(|| db_failure("NOE131", format!("unknown query {name}")))?;
+        let mut bound = Params::new();
+
+        for param in &definition.params {
+            let value = if let Some(value) = args.get(&param.name) {
+                value.clone()
+            } else if let Some(default) = &param.default {
+                eval(default, &Row::new(), &Params::new())?
+            } else {
+                return db_error("NOE132", format!("missing parameter {}", param.name));
+            };
+            if value == Value::Null || !param.kind.accepts(&value) {
+                return db_error("NOE132", format!("invalid parameter {}", param.name));
+            }
+            bound.insert(param.name.clone(), value);
+        }
+        for name in args.keys() {
+            if !definition.params.iter().any(|param| &param.name == name) {
+                return db_error("NOE133", format!("unknown parameter {name}"));
+            }
+        }
+        self.select(&definition.select, &bound)
     }
 }
 fn db_failure(code: &'static str, message: impl Into<String>) -> ReferenceError { ReferenceError { code, line: 1, column: 1, message: message.into() } }
