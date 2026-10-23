@@ -1,3 +1,9 @@
+pub mod codec;
+pub mod reference;
+pub mod value;
+#[cfg(feature = "zig-pager")]
+pub mod zig_pager;
+
 use core::ffi::c_void;
 use core::fmt;
 use std::ffi::OsStr;
@@ -36,6 +42,7 @@ pub enum Error {
     InvalidDatabasePath,
     Provider(i32),
     Io(String),
+    Codec(String),
     Utf8,
 }
 
@@ -49,6 +56,7 @@ impl fmt::Display for Error {
             Self::InvalidDatabasePath => write!(f, "database path must be a non-empty .noedb path without NUL bytes"),
             Self::Provider(code) => write!(f, "NoeSQL provider returned status {code}"),
             Self::Io(message) => write!(f, "I/O error: {message}"),
+            Self::Codec(message) => write!(f, "snapshot codec error: {message}"),
             Self::Utf8 => write!(f, "provider returned non-UTF-8 output"),
         }
     }
