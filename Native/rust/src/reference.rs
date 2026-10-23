@@ -471,7 +471,11 @@ fn merge(left_name: &str, left: &Row, right_name: &str, right: Option<&Row>) -> 
 
 impl Database {
     pub fn execute(&mut self, source: &str, params: &Params) -> Result<ExecutionReport, ReferenceError> {
-        let statements = parse(source)?; self.execute_many(&statements, params)
+        let statements = parse(source)?;
+        let mut working = self.clone();
+        let report = working.execute_many(&statements, params)?;
+        *self = working;
+        Ok(report)
     }
     fn execute_many(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let mut report = ExecutionReport::default();
