@@ -80,7 +80,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
         }
         if ch == b'"' {
             adv!(1);
-            let mut text = String::new();
+            let mut text = Vec::new();
             let mut closed = false;
             while i < bytes.len() {
                 let current = bytes[i];
@@ -91,15 +91,16 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
                     let escaped = bytes[i];
                     adv!(1);
                     text.push(match escaped {
-                        b'n' => '\n', b'r' => '\r', b't' => '\t', b'"' => '"', b'\\' => '\\',
+                        b'n' => b'\n', b'r' => b'\r', b't' => b'\t', b'"' => b'"', b'\\' => b'\\',
                         _ => return Err(ReferenceError { code: "NOE003", line: at_line, column: at_column, message: "invalid string escape".into() }),
                     });
                 } else {
                     if current == b'\n' { return Err(ReferenceError { code: "NOE002", line: at_line, column: at_column, message: "unterminated string".into() }); }
-                    text.push(current as char);
+                    text.push(current);
                 }
             }
             if !closed { return Err(ReferenceError { code: "NOE002", line: at_line, column: at_column, message: "unterminated string".into() }); }
+            let text = String::from_utf8(text).map_err(|_| ReferenceError { code: "NOE003", line: at_line, column: at_column, message: "string is not valid UTF-8".into() })?;
             out.push(Token { kind: TokenKind::Str, text, line: at_line, column: at_column });
             continue;
         }
