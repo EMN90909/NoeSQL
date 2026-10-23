@@ -312,3 +312,46 @@ test "index ABI stages read-your-writes, rollback, WAL commit, cold reopen and r
     try std.testing.expectEqual(STATUS_NOT_FOUND, noesql_zig_index_find(handle, 7, -4, &row));
     try std.testing.expectEqual(STATUS_OK, noesql_zig_index_find(handle, 7, 12, &row));
 }
+
+
+test "snapshot ABI atomically persists and reloads Rust-owned payload bytes" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-snapshot-abi-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var path_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&wal_buf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lock_buf, "{s}.lck", .{path});
+    const c_api = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = c_api.unlink(data.ptr);
+        _ = c_api.unlink(journal.ptr);
+        _ = c_api.unlink(mutex.ptr);
+    }
+
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    const payload = "NQRP0001-rust-owned-snapshot-payload";
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, payload.ptr, payload.len));
+
+    var required: usize = 0;
+    try std.testing.expectEqual(STATUS_BUFFER_TOO_SMALL, noesql_zig_snapshot_read(handle, null, 0, &required));
+    try std.testing.expectEqual(payload.len, required);
+
+    var output: [128]u8 = undefined;
+    var written: usize = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &output, output.len, &written));
+    try std.testing.expectEqual(payload.len, written);
+    try std.testing.expect(std.mem.eql(u8, payload, output[0..written]));
+
+    noesql_zig_page_close(handle);
+    handle = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+    written = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &output, output.len, &written));
+    try std.testing.expect(std.mem.eql(u8, payload, output[0..written]));
+}
