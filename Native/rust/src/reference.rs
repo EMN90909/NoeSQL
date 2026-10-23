@@ -456,6 +456,58 @@ fn type_error<T>(message: &str) -> Result<T, ReferenceError> { Err(ReferenceErro
 fn predicate(filter: Option<&Expr>, row: &Row, params: &Params) -> Result<bool, ReferenceError> {
     match filter { None => Ok(true), Some(expr) => eval(expr, row, params)?.truthy().ok_or_else(|| ReferenceError { code: "NOE125", line: 1, column: 1, message: "predicate must be bool".into() }) }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExprType { Null, Int, Bool, Text }
+
+fn value_expr_type(value: &Value) -> ExprType {
+    match value {
+        Value::Null => ExprType::Null,
+        Value::Int(_) => ExprType::Int,
+        Value::Bool(_) => ExprType::Bool,
+        Value::Text(_) => ExprType::Text,
+    }
+}
+
+fn field_expr_type(kind: ValueType) -> ExprType {
+    match kind {
+        ValueType::Int | ValueType::Ref => ExprType::Int,
+        ValueType::Bool => ExprType::Bool,
+        ValueType::Text => ExprType::Text,
+    }
+}
+
+fn infer_expr_type(
+    expr: &Expr,
+    columns: &BTreeMap<String, ExprType>,
+    params: &BTreeMap<String, ExprType>,
+) -> Result<ExprType, ReferenceError> {
+    match expr {
+        Expr::Literal(value) => Ok(value_expr_type(value)),
+        Expr::Column(name) => columns.get(name).copied()
+            .ok_or_else(|| db_failure("NOE120", format!("unknown field {name}"))),
+        Expr::Param(name) => params.get(name).copied()
+            .ok_or_else(|| db_failure("NOE121", format!("unknown parameter ${name}"))),
+        Expr::Unary(op, arg) => {
+            let kind = infer_expr_type(arg, columns, params)?;
+            match (op.as_str(), kind) {
+                ("!", ExprType::Bool) => Ok(ExprType::Bool),
+                ("-", ExprType::Int) => Ok(ExprType::Int),
+                _ => db_error("NOE122", "invalid unary operand"),
+            }
+        }
+        Expr::Binary(op, left, right) => {
+            let left = infer_expr_type(left, columns, params)?;
+            let right = infer_expr_type(right, columns, params)?;
+            match op.as_str() {
+                "+" | "-" | "*" | "/" if left == ExprType::Int && right == ExprType::Int => Ok(ExprType::Int),
+                "&&" | "||" if left == ExprType::Bool && right == ExprType::Bool => Ok(ExprType::Bool),
+                "==" | "!=" | "<" | "<=" | ">" | ">=" if left == right && left != ExprType::Null => Ok(ExprType::Bool),
+                _ => db_error("NOE123", format!("incompatible {left:?} {op} {right:?}")),
+            }
+        }
+    }
+}
 fn qualified(table: &str, row: &Row) -> Row {
     let mut out = Row::new();
     for (name, value) in row { out.insert(name.clone(), value.clone()); out.insert(format!("{table}.{name}"), value.clone()); }
@@ -508,6 +560,12 @@ impl Database {
                         if !field.key || field.kind != ValueType::Int { return db_error("NOE106", "auto requires int key"); }
                     }
                     if field.reference.is_some() && field.default.is_some() { return db_error("NOE107", "references cannot have defaults"); }
+                    if let Some(default) = &field.default {
+                        let value = eval(default, &Row::new(), &Params::new())?;
+                        if !field.kind.accepts(&value) || value == Value::Null {
+                            return db_error("NOE124", format!("invalid default for {}", field.name));
+                        }
+                    }
                 }
                 if keys != 1 || autos > 1 { return db_error("NOE108", "exactly one integer primary key required"); }
                 self.tables.insert(name.clone(), Table { fields: fields.clone(), rows: Vec::new(), next_auto: 1 });
@@ -569,6 +627,10 @@ impl Database {
                         }
                     }
                 }
+                let parameter_types = declared.iter()
+                    .map(|param| (param.name.clone(), field_expr_type(param.kind)))
+                    .collect();
+                self.validate_select_types(select, &parameter_types)?;
                 self.queries.insert(name.clone(), NamedQuery { params: declared.clone(), select: select.clone() });
                 Ok(ExecutionReport::default())
             }
@@ -666,6 +728,115 @@ impl Database {
         Ok(ExecutionReport { affected: 1, rows: Vec::new() })
     }
 
+    fn select_columns(&self, select: &Select) -> Result<BTreeMap<String, ExprType>, ReferenceError> {
+        let base = self.tables.get(&select.table)
+            .ok_or_else(|| db_failure("NOE100", format!("unknown table {}", select.table)))?;
+        let mut columns = BTreeMap::new();
+        for field in &base.fields {
+            let kind = field_expr_type(field.kind);
+            columns.insert(field.name.clone(), kind);
+            columns.insert(format!("{}.{}", select.table, field.name), kind);
+        }
+        if let Some(join) = &select.join {
+            let right = self.tables.get(&join.table)
+                .ok_or_else(|| db_failure("NOE100", format!("unknown table {}", join.table)))?;
+            for field in &right.fields {
+                columns.insert(format!("{}.{}", join.table, field.name), field_expr_type(field.kind));
+            }
+        }
+        Ok(columns)
+    }
+
+    fn validate_select_types(
+        &self,
+        select: &Select,
+        params: &BTreeMap<String, ExprType>,
+    ) -> Result<(), ReferenceError> {
+        let columns = self.select_columns(select)?;
+
+        if let Some(join) = &select.join {
+            if infer_expr_type(&join.on, &columns, params)? != ExprType::Bool {
+                return db_error("NOE230", "join condition must be bool");
+            }
+        }
+        if let Some(filter) = &select.filter {
+            if infer_expr_type(filter, &columns, params)? != ExprType::Bool {
+                return db_error("NOE125", "where expression must be bool");
+            }
+        }
+
+        let grouped = !select.group.is_empty()
+            || select.projections.iter().any(|projection| matches!(projection, Projection::Aggregate { .. }));
+        let mut outputs = BTreeMap::new();
+
+        for projection in &select.projections {
+            match projection {
+                Projection::All => {
+                    if grouped { return db_error("NOE233", "cannot group *"); }
+                }
+                Projection::Column(name) => {
+                    let kind = columns.get(name).copied()
+                        .ok_or_else(|| db_failure("NOE120", format!("unknown projection {name}")))?;
+                    if grouped && !select.group.iter().any(|group| group == name) {
+                        return db_error("NOE235", format!("projection must be grouped: {name}"));
+                    }
+                    outputs.insert(name.clone(), kind);
+                }
+                Projection::Aggregate { function, argument, alias } => {
+                    let kind = match function.as_str() {
+                        "count" => ExprType::Int,
+                        "sum" => {
+                            let field = argument.as_ref().ok_or_else(|| db_failure("NOE030", "sum requires a column"))?;
+                            let kind = columns.get(field).copied()
+                                .ok_or_else(|| db_failure("NOE120", format!("unknown aggregate column {field}")))?;
+                            if kind != ExprType::Int { return db_error("NOE236", "sum requires int"); }
+                            ExprType::Int
+                        }
+                        "min" | "max" => {
+                            let field = argument.as_ref().ok_or_else(|| db_failure("NOE030", format!("{function} requires a column")))?;
+                            columns.get(field).copied()
+                                .ok_or_else(|| db_failure("NOE120", format!("unknown aggregate column {field}")))?
+                        }
+                        _ => return db_error("NOE030", format!("unsupported aggregate {function}")),
+                    };
+                    if outputs.insert(alias.clone(), kind).is_some() {
+                        return db_error("NOE234", format!("duplicate output {alias}"));
+                    }
+                }
+            }
+        }
+
+        let mut seen_groups = BTreeSet::new();
+        for group in &select.group {
+            if !seen_groups.insert(group.clone()) { return db_error("NOE232", format!("duplicate group {group}")); }
+            if !columns.contains_key(group) { return db_error("NOE120", format!("unknown group {group}")); }
+        }
+
+        if let Some(having) = &select.having {
+            let mut having_columns = columns.clone();
+            having_columns.extend(outputs.clone());
+            if infer_expr_type(having, &having_columns, params)? != ExprType::Bool {
+                return db_error("NOE125", "having expression must be bool");
+            }
+        }
+
+        if let Some(sort) = &select.sort {
+            if grouped {
+                if !outputs.contains_key(sort) && !select.group.iter().any(|group| group == sort) {
+                    return db_error("NOE237", format!("group sort must use output column or alias: {sort}"));
+                }
+            } else if !columns.contains_key(sort) {
+                return db_error("NOE120", format!("unknown sort column {sort}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_select(&self, select: &Select, params: &Params) -> Result<(), ReferenceError> {
+        let types = params.iter().map(|(name, value)| (name.clone(), value_expr_type(value))).collect();
+        self.validate_select_types(select, &types)
+    }
+
     fn source_rows(&self, select: &Select, params: &Params) -> Result<Vec<Row>, ReferenceError> {
         let left = self.tables.get(&select.table).ok_or_else(|| db_failure("NOE202", format!("unknown table {}", select.table)))?;
         let mut rows = Vec::new();
@@ -714,6 +885,7 @@ impl Database {
         if predicate(select.having.as_ref(), &out, params)? { Ok(Some(out)) } else { Ok(None) }
     }
     fn select(&self, select: &Select, params: &Params) -> Result<ExecutionReport, ReferenceError> {
+        self.validate_select(select, params)?;
         let source = self.source_rows(select, params)?;
         let aggregated = !select.group.is_empty() || select.projections.iter().any(|p| matches!(p, Projection::Aggregate { .. }));
         let mut rows = Vec::new();
