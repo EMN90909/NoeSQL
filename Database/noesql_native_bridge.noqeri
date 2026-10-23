@@ -18,7 +18,7 @@ export function noesqlNativeBoolRow(
     path: string,
     pageId: u32,
     rowId: i64,
-    enabled: bool,
+    enabled: u8,
     operation: int,
     outEnabled: *u8
 ): isize {
@@ -58,7 +58,7 @@ export function noesqlNativeBoolRow(
     flag.kind = noeTypeBool()
     flag.isNull = false
     flag.number = 0 as i64
-    if enabled { flag.number = 1 as i64 }
+    if enabled != 0 as u8 { flag.number = 1 as i64 }
     flag.textStart = 0 as usize
     flag.textLength = 0 as usize
 
