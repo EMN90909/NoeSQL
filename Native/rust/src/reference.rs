@@ -322,7 +322,7 @@ impl Parser {
 pub fn parse(source: &str) -> Result<Vec<Statement>, ReferenceError> { Parser::new(tokenize(source)?).parse() }
 
 #[derive(Clone, Debug)]
-pub struct Table { pub fields: Vec<Field>, pub rows: Vec<Row>, next_auto: i64 }
+pub struct Table { pub fields: Vec<Field>, pub rows: Vec<Row>, pub(crate) next_auto: i64 }
 #[derive(Clone, Debug, Default)]
 pub struct Database { pub name: Option<String>, pub tables: BTreeMap<String, Table> }
 #[derive(Clone, Debug, Default)]
