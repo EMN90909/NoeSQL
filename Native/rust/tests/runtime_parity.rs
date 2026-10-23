@@ -336,3 +336,34 @@ users add {name:"Seed"}"#,
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].get("name"), Some(&Value::Text("Seed".into())));
 }
+
+
+#[test]
+fn invalid_query_is_rejected_even_when_table_is_empty() {
+    let mut db = Database::default();
+    db.execute(
+        r#"table users {
+ id:int key auto
+ age:int required
+}"#,
+        &params(),
+    ).unwrap();
+
+    assert_eq!(
+        db.execute("users get missing where age >= 18", &params()).unwrap_err().code,
+        "NOE120"
+    );
+    assert_eq!(
+        db.execute("users get id where ghost == 1", &params()).unwrap_err().code,
+        "NOE120"
+    );
+    assert_eq!(
+        db.execute(
+            r#"query broken(min:int) {
+ users get id where age >= $wrong
+}"#,
+            &params(),
+        ).unwrap_err().code,
+        "NOE121"
+    );
+}
