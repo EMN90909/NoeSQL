@@ -9,7 +9,7 @@ unsafe extern "C" {
         path: *const c_char,
         page_id: u32,
         row_id: i64,
-        enabled: bool,
+        enabled: u8,
         operation: i32,
         out_enabled: *mut u8,
     ) -> isize;
@@ -25,7 +25,7 @@ fn execute(path: &Path, page_id: u32, row_id: i64, enabled: bool, operation: i32
     let path = path.to_str().ok_or(Error::InvalidDatabasePath)?;
     let path = CString::new(path).map_err(|_| Error::InvalidDatabasePath)?;
     let mut output = 0u8;
-    let status = unsafe { noesqlNativeBoolRow(path.as_ptr(), page_id, row_id, enabled, operation, &mut output) };
+    let status = unsafe { noesqlNativeBoolRow(path.as_ptr(), page_id, row_id, u8::from(enabled), operation, &mut output) };
     if status < 0 { return Err(Error::Provider(status as i32)); }
     if operation == 1 {
         if status == 1 { Ok(None) } else { Ok(Some(output != 0)) }
