@@ -13,7 +13,7 @@ jobs:
   native:
     name: Noqeri + C++ + Rust + Zig
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -28,16 +28,57 @@ jobs:
       - name: Install native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev libsqlite3-dev
+          sudo apt-get install -y build-essential cmake libssl-dev libsqlite3-dev
 
-      - name: Reject JavaScript regression
+      - name: Reject JavaScript regression in NoeSQL
         run: make no-js
 
-      - name: Run complete native test matrix
-        run: zig build test
+      - name: Run Rust replacement-runtime tests
+        run: cargo test --manifest-path Native/rust/Cargo.toml --all-targets
 
-      - name: Build release-safe native components
-        run: zig build native
+      - name: Run Zig pager WAL and index tests
+        run: zig build --build-file Native/zig/build.zig test
+
+      - name: Build release-safe Zig pager
+        run: zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+
+      - name: Run C++ compatibility and durability tests
+        run: make -C Native/cpp test
+
+      - name: Checkout Noqeri compiler
+        uses: actions/checkout@v4
+        with:
+          repository: EMN90909/Noqeri
+          ref: main
+          path: .ci-noqeri
+
+      - name: Build Noqeri Stage-0 AOT compiler
+        run: |
+          cmake -S .ci-noqeri -B .ci-noqeri-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build .ci-noqeri-build --target noqeri -j2
+          .ci-noqeri-build/noqeri version
+
+      - name: Compile NoeSQL Noqeri bridge with Rust builder
+        run: |
+          rm -rf Native/rust/native-lib
+          cargo run --manifest-path Native/rust/Cargo.toml --bin build_native --             "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri"             "$GITHUB_WORKSPACE/Database/noesql_native_bridge.noqeri"             "$GITHUB_WORKSPACE/Native/rust/native-lib"
+          test -s Native/rust/native-lib/libnoesql_noqeri.a
+
+      - name: Compile and execute native Noqeri executor fixture
+        run: |
+          .ci-noqeri-build/noqeri build tests/noesql_native_ir.noqeri /tmp/noesql-native-ir.s -O2
+          cc -c /tmp/noesql-native-ir.s -o /tmp/noesql-native-ir.o
+          c++ -std=c++17 -O2 -I .ci-noqeri/Include/noqeri -c .ci-noqeri/Runtime/native/aot_runner.cpp -o /tmp/noqeri-aot-runner.o
+          c++ /tmp/noesql-native-ir.o /tmp/noqeri-aot-runner.o -o /tmp/noesql-native-ir
+          /tmp/noesql-native-ir
+
+      - name: Link Rust to native Noqeri and Zig
+        env:
+          NOESQL_NOQERI_LIB_DIR: ${{ github.workspace }}/Native/rust/native-lib
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+        run: |
+          cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features noqeri-native
+          cargo run --manifest-path Native/rust/Cargo.toml --features noqeri-native --bin native_chain_smoke
 
       - name: Validate C ABI headers
         run: |
@@ -45,3 +86,6 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_engine_abi.h
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_session_abi.h
 
+      - name: Verify JavaScript did not return
+        run: |
+          test -z "$(find . -path './.ci-noqeri' -prune -o -path './.ci-noqeri-build' -prune -o -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.jsx' \) -print -quit)"
