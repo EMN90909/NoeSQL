@@ -103,8 +103,18 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
             out.push(Token { kind: TokenKind::Str, text, line: at_line, column: at_column });
             continue;
         }
-        let duo = if i + 1 < bytes.len() { &source[i..i + 2] } else { "" };
-        if matches!(duo, "==" | "!=" | "<=" | ">=" | "&&" | "||") {
+        let duo = if i + 1 < bytes.len() {
+            match (bytes[i], bytes[i + 1]) {
+                (b'=', b'=') => Some("=="),
+                (b'!', b'=') => Some("!="),
+                (b'<', b'=') => Some("<="),
+                (b'>', b'=') => Some(">="),
+                (b'&', b'&') => Some("&&"),
+                (b'|', b'|') => Some("||"),
+                _ => None,
+            }
+        } else { None };
+        if let Some(duo) = duo {
             adv!(2);
             out.push(Token { kind: TokenKind::Op, text: duo.into(), line: at_line, column: at_column });
             continue;
