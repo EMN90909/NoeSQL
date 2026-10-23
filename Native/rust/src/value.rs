@@ -1,7 +1,7 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Value {
     Null,
     Bool(bool),
