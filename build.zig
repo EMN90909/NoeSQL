@@ -1,7 +1,18 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
+    const target = b.standardTargetOptions(.{});
+    const optimize = b.standardOptimizeOption(.{});
+
     const test_step = b.step("test", "Run the NoeSQL native Noqeri/C++/Rust/Zig validation suite");
+
+    const contract_module = b.createModule(.{
+        .root_source_file = b.path("Tools/noesql_ci.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const contract_tests = b.addTest(.{ .root_module = contract_module });
+    test_step.dependOn(&b.addRunArtifact(contract_tests).step);
 
     const zig_tests = b.addSystemCommand(&.{ "zig", "build", "--build-file", "Native/zig/build.zig", "test" });
     test_step.dependOn(&zig_tests.step);
