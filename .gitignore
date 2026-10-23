@@ -6,9 +6,19 @@
 *.nqd
 *.nqd.wal
 *.nqd.lck
+*.noedb
+*.noedb.wal
+*.noedb.lck
 *.env
 .env.*
 !*.env.example
+
+# Native build output
+.zig-cache/
+zig-out/
+Native/zig/.zig-cache/
+Native/zig/zig-out/
+Native/rust/target/
 
 # Verified CI-only native toolchain checkout (never publish)
 .ci-noqeri/
