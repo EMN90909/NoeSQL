@@ -38,56 +38,58 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
     while i < bytes.len() {
         let (at_line, at_column) = (line, column);
         let ch = bytes[i];
-        let mut advance = |count: usize| {
-            for _ in 0..count {
-                if bytes[i] == b'\n' { line += 1; column = 1; } else { column += 1; }
-                i += 1;
-            }
-        };
-        if matches!(ch, b' ' | b'\t' | b'\r') { advance(1); continue; }
+        macro_rules! adv {
+            ($count:expr) => {{
+                for _ in 0..$count {
+                    if bytes[i] == b'\n' { line += 1; column = 1; } else { column += 1; }
+                    i += 1;
+                }
+            }};
+        }
+        if matches!(ch, b' ' | b'\t' | b'\r') { adv!(1); continue; }
         if ch == b'\n' || ch == b';' {
-            advance(1);
+            adv!(1);
             out.push(Token { kind: TokenKind::Sep, text: ";".into(), line: at_line, column: at_column });
             continue;
         }
         if ch == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
-            while i < bytes.len() && bytes[i] != b'\n' { advance(1); }
+            while i < bytes.len() && bytes[i] != b'\n' { adv!(1); }
             continue;
         }
         if ch == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            advance(2);
+            adv!(2);
             let mut closed = false;
             while i + 1 < bytes.len() {
-                if bytes[i] == b'*' && bytes[i + 1] == b'/' { advance(2); closed = true; break; }
-                advance(1);
+                if bytes[i] == b'*' && bytes[i + 1] == b'/' { adv!(2); closed = true; break; }
+                adv!(1);
             }
             if !closed { return Err(ReferenceError { code: "NOE001", line: at_line, column: at_column, message: "unterminated comment".into() }); }
             continue;
         }
         if ch.is_ascii_alphabetic() || ch == b'_' {
             let start = i;
-            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { advance(1); }
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') { adv!(1); }
             out.push(Token { kind: TokenKind::Ident, text: source[start..i].into(), line: at_line, column: at_column });
             continue;
         }
         if ch.is_ascii_digit() {
             let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() { advance(1); }
+            while i < bytes.len() && bytes[i].is_ascii_digit() { adv!(1); }
             out.push(Token { kind: TokenKind::Int, text: source[start..i].into(), line: at_line, column: at_column });
             continue;
         }
         if ch == b'"' {
-            advance(1);
+            adv!(1);
             let mut text = String::new();
             let mut closed = false;
             while i < bytes.len() {
                 let current = bytes[i];
-                advance(1);
+                adv!(1);
                 if current == b'"' { closed = true; break; }
                 if current == b'\\' {
                     if i >= bytes.len() { break; }
                     let escaped = bytes[i];
-                    advance(1);
+                    adv!(1);
                     text.push(match escaped {
                         b'n' => '\n', b'r' => '\r', b't' => '\t', b'"' => '"', b'\\' => '\\',
                         _ => return Err(ReferenceError { code: "NOE003", line: at_line, column: at_column, message: "invalid string escape".into() }),
@@ -103,7 +105,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
         }
         let duo = if i + 1 < bytes.len() { &source[i..i + 2] } else { "" };
         if matches!(duo, "==" | "!=" | "<=" | ">=" | "&&" | "||") {
-            advance(2);
+            adv!(2);
             out.push(Token { kind: TokenKind::Op, text: duo.into(), line: at_line, column: at_column });
             continue;
         }
@@ -113,7 +115,7 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
                 depth += 1;
                 if depth > 64 { return Err(ReferenceError { code: "NOE007", line: at_line, column: at_column, message: "nesting exceeds maximum".into() }); }
             } else if matches!(ch, b'}' | b')') { depth = depth.saturating_sub(1); }
-            advance(1);
+            adv!(1);
             out.push(Token { kind: TokenKind::Op, text, line: at_line, column: at_column });
             continue;
         }
