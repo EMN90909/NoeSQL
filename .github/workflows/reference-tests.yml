@@ -1,8 +1,8 @@
-name: NoeSQL reference tests
+name: NoeSQL native validation
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor/no-js-rust-zig-runtime]
   pull_request:
     branches: [main]
 
@@ -10,64 +10,42 @@ permissions:
   contents: read
 
 jobs:
-  node-tests:
-    name: Node.js ${{ matrix.node }}
+  native:
+    name: Noqeri + C++ + Rust + Zig
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['22', '24']
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-      - name: Run reference and security regression tests
-        shell: bash
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee node-tests.log
-      - name: Upload test diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-test-log-${{ matrix.node }}
-          path: node-tests.log
-          if-no-files-found: ignore
 
-  native-cpp:
-    name: Native C++ compatibility and recovery
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install native headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev libsqlite3-dev
-      - name: Compile and run native fault, ABI and durability tests
-        run: make -C Native/cpp test
-      - name: Validate corrected SQLite benchmark harness
-        run: make -C Native/cpp benchmark-compare
-
-  zig:
-    name: Zig 0.15.2 bridge and legacy verification
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - name: Build and test native Zig verification components
-        run: npm run test:zig
-      - name: ReleaseSafe build
-        run: npm run build:zig
-      - name: Verify Zig C ABI declarations compile
-        run: cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
-      - name: Node to native Zig pager round trip
-        run: |
-          cc -std=c11 -Wall -Wextra -Werror -I Native/zig Native/link-tests/zig_page_roundtrip.c Native/zig/zig-out/lib/libnoesql_zig_pages.a -pthread -lm -ldl -o /tmp/noesql-zig-roundtrip
-          node scripts/verify-zig-page-roundtrip.mjs /tmp/noesql-zig-roundtrip
-      - name: Verify Noqeri proof checker rejects missing provenance
-        run: node --test tests/noqeri-bootstrap.test.mjs
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libsqlite3-dev
+
+      - name: Reject JavaScript regression
+        run: make no-js
+
+      - name: Run complete native test matrix
+        run: zig build test
+
+      - name: Build release-safe native components
+        run: zig build native
+
+      - name: Validate C ABI headers
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_engine_abi.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_session_abi.h
+
+      - name: Rust hygiene
+        run: |
+          cargo fmt --manifest-path Native/rust/Cargo.toml -- --check
+          cargo clippy --manifest-path Native/rust/Cargo.toml --all-targets -- -D warnings
