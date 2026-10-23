@@ -8,10 +8,14 @@ BENCH_BIN ?= /tmp/noesql-cpp-page-bench
 ABI_TEST_BIN ?= /tmp/noesql-storage-abi-test
 FAULT_TEST_BIN ?= /tmp/noesql-prod-fault-gate-test
 COMPARE_BIN ?= /tmp/noesql-sqlite-compare
+NOQERI_ZIG_TEST_BIN ?= /tmp/noesql-noqeri-zig-bridge-test
 
 .PHONY: test test-native benchmark benchmark-compare native-cli clean
 
 test: test-native
+	$(CXX) $(CXXFLAGS) noesql_noqeri_zig_bridge.cpp test_noqeri_zig_bridge.cpp -I. -I../zig -o $(NOQERI_ZIG_TEST_BIN)
+	$(NOQERI_ZIG_TEST_BIN)
+	rm -f $(NOQERI_ZIG_TEST_BIN)
 	$(CXX) $(CXXFLAGS) noesql_session_abi.cpp test_session_abi.cpp -o /tmp/noesql-session-abi-test
 	/tmp/noesql-session-abi-test
 	rm -f /tmp/noesql-session-abi-test
@@ -45,4 +49,4 @@ benchmark:
 	rm -f $(BENCH_BIN)
 
 clean:
-	rm -f $(TEST_BIN) $(PAGE_TEST_BIN) $(BENCH_BIN) $(FAULT_TEST_BIN) $(COMPARE_BIN) $(ABI_TEST_BIN)
+	rm -f $(TEST_BIN) $(PAGE_TEST_BIN) $(BENCH_BIN) $(FAULT_TEST_BIN) $(COMPARE_BIN) $(ABI_TEST_BIN) $(NOQERI_ZIG_TEST_BIN)
