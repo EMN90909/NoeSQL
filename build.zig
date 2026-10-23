@@ -46,4 +46,8 @@ pub fn build(b: *std.Build) void {
     const chain_step = b.step("native-chain", "Build and execute the Rust -> Noqeri AOT -> Zig integration chain");
     const chain = b.addSystemCommand(&.{ "make", "native-chain" });
     chain_step.dependOn(&chain.step);
+
+    const stage2_step = b.step("stage2-chain", "Build verified Stage-2 NQRI and execute Rust -> Stage-2 -> Zig");
+    const stage2 = b.addSystemCommand(&.{ "make", "stage2-chain" });
+    stage2_step.dependOn(&stage2.step);
 }
