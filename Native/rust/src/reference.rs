@@ -169,6 +169,22 @@ pub enum Projection {
 #[derive(Clone, Debug)]
 pub struct Join { pub table: String, pub left: bool, pub on: Expr }
 #[derive(Clone, Debug)]
+pub struct QueryParam {
+    pub name: String,
+    pub kind: ValueType,
+    pub default: Option<Expr>,
+}
+#[derive(Clone, Debug)]
+pub struct NamedQuery {
+    pub params: Vec<QueryParam>,
+    pub select: Select,
+}
+#[derive(Clone, Debug)]
+pub struct IndexDefinition {
+    pub table: String,
+    pub columns: Vec<String>,
+}
+#[derive(Clone, Debug)]
 pub struct Select {
     pub table: String,
     pub projections: Vec<Projection>,
@@ -185,6 +201,8 @@ pub enum Statement {
     Database(String),
     Table(String, Vec<Field>),
     AlterAdd(String, Vec<Field>),
+    Index { name: String, table: String, columns: Vec<String> },
+    Query { name: String, params: Vec<QueryParam>, select: Select },
     Add(String, Vec<(String, Expr)>),
     Get(Select),
     Set(String, Expr, Vec<(String, Expr)>),
@@ -307,6 +325,41 @@ impl Parser {
         if self.eat("db") { return Ok(Statement::Database(self.id()?)); }
         if self.eat("table") { let name = self.id()?; return Ok(Statement::Table(name, self.fields()?)); }
         if self.eat("alter") { let name = self.id()?; self.need("add")?; return Ok(Statement::AlterAdd(name, self.fields()?)); }
+        if self.eat("index") {
+            let name = self.id()?;
+            self.need("on")?;
+            let table = self.id()?;
+            self.need("(")?;
+            let mut columns = vec![self.id()?];
+            while self.eat(",") { columns.push(self.id()?); }
+            self.need(")")?;
+            return Ok(Statement::Index { name, table, columns });
+        }
+        if self.eat("query") {
+            let name = self.id()?;
+            self.need("(")?;
+            let mut params = Vec::new();
+            while !self.is(")") {
+                let param_name = self.id()?;
+                self.need(":")?;
+                let type_name = self.id()?;
+                let kind = ValueType::parse(&type_name).ok_or_else(|| failure("NOE115", self.current(), "unsupported parameter type"))?;
+                if kind == ValueType::Ref { return Err(failure("NOE115", self.current(), "named-query parameters cannot be ref")); }
+                let default = if self.eat("=") { Some(self.expr(0)?) } else { None };
+                params.push(QueryParam { name: param_name, kind, default });
+                if !self.eat(",") { break; }
+            }
+            self.need(")")?;
+            self.need("{")?;
+            self.separators();
+            let statement = self.statement()?;
+            self.separators();
+            self.need("}")?;
+            let Statement::Get(select) = statement else {
+                return Err(failure("NOE016", self.current(), "named query must be a get statement"));
+            };
+            return Ok(Statement::Query { name, params, select });
+        }
         if self.eat("atomic") {
             self.need("{")?; self.separators(); let mut body = Vec::new();
             while !self.is("}") { if self.current().kind == TokenKind::Eof { return Err(failure("NOE017", self.current(), "unterminated atomic scope")); } body.push(self.statement()?); self.boundary()?; }
@@ -334,8 +387,25 @@ pub fn parse(source: &str) -> Result<Vec<Statement>, ReferenceError> { Parser::n
 
 #[derive(Clone, Debug)]
 pub struct Table { pub fields: Vec<Field>, pub rows: Vec<Row>, pub(crate) next_auto: i64 }
-#[derive(Clone, Debug, Default)]
-pub struct Database { pub name: Option<String>, pub tables: BTreeMap<String, Table> }
+#[derive(Clone, Debug)]
+pub struct Database {
+    pub name: Option<String>,
+    pub version: u32,
+    pub tables: BTreeMap<String, Table>,
+    pub indexes: BTreeMap<String, IndexDefinition>,
+    pub queries: BTreeMap<String, NamedQuery>,
+}
+impl Default for Database {
+    fn default() -> Self {
+        Self {
+            name: None,
+            version: 1,
+            tables: BTreeMap::new(),
+            indexes: BTreeMap::new(),
+            queries: BTreeMap::new(),
+        }
+    }
+}
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionReport { pub affected: usize, pub rows: Vec<Row> }
 
