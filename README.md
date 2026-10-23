@@ -19,10 +19,14 @@ The Rust runtime now implements:
 
 - lexer/parser validation and source limits
 - typed values and schemas
-- required, unique, key, auto, and default constraints
+- required, unique, key, auto, default, and foreign-key constraints
+- referenced-row delete protection and primary-key update protection
 - create/insert/read/update/delete behavior
-- atomic rollback
+- whole-program and explicit atomic rollback
 - bound parameters
+- catalog indexes and named queries
+- schema-level query/type validation even on empty tables
+- bounded relational planning with hash-join and nested-loop paths
 - inner and left joins
 - grouping and HAVING
 - `count`, `sum`, `min`, and `max`
@@ -66,7 +70,44 @@ make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
 
 That builds Zig storage, uses the Rust `build_native` helper to compile `Database/noesql_native_bridge.noqeri` into `libnoesql_noqeri.a`, links it into Rust, and executes native CRUD through Rust -> Noqeri -> Zig.
 
-This proves a native integration route without claiming that Noqeri's self-hosted Stage-2 compiler is native. Stage-2 native self-hosting remains a separate Noqeri compiler milestone.
+This proves a native machine-code integration route without claiming that Noqeri's self-hosted Stage-2 compiler is native.
+
+### Verified Stage-2 NQRI chain
+
+PR #12 also consumes Noqeri's actual self-hosted Stage-2 compiler path. It does not rename Stage-0 as Stage-2.
+
+The qualification chain is:
+
+```text
+trusted Stage-1 NQRI
+        |
+        v
+Stage-2 compiler NQRI
+        |
+        | rebuild same source closure
+        v
+Stage-3 compiler NQRI
+        |
+        | byte-for-byte equality gate
+        v
+Stage-2 compiles NoeSQL executor bridge
+        |
+        v
+Rust host executes NQRI semantics
+        |
+        v
+Zig pager / WAL commit
+```
+
+Run it locally after building Noqeri's native NQRI VM:
+
+```sh
+make stage2-chain \
+  NOQERI_REPO=/absolute/path/to/Noqeri \
+  NOQERI_NQRI_VM=/absolute/path/to/noqeri-nqri
+```
+
+This gives NoeSQL a real Rust -> Stage-2 NQRI -> Zig execution path. It still does **not** claim native machine-code self-hosting for the Noqeri compiler, because Noqeri's own bootstrap contract explicitly says Stage-2 currently executes as NQRI.
 
 ## Canonical formats
 
@@ -113,10 +154,18 @@ Build the Rust + Zig runtime:
 zig build native
 ```
 
-Build the complete Rust -> Noqeri -> Zig integration:
+Build the direct AOT Rust -> Noqeri -> Zig integration:
 
 ```sh
 make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
+```
+
+Build the verified self-hosted Stage-2 NQRI -> Rust -> Zig integration:
+
+```sh
+make stage2-chain \
+  NOQERI_REPO=/absolute/path/to/Noqeri \
+  NOQERI_NQRI_VM=/absolute/path/to/noqeri-nqri
 ```
 
 ## CLI
@@ -175,7 +224,7 @@ The JavaScript migration is no longer the blocker. Remaining gates are native qu
 2. expand the current bounded native Noqeri row/page bridge to full general-schema relational execution;
 3. complete concurrency, crash-boundary, migration, fuzz, and differential qualification;
 4. qualify additional platforms before cross-platform claims;
-5. move from Stage-0 AOT compiler provenance to native self-hosted Stage-2 provenance only after Noqeri itself supports it.
+5. keep the verified Stage-2 NQRI path distinct from the Stage-0 AOT machine-code path, and claim native self-hosted Stage-2 provenance only after Noqeri itself supports native self-hosting.
 
 See `Doc/NOESQL_NATIVE_MIGRATION_PARITY.md` for the exact matrix.
 
