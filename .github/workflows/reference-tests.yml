@@ -61,7 +61,7 @@ jobs:
 
       - name: Reproduce Noqeri Stage-2 and Stage-3 NQRI compiler
         run: |
-          test "$(sha256sum .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri | cut -d' ' -f1)" = "$(tr -d '[:space:]' < .ci-noqeri/Compiler/selfhost/trusted-stage1.sha256)"
+          test "$(sha256sum .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri | awk '{print $1}')" = "$(awk '{print $1}' .ci-noqeri/Compiler/selfhost/trusted-stage1.sha256)"
           .ci-noqeri-build/noqeri-nqri compile-manifest             .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage2.nqri 3
           .ci-noqeri-build/noqeri-nqri compile-manifest             /tmp/noqeri-stage2.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage3.nqri 3
           .ci-noqeri-build/noqeri-nqri diff /tmp/noqeri-stage2.nqri /tmp/noqeri-stage3.nqri
