@@ -75,3 +75,74 @@ pub fn load_or_default(path: &Path) -> Result<Database, Error> {
         Err(error) => Err(error),
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reference::Params;
+    use crate::value::Value;
+
+    fn temp_path(label: &str) -> std::path::PathBuf {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "noesql-rust-zig-{}-{}-{}.noedb",
+            label,
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        cleanup(&path);
+        path
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = std::fs::remove_file(path);
+        let _ = std::fs::remove_file(format!("{}.wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}.lck", path.display()));
+    }
+
+    #[test]
+    fn rust_database_survives_zig_wal_cold_reopen() {
+        let path = temp_path("roundtrip");
+        let mut database = Database::default();
+        database.execute(
+            r#"db durable
+table users {
+ id:int key auto
+ name:text required unique
+ active:bool required = true
+}
+users add {name:"Amina"}
+users add {name:"Brian",active:false}"#,
+            &Params::new(),
+        ).unwrap();
+
+        save(&path, &database).unwrap();
+        drop(database);
+
+        let mut loaded = load(&path).unwrap();
+        let rows = loaded.execute("users get id,name,active sort id", &Params::new()).unwrap().rows;
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].get("name"), Some(&Value::Text("Amina".into())));
+        assert_eq!(rows[1].get("active"), Some(&Value::Bool(false)));
+
+        loaded.execute("users where name == \"Brian\" set active = true", &Params::new()).unwrap();
+        save(&path, &loaded).unwrap();
+        checkpoint(&path).unwrap();
+
+        let mut reopened = load(&path).unwrap();
+        let rows = reopened.execute("users get name,active sort name", &Params::new()).unwrap().rows;
+        assert_eq!(rows[1].get("active"), Some(&Value::Bool(true)));
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn empty_zig_store_loads_as_new_database_only_via_load_or_default() {
+        let path = temp_path("empty");
+        assert!(load(&path).is_err());
+        let database = load_or_default(&path).unwrap();
+        assert!(database.tables.is_empty());
+        cleanup(&path);
+    }
+}
