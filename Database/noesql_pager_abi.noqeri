@@ -11,6 +11,8 @@ extern function noesql_zig_page_rollback(handle: usize): int
 extern function noesql_zig_page_get(handle: usize, pageId: u32, target: *u8, capacity: usize): int
 extern function noesql_zig_page_generation(handle: usize): u64
 extern function noesql_zig_page_checkpoint(handle: usize): int
+extern function noesql_zig_snapshot_write(handle: usize, input: *u8, size: usize): int
+extern function noesql_zig_snapshot_read(handle: usize, output: *u8, capacity: usize, written: *usize): int
 extern function noesql_zig_index_find(handle: usize, indexPage: u32, key: i64, outPage: *u32): int
 extern function noesql_zig_index_insert(handle: usize, indexPage: u32, key: i64, dataPage: u32): int
 extern function noesql_zig_index_delete(handle: usize, indexPage: u32, key: i64): int
