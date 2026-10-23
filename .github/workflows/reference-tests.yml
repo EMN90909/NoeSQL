@@ -82,11 +82,21 @@ jobs:
           cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features stage2-nqri
           cargo run --manifest-path Native/rust/Cargo.toml --features stage2-nqri --bin stage2_chain_smoke
 
-      - name: Compile NoeSQL Noqeri bridge with Rust builder
+      - name: Compile scalar Noqeri AOT kernel and C++ Zig shim
         run: |
           rm -rf Native/rust/native-lib
-          cargo run --manifest-path Native/rust/Cargo.toml --bin build_native --             "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri"             "$GITHUB_WORKSPACE/Database/noesql_native_bridge.noqeri"             "$GITHUB_WORKSPACE/Native/rust/native-lib"
+          cargo run --manifest-path Native/rust/Cargo.toml --bin build_native -- \
+            "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri" \
+            "$GITHUB_WORKSPACE/Database/noesql_stage2_bridge.noqeri" \
+            "$GITHUB_WORKSPACE/Native/rust/native-lib"
+          c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
+            -I"$GITHUB_WORKSPACE/Native/cpp" -I"$GITHUB_WORKSPACE/Native/zig" \
+            -c Native/cpp/noesql_noqeri_zig_bridge.cpp \
+            -o Native/rust/native-lib/noesql_noqeri_cpp.o
+          ar rcs Native/rust/native-lib/libnoesql_noqeri_cpp.a \
+            Native/rust/native-lib/noesql_noqeri_cpp.o
           test -s Native/rust/native-lib/libnoesql_noqeri.a
+          test -s Native/rust/native-lib/libnoesql_noqeri_cpp.a
 
       - name: Compile and execute native Noqeri executor fixture
         run: |
@@ -109,6 +119,7 @@ jobs:
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_engine_abi.h
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_session_abi.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_noqeri_zig_bridge.h
 
       - name: Verify JavaScript did not return
         run: |
