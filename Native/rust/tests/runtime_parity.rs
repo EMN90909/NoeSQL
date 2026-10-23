@@ -36,10 +36,10 @@ fn required_unique_key_auto_and_unknown_fields_are_enforced() {
     assert_eq!(db.execute("users add {email:\"b@example.com\"}", &params()).unwrap().affected, 1);
 
     let duplicate = db.execute("users add {email:\"a@example.com\"}", &params()).unwrap_err();
-    assert_eq!(duplicate.code, "NOE212");
+    assert_eq!(duplicate.code, "NOE203");
 
     let unknown = db.execute("users add {email:\"c@example.com\",ghost:1}", &params()).unwrap_err();
-    assert_eq!(unknown.code, "NOE213");
+    assert_eq!(unknown.code, "NOE117");
 
     let rows = db.execute("users get id,email sort id", &params()).unwrap().rows;
     assert_eq!(rows[0].get("id"), Some(&Value::Int(1)));
