@@ -578,31 +578,90 @@ impl Database {
             }
         }
     }
-    fn validate(name: &str, table: &Table, row: &Row, skip: Option<usize>) -> Result<(), ReferenceError> {
+    fn validate(&self, name: &str, row: &Row, skip: Option<usize>) -> Result<(), ReferenceError> {
+        let table = self.tables.get(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
         for field in &table.fields {
             let value = row.get(&field.name).unwrap_or(&Value::Null);
-            if field.required && *value == Value::Null { return db_error("NOE210", format!("{name}.{} is required", field.name)); }
-            if !field.kind.accepts(value) { return db_error("NOE211", format!("{name}.{} expects {:?}, got {}", field.name, field.kind, value.type_name())); }
+            if (field.required || field.key) && *value == Value::Null {
+                return db_error("NOE201", format!("{} is required", field.name));
+            }
+            if !field.kind.accepts(value) {
+                return db_error("NOE202", format!("invalid {}: expected {:?}", field.name, field.kind));
+            }
             if (field.unique || field.key) && *value != Value::Null {
-                for (index, existing) in table.rows.iter().enumerate() { if skip != Some(index) && existing.get(&field.name) == Some(value) { return db_error("NOE212", format!("unique constraint failed on {name}.{}", field.name)); } }
+                for (index, existing) in table.rows.iter().enumerate() {
+                    if skip != Some(index) && existing.get(&field.name) == Some(value) {
+                        return db_error("NOE203", format!("duplicate unique value for {}", field.name));
+                    }
+                }
+            }
+            if let Some(reference) = &field.reference {
+                if *value != Value::Null {
+                    let target = self.tables.get(reference).ok_or_else(|| db_failure("NOE204", format!("unknown reference {reference}")))?;
+                    let key = target.fields.iter().find(|candidate| candidate.key)
+                        .ok_or_else(|| db_failure("NOE205", format!("reference target {reference} has no key")))?;
+                    if !target.rows.iter().any(|candidate| candidate.get(&key.name) == Some(value)) {
+                        return db_error("NOE205", format!("foreign key {} refers to missing {reference} row", field.name));
+                    }
+                }
             }
         }
-        for key in row.keys() { if !table.fields.iter().any(|field| &field.name == key) { return db_error("NOE213", format!("unknown field {name}.{key}")); } }
+        for key in row.keys() {
+            if !table.fields.iter().any(|field| &field.name == key) {
+                return db_error("NOE117", format!("unknown field {name}.{key}"));
+            }
+        }
         Ok(())
     }
+
     fn insert(&mut self, name: &str, values: &[(String, Expr)], params: &Params) -> Result<ExecutionReport, ReferenceError> {
-        let table = self.tables.get_mut(name).ok_or_else(|| db_failure("NOE202", format!("unknown table {name}")))?;
-        let mut row = Row::new(); for (field, expr) in values { row.insert(field.clone(), eval(expr, &Row::new(), params)?); }
-        for field in &table.fields {
+        let table = self.tables.get(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
+        let fields = table.fields.clone();
+        let next_auto = table.next_auto;
+
+        let mut seen = BTreeSet::new();
+        let mut row = Row::new();
+        for (field, expr) in values {
+            if !seen.insert(field.clone()) { return db_error("NOE116", format!("duplicate assignment {field}")); }
+            if !fields.iter().any(|candidate| &candidate.name == field) {
+                return db_error("NOE117", format!("unknown field {field}"));
+            }
+            row.insert(field.clone(), eval(expr, &Row::new(), params)?);
+        }
+
+        let mut consumed_auto = false;
+        for field in &fields {
             if !row.contains_key(&field.name) {
-                let value = if field.auto { let value = Value::Int(table.next_auto); table.next_auto = table.next_auto.checked_add(1).ok_or_else(|| db_failure("NOE214", "auto integer exhausted"))?; value }
-                    else if let Some(default) = &field.default { eval(default, &row, params)? } else { Value::Null };
+                let value = if field.auto {
+                    consumed_auto = true;
+                    Value::Int(next_auto)
+                } else if let Some(default) = &field.default {
+                    eval(default, &row, params)?
+                } else {
+                    Value::Null
+                };
                 row.insert(field.name.clone(), value);
             }
         }
-        Self::validate(name, table, &row, None)?; table.rows.push(row);
+
+        self.validate(name, &row, None)?;
+
+        let key_value = fields.iter().find(|field| field.key)
+            .and_then(|field| row.get(&field.name))
+            .and_then(Value::as_i64);
+        let table = self.tables.get_mut(name).expect("table validated above");
+        table.rows.push(row);
+        if consumed_auto {
+            table.next_auto = next_auto.checked_add(1).ok_or_else(|| db_failure("NOE214", "auto integer exhausted"))?;
+        }
+        if let Some(key) = key_value {
+            if key >= table.next_auto {
+                table.next_auto = key.checked_add(1).ok_or_else(|| db_failure("NOE214", "auto integer exhausted"))?;
+            }
+        }
         Ok(ExecutionReport { affected: 1, rows: Vec::new() })
     }
+
     fn source_rows(&self, select: &Select, params: &Params) -> Result<Vec<Row>, ReferenceError> {
         let left = self.tables.get(&select.table).ok_or_else(|| db_failure("NOE202", format!("unknown table {}", select.table)))?;
         let mut rows = Vec::new();
