@@ -217,6 +217,97 @@ users add {name:"Amina"}"#,
     assert!(codec::decode(&trailing).is_err());
 
     let mut bad_version = encoded;
-    bad_version[8..12].copy_from_slice(&2u32.to_le_bytes());
+    bad_version[8..12].copy_from_slice(&99u32.to_le_bytes());
     assert!(codec::decode(&bad_version).is_err());
+}
+
+
+#[test]
+fn foreign_keys_require_existing_target_and_block_referenced_delete() {
+    let mut db = Database::default();
+    db.execute(
+        r#"table teams {
+ id:int key auto
+ name:text required
+}
+table tickets {
+ id:int key auto
+ team_id:ref teams required
+ title:text required
+}
+teams add {name:"Build"}"#,
+        &params(),
+    ).unwrap();
+
+    let missing = db.execute("tickets add {team_id:99,title:\"Ghost\"}", &params()).unwrap_err();
+    assert_eq!(missing.code, "NOE205");
+
+    db.execute("tickets add {team_id:1,title:\"Compiler\"}", &params()).unwrap();
+    let blocked = db.execute("teams where id == 1 delete", &params()).unwrap_err();
+    assert_eq!(blocked.code, "NOE208");
+
+    db.execute("tickets where id == 1 delete", &params()).unwrap();
+    assert_eq!(db.execute("teams where id == 1 delete", &params()).unwrap().affected, 1);
+}
+
+#[test]
+fn indexes_and_named_queries_replace_reference_catalog_behavior() {
+    let mut db = Database::default();
+    db.execute(
+        r#"table users {
+ id:int key auto
+ name:text required
+ age:int required
+}
+index users_name on users(name)
+query adults(min_age:int = 18) {
+ users get id,name,age where age >= $min_age sort id
+}
+users add {name:"Young",age:16}
+users add {name:"Adult",age:21}"#,
+        &params(),
+    ).unwrap();
+
+    assert_eq!(db.indexes["users_name"].table, "users");
+    assert_eq!(db.indexes["users_name"].columns, vec!["name".to_string()]);
+
+    let default_rows = db.run_named("adults", &Params::new()).unwrap().rows;
+    assert_eq!(default_rows.len(), 1);
+    assert_eq!(default_rows[0].get("name"), Some(&Value::Text("Adult".into())));
+
+    let mut bound = Params::new();
+    bound.insert("min_age".into(), Value::Int(15));
+    assert_eq!(db.run_named("adults", &bound).unwrap().rows.len(), 2);
+
+    bound.insert("unexpected".into(), Value::Int(1));
+    assert_eq!(db.run_named("adults", &bound).unwrap_err().code, "NOE133");
+}
+
+#[test]
+fn schema_catalog_survives_rust_codec_round_trip() {
+    let mut db = Database::default();
+    db.execute(
+        r#"db catalog
+table users {
+ id:int key auto
+ name:text required
+}
+index users_name on users(name)
+query by_name(name:text) {
+ users get id,name where name == $name
+}
+users add {name:"Amina"}"#,
+        &params(),
+    ).unwrap();
+
+    let encoded = codec::encode(&db).unwrap();
+    let decoded = codec::decode(&encoded).unwrap();
+    assert_eq!(decoded.name.as_deref(), Some("catalog"));
+    assert_eq!(decoded.version, 1);
+    assert!(decoded.indexes.contains_key("users_name"));
+    assert!(decoded.queries.contains_key("by_name"));
+
+    let mut bound = Params::new();
+    bound.insert("name".into(), Value::Text("Amina".into()));
+    assert_eq!(decoded.run_named("by_name", &bound).unwrap().rows.len(), 1);
 }
