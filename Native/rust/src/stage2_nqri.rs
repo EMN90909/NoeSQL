@@ -132,11 +132,11 @@ fn execute(
     let current = read_row(&pager, page_id)?;
     let result = runtime.invoke([
         operation,
-        i64::from(current.is_some()),
+        if current.is_some() { 1 } else { 0 },
         current.map(|row| row.id).unwrap_or(0),
-        i64::from(current.map(|row| row.enabled).unwrap_or(false)),
+        if current.map(|row| row.enabled).unwrap_or(false) { 1 } else { 0 },
         row_id,
-        i64::from(enabled),
+        if enabled { 1 } else { 0 },
     ])?;
 
     match operation {
