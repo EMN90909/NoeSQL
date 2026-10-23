@@ -164,6 +164,88 @@ pub export fn noesql_zig_page_checkpoint(handle: ?*anyopaque) i32 {
     return STATUS_OK;
 }
 
+fn putLittle32(bytes: []u8, value: u32) void {
+    bytes[0] = @intCast(value & 0xff);
+    bytes[1] = @intCast((value >> 8) & 0xff);
+    bytes[2] = @intCast((value >> 16) & 0xff);
+    bytes[3] = @intCast((value >> 24) & 0xff);
+}
+
+// Atomic application-state snapshot used by the Rust host. The payload format
+// is Rust-owned; Zig owns pages, WAL, checksum manifest and commit ordering.
+pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8, size: usize) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    const source_ptr = input orelse return STATUS_INVALID;
+    if (size == 0) return STATUS_INVALID;
+    const count = (size + storage.PAGE_BYTES - 1) / storage.PAGE_BYTES;
+    if (count == 0 or count >= storage.MAX_TX_PAGES) return STATUS_INVALID;
+
+    var manifest = [_]u8{0} ** storage.PAGE_BYTES;
+    @memcpy(manifest[0..8], "NQRS0001");
+    putLittle32(manifest[8..12], 1);
+    putLittle32(manifest[12..16], @intCast(count));
+    putLittle32(manifest[16..20], @intCast(size));
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(source_ptr[0..size]);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    @memcpy(manifest[20..52], &digest);
+
+    pager.stage(0, &manifest) catch {
+        pager.rollback();
+        return STATUS_FAILURE;
+    };
+
+    var offset: usize = 0;
+    var page_index: usize = 0;
+    while (page_index < count) : (page_index += 1) {
+        var page = [_]u8{0} ** storage.PAGE_BYTES;
+        const remaining = size - offset;
+        const used = @min(remaining, storage.PAGE_BYTES);
+        @memcpy(page[0..used], source_ptr[offset .. offset + used]);
+        pager.stage(@intCast(page_index + 1), &page) catch {
+            pager.rollback();
+            return STATUS_FAILURE;
+        };
+        offset += used;
+    }
+
+    pager.commit() catch {
+        pager.rollback();
+        return STATUS_FAILURE;
+    };
+    return STATUS_OK;
+}
+
+pub export fn noesql_zig_snapshot_read(handle: ?*anyopaque, output: ?[*]u8, capacity: usize, written: ?*usize) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    const out_len = written orelse return STATUS_INVALID;
+    out_len.* = 0;
+
+    const valid = noesql_zig_page_validate_reference_state(handle);
+    if (valid != STATUS_OK) return valid;
+
+    const manifest = pager.read(0) orelse return STATUS_NOT_FOUND;
+    const count: usize = @intCast(little32(manifest[12..16]));
+    const length: usize = @intCast(little32(manifest[16..20]));
+    out_len.* = length;
+    if (capacity < length) return STATUS_BUFFER_TOO_SMALL;
+    const dest = output orelse return STATUS_INVALID;
+
+    var remaining = length;
+    var offset: usize = 0;
+    var page_index: usize = 0;
+    while (page_index < count) : (page_index += 1) {
+        const page = pager.read(@intCast(page_index + 1)) orelse return STATUS_NOT_FOUND;
+        const used = @min(remaining, storage.PAGE_BYTES);
+        @memcpy(dest[offset .. offset + used], page[0..used]);
+        offset += used;
+        remaining -= used;
+    }
+    return STATUS_OK;
+}
+
 test "native ABI rejects untrusted arguments without dereferencing page buffers" {
     var handle: ?*anyopaque = undefined;
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_open(3, null, &handle));
