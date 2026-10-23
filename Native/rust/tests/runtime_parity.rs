@@ -311,3 +311,28 @@ users add {name:"Amina"}"#,
     bound.insert("name".into(), Value::Text("Amina".into()));
     assert_eq!(decoded.run_named("by_name", &bound).unwrap().rows.len(), 1);
 }
+
+
+#[test]
+fn whole_multi_statement_program_rolls_back_on_late_failure() {
+    let mut db = Database::default();
+    db.execute(
+        r#"table users {
+ id:int key auto
+ name:text required unique
+}
+users add {name:"Seed"}"#,
+        &params(),
+    ).unwrap();
+
+    let result = db.execute(
+        r#"users add {name:"First"}
+users add {name:"Seed"}"#,
+        &params(),
+    );
+    assert!(result.is_err());
+
+    let rows = db.execute("users get id,name sort id", &params()).unwrap().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get("name"), Some(&Value::Text("Seed".into())));
+}
