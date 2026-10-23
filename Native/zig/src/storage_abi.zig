@@ -164,6 +164,88 @@ pub export fn noesql_zig_page_checkpoint(handle: ?*anyopaque) i32 {
     return STATUS_OK;
 }
 
+fn putLittle32(bytes: []u8, value: u32) void {
+    bytes[0] = @intCast(value & 0xff);
+    bytes[1] = @intCast((value >> 8) & 0xff);
+    bytes[2] = @intCast((value >> 16) & 0xff);
+    bytes[3] = @intCast((value >> 24) & 0xff);
+}
+
+// Atomic application-state snapshot used by the Rust host. The payload format
+// is Rust-owned; Zig owns pages, WAL, checksum manifest and commit ordering.
+pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8, size: usize) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    const source_ptr = input orelse return STATUS_INVALID;
+    if (size == 0) return STATUS_INVALID;
+    const count = (size + storage.PAGE_BYTES - 1) / storage.PAGE_BYTES;
+    if (count == 0 or count >= storage.MAX_TX_PAGES) return STATUS_INVALID;
+
+    var manifest = [_]u8{0} ** storage.PAGE_BYTES;
+    @memcpy(manifest[0..8], "NQRS0001");
+    putLittle32(manifest[8..12], 1);
+    putLittle32(manifest[12..16], @intCast(count));
+    putLittle32(manifest[16..20], @intCast(size));
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update(source_ptr[0..size]);
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    @memcpy(manifest[20..52], &digest);
+
+    pager.stage(0, &manifest) catch {
+        pager.rollback();
+        return STATUS_FAILURE;
+    };
+
+    var offset: usize = 0;
+    var page_index: usize = 0;
+    while (page_index < count) : (page_index += 1) {
+        var page = [_]u8{0} ** storage.PAGE_BYTES;
+        const remaining = size - offset;
+        const used = @min(remaining, storage.PAGE_BYTES);
+        @memcpy(page[0..used], source_ptr[offset .. offset + used]);
+        pager.stage(@intCast(page_index + 1), &page) catch {
+            pager.rollback();
+            return STATUS_FAILURE;
+        };
+        offset += used;
+    }
+
+    pager.commit() catch {
+        pager.rollback();
+        return STATUS_FAILURE;
+    };
+    return STATUS_OK;
+}
+
+pub export fn noesql_zig_snapshot_read(handle: ?*anyopaque, output: ?[*]u8, capacity: usize, written: ?*usize) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    const out_len = written orelse return STATUS_INVALID;
+    out_len.* = 0;
+
+    const valid = noesql_zig_page_validate_reference_state(handle);
+    if (valid != STATUS_OK) return valid;
+
+    const manifest = pager.read(0) orelse return STATUS_NOT_FOUND;
+    const count: usize = @intCast(little32(manifest[12..16]));
+    const length: usize = @intCast(little32(manifest[16..20]));
+    out_len.* = length;
+    if (capacity < length) return STATUS_BUFFER_TOO_SMALL;
+    const dest = output orelse return STATUS_INVALID;
+
+    var remaining = length;
+    var offset: usize = 0;
+    var page_index: usize = 0;
+    while (page_index < count) : (page_index += 1) {
+        const page = pager.read(@intCast(page_index + 1)) orelse return STATUS_NOT_FOUND;
+        const used = @min(remaining, storage.PAGE_BYTES);
+        @memcpy(dest[offset .. offset + used], page[0..used]);
+        offset += used;
+        remaining -= used;
+    }
+    return STATUS_OK;
+}
+
 test "native ABI rejects untrusted arguments without dereferencing page buffers" {
     var handle: ?*anyopaque = undefined;
     try std.testing.expectEqual(STATUS_INVALID, noesql_zig_page_open(3, null, &handle));
@@ -229,4 +311,47 @@ test "index ABI stages read-your-writes, rollback, WAL commit, cold reopen and r
     try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
     try std.testing.expectEqual(STATUS_NOT_FOUND, noesql_zig_index_find(handle, 7, -4, &row));
     try std.testing.expectEqual(STATUS_OK, noesql_zig_index_find(handle, 7, 12, &row));
+}
+
+
+test "snapshot ABI atomically persists and reloads Rust-owned payload bytes" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-snapshot-abi-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var path_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&wal_buf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lock_buf, "{s}.lck", .{path});
+    const c_api = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = c_api.unlink(data.ptr);
+        _ = c_api.unlink(journal.ptr);
+        _ = c_api.unlink(mutex.ptr);
+    }
+
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    const payload = "NQRP0001-rust-owned-snapshot-payload";
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, payload.ptr, payload.len));
+
+    var required: usize = 0;
+    try std.testing.expectEqual(STATUS_BUFFER_TOO_SMALL, noesql_zig_snapshot_read(handle, null, 0, &required));
+    try std.testing.expectEqual(payload.len, required);
+
+    var output: [128]u8 = undefined;
+    var written: usize = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &output, output.len, &written));
+    try std.testing.expectEqual(payload.len, written);
+    try std.testing.expect(std.mem.eql(u8, payload, output[0..written]));
+
+    noesql_zig_page_close(handle);
+    handle = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+    written = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &output, output.len, &written));
+    try std.testing.expect(std.mem.eql(u8, payload, output[0..written]));
 }

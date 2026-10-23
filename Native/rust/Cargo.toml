@@ -1,0 +1,28 @@
+[package]
+name = "noesql-runtime"
+version = "0.8.0"
+edition = "2021"
+license = "GPL-3.0-only"
+description = "Native Rust host/runtime for NoeSQL Noqeri + C++ + Zig engine components"
+
+[features]
+default = []
+zig-pager = []
+noqeri-native = ["zig-pager"]
+stage2-nqri = ["zig-pager"]
+
+[lib]
+name = "noesql_runtime"
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "noesql"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"

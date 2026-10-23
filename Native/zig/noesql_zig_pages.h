@@ -28,6 +28,8 @@ int32_t noesql_zig_page_get(void* handle,uint32_t id,uint8_t* output,size_t capa
 uint64_t noesql_zig_page_generation(void* handle);
 int32_t noesql_zig_page_validate_reference_state(void* handle);
 int32_t noesql_zig_page_checkpoint(void* handle);
+int32_t noesql_zig_snapshot_write(void* handle,const uint8_t* input,size_t size);
+int32_t noesql_zig_snapshot_read(void* handle,uint8_t* output,size_t capacity,size_t* written);
 /* Trusted Noqeri transaction handle only. Reserve each index page, never use
  * page zero or reuse a catalog/data page. Operations are staged and require
  * noesql_zig_page_commit(); they are discarded by rollback/close.

@@ -48,14 +48,27 @@ let projection: [usize; 1] = [0 as usize]
 let output: [NoeValue; 4]
 let bytes: [u8; 1] = [0 as u8]
 let result: NoeExecutionResult
-let status: isize = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),0 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+let request: NoeExecutionRequest
+request.plan = &plan
+request.columns = slice(cols)
+request.original = slice(memory)
+request.scratch = slice(scratch)
+request.rowCount = 0 as usize
+request.insertRow = slice(incoming)
+request.projections = slice(projection)
+request.output = slice(output)
+request.bytes = slice(bytes)
+request.version = 1 as u32
+request.result = &result
+let status: isize = noeExecute(&request)
 require(status == 0 as isize)
 require(result.rowCount == 1 as usize)
+request.rowCount = 1 as usize
 plan.operation = noePlanGet()
 plan.predicateOperator = noePredicateEqual()
 plan.predicateColumn = 0 as usize
 plan.predicateValue = first
-status = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),1 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+status = noeExecute(&request)
 require(status == 0 as isize)
 require(result.returned == 1 as usize)
 require(output[0].number == 7 as i64)
@@ -68,11 +81,11 @@ falseValue.number = 0 as i64
 falseValue.textStart = 0 as usize
 falseValue.textLength = 0 as usize
 plan.mutationValue = falseValue
-status = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),1 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+status = noeExecute(&request)
 require(status == 0 as isize)
 require(memory[1].number == 0 as i64)
 plan.operation = noePlanDelete()
-status = noeExecute(&plan,slice(cols),slice(memory),slice(scratch),1 as usize,slice(incoming),slice(projection),slice(output),slice(bytes),1 as u32,&result)
+status = noeExecute(&request)
 require(status == 0 as isize)
 require(result.rowCount == 0 as usize)
 print("NoeSQL native IR/executor smoke: OK")

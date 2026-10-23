@@ -1,16 +1,26 @@
 name: NoeSQL .noedb session integration
 on:
   push:
-    branches: [integration/ecosystem-v1]
+    branches: [refactor/no-js-rust-zig-runtime, main]
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   session:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: {node-version: '22'}
-      - name: Execute same local verification used by developers
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install C++ dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libssl-dev libsqlite3-dev
+      - name: Execute local native verification
         run: bash scripts/verify-ecosystem-local.sh

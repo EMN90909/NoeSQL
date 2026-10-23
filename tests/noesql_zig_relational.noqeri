@@ -1,7 +1,7 @@
 import "../Database/noesql_zig_relational.noqeri"
 
-// Compiled native smoke fixture. Caller supplies a fresh private .nqdb path.
-// This is source only until a trusted Noqeri native toolchain links it.
+// Compiled native smoke fixture. Caller supplies a fresh private .noedb path.
+// CI compiles this through Noqeri Stage-0 AOT and links it to the Zig pager.
 export function noeZigRelationalSmoke(path: string): isize {
     let ctx: NoeQueryContext
     ctx.abiVersion = noeApiVersion()
@@ -52,17 +52,27 @@ export function noeZigRelationalSmoke(path: string): isize {
     let projections: [usize; 2] = [0 as usize,1 as usize]
     let result: NoeExecutionResult
     let output: [NoeValue; 4]
-    let status: isize = noeZigSingleRowExecute(path,3 as u32,&ctx,&plan,slice(cols),slice(values),slice(projections),slice(output),&result)
+    let request: NoeZigExecutionRequest
+    request.path = path
+    request.pageId = 3 as u32
+    request.ctx = &ctx
+    request.plan = &plan
+    request.columns = slice(cols)
+    request.insertRow = slice(values)
+    request.projections = slice(projections)
+    request.output = slice(output)
+    request.result = &result
+    let status: isize = noeZigSingleRowExecute(&request)
     if status != 0 as isize || result.affected != 1 as usize { return -301 as isize }
 
     plan.operation = noePlanGet()
     plan.predicateOperator = noePredicateEqual()
-    status = noeZigSingleRowExecute(path,3 as u32,&ctx,&plan,slice(cols),slice(values),slice(projections),slice(output),&result)
+    status = noeZigSingleRowExecute(&request)
     if status != 0 as isize || result.returned != 1 as usize { return -302 as isize }
     if output[0].number != 44 as i64 || output[1].number != 1 as i64 { return -303 as isize }
 
     ctx.principal.authenticated = false
-    status = noeZigSingleRowExecute(path,3 as u32,&ctx,&plan,slice(cols),slice(values),slice(projections),slice(output),&result)
+    status = noeZigSingleRowExecute(&request)
     if status != -83 as isize { return -304 as isize }
     return 0 as isize
 }

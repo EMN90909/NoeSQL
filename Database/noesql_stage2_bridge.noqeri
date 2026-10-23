@@ -1,0 +1,46 @@
+module noqeri.database.noesql.stage2_bridge
+
+// Storage-agnostic Stage-2/NQRI executor probe.
+// Rust owns the host/storage boundary because today's NQRI VM deliberately
+// rejects unresolved native extern calls. The packed return value is consumed
+// by Rust and then committed through the Zig pager/WAL.
+//
+// operation: 1=get, 2=insert, 3=set, 4=delete
+// return:
+//   100 + enabled(0/1) => get found
+//   110                => get not found
+//   200 + enabled      => insert success
+//   210                => insert conflict
+//   300 + enabled      => set success
+//   310                => set not found
+//   400                => delete success
+//   410                => delete not found
+export function noesqlStage2BoolRow(
+    operation: int,
+    present: int,
+    currentId: int,
+    currentEnabled: int,
+    requestedId: int,
+    requestedEnabled: int
+): int {
+    if operation == 1 {
+        if present == 0 || currentId != requestedId { return 110 }
+        if currentEnabled != 0 { return 101 }
+        return 100
+    }
+    if operation == 2 {
+        if present != 0 { return 210 }
+        if requestedEnabled != 0 { return 201 }
+        return 200
+    }
+    if operation == 3 {
+        if present == 0 || currentId != requestedId { return 310 }
+        if requestedEnabled != 0 { return 301 }
+        return 300
+    }
+    if operation == 4 {
+        if present == 0 || currentId != requestedId { return 410 }
+        return 400
+    }
+    return -1
+}

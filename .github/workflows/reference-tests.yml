@@ -1,8 +1,8 @@
-name: NoeSQL reference tests
+name: NoeSQL native validation
 
 on:
   push:
-    branches: [main]
+    branches: [main, refactor/no-js-rust-zig-runtime]
   pull_request:
     branches: [main]
 
@@ -10,64 +10,106 @@ permissions:
   contents: read
 
 jobs:
-  node-tests:
-    name: Node.js ${{ matrix.node }}
+  native:
+    name: Noqeri + C++ + Rust + Zig
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    strategy:
-      fail-fast: false
-      matrix:
-        node: ['22', '24']
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node }}
-      - name: Run reference and security regression tests
-        shell: bash
-        run: |
-          set -o pipefail
-          npm test 2>&1 | tee node-tests.log
-      - name: Upload test diagnostics on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: node-test-log-${{ matrix.node }}
-          path: node-tests.log
-          if-no-files-found: ignore
 
-  native-cpp:
-    name: Native C++ compatibility and recovery
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install native headers
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev libsqlite3-dev
-      - name: Compile and run native fault, ABI and durability tests
-        run: make -C Native/cpp test
-      - name: Validate corrected SQLite benchmark harness
-        run: make -C Native/cpp benchmark-compare
-
-  zig:
-    name: Zig 0.15.2 bridge and legacy verification
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-      - name: Build and test native Zig verification components
-        run: npm run test:zig
-      - name: ReleaseSafe build
-        run: npm run build:zig
-      - name: Verify Zig C ABI declarations compile
-        run: cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
-      - name: Node to native Zig pager round trip
-        run: |
-          cc -std=c11 -Wall -Wextra -Werror -I Native/zig Native/link-tests/zig_page_roundtrip.c Native/zig/zig-out/lib/libnoesql_zig_pages.a -pthread -lm -ldl -o /tmp/noesql-zig-roundtrip
-          node scripts/verify-zig-page-roundtrip.mjs /tmp/noesql-zig-roundtrip
-      - name: Verify Noqeri proof checker rejects missing provenance
-        run: node --test tests/noqeri-bootstrap.test.mjs
 
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev libsqlite3-dev
+
+      - name: Reject JavaScript regression in NoeSQL
+        run: make no-js
+
+      - name: Run Rust replacement-runtime tests
+        run: cargo test --manifest-path Native/rust/Cargo.toml --all-targets
+
+      - name: Run Zig pager WAL and index tests
+        run: zig build --build-file Native/zig/build.zig test
+
+      - name: Build release-safe Zig pager
+        run: zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+
+      - name: Run C++ compatibility and durability tests
+        run: make -C Native/cpp test
+
+      - name: Checkout Noqeri compiler
+        uses: actions/checkout@v4
+        with:
+          repository: EMN90909/Noqeri
+          ref: main
+          path: .ci-noqeri
+
+      - name: Build Noqeri Stage-0 AOT compiler
+        run: |
+          cmake -S .ci-noqeri -B .ci-noqeri-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build .ci-noqeri-build --target noqeri noqeri-nqri -j2
+          .ci-noqeri-build/noqeri version
+          .ci-noqeri-build/noqeri-nqri --selftest
+
+      - name: Reproduce Noqeri Stage-2 and Stage-3 NQRI compiler
+        run: |
+          test "$(sha256sum .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri | awk '{print $1}')" = "$(awk '{print $1}' .ci-noqeri/Compiler/selfhost/trusted-stage1.sha256)"
+          .ci-noqeri-build/noqeri-nqri compile-manifest             .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage2.nqri 3
+          .ci-noqeri-build/noqeri-nqri compile-manifest             /tmp/noqeri-stage2.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage3.nqri 3
+          .ci-noqeri-build/noqeri-nqri diff /tmp/noqeri-stage2.nqri /tmp/noqeri-stage3.nqri
+          .ci-noqeri-build/noqeri-nqri has-export /tmp/noqeri-stage2.nqri stage2CompileToNqri
+
+      - name: Compile NoeSQL Stage-2 NQRI executor
+        run: |
+          mkdir -p Native/rust/native-stage2
+          .ci-noqeri-build/noqeri-nqri compile             /tmp/noqeri-stage2.nqri             Database/noesql_stage2_bridge.noqeri             Native/rust/native-stage2/noesql_stage2_bridge.nqri 3
+          .ci-noqeri-build/noqeri-nqri has-export             Native/rust/native-stage2/noesql_stage2_bridge.nqri             noesqlStage2BoolRow
+
+      - name: Execute Rust to Stage-2 NQRI to Zig storage chain
+        env:
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+          NOESQL_NQRI_VM: ${{ github.workspace }}/.ci-noqeri-build/noqeri-nqri
+          NOESQL_STAGE2_MODULE: ${{ github.workspace }}/Native/rust/native-stage2/noesql_stage2_bridge.nqri
+        run: |
+          cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features stage2-nqri
+          cargo run --manifest-path Native/rust/Cargo.toml --features stage2-nqri --bin stage2_chain_smoke
+
+      - name: Compile NoeSQL Noqeri bridge with Rust builder
+        run: |
+          rm -rf Native/rust/native-lib
+          cargo run --manifest-path Native/rust/Cargo.toml --bin build_native --             "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri"             "$GITHUB_WORKSPACE/Database/noesql_native_bridge.noqeri"             "$GITHUB_WORKSPACE/Native/rust/native-lib"
+          test -s Native/rust/native-lib/libnoesql_noqeri.a
+
+      - name: Compile and execute native Noqeri executor fixture
+        run: |
+          .ci-noqeri-build/noqeri build tests/noesql_native_ir.noqeri /tmp/noesql-native-ir.s -O2
+          cc -c /tmp/noesql-native-ir.s -o /tmp/noesql-native-ir.o
+          c++ -std=c++17 -O2 -I .ci-noqeri/Include/noqeri -c .ci-noqeri/Runtime/native/aot_runner.cpp -o /tmp/noqeri-aot-runner.o
+          c++ /tmp/noesql-native-ir.o /tmp/noqeri-aot-runner.o -o /tmp/noesql-native-ir
+          /tmp/noesql-native-ir
+
+      - name: Link Rust to native Noqeri and Zig
+        env:
+          NOESQL_NOQERI_LIB_DIR: ${{ github.workspace }}/Native/rust/native-lib
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+        run: |
+          cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features noqeri-native
+          cargo run --manifest-path Native/rust/Cargo.toml --features noqeri-native --bin native_chain_smoke
+
+      - name: Validate C ABI headers
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_engine_abi.h
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_session_abi.h
+
+      - name: Verify JavaScript did not return
+        run: |
+          test -z "$(find . -path './.ci-noqeri' -prune -o -path './.ci-noqeri-build' -prune -o -type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.jsx' \) -print -quit)"
