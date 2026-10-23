@@ -480,24 +480,92 @@ impl Database {
     }
     fn execute_one(&mut self, statement: &Statement, params: &Params) -> Result<ExecutionReport, ReferenceError> {
         match statement {
-            Statement::Database(name) => { self.name = Some(name.clone()); Ok(ExecutionReport::default()) }
-            Statement::Table(name, fields) => {
-                if let Some(existing) = self.tables.get(name) {
-                    if existing.fields.len() == fields.len() && existing.fields.iter().zip(fields).all(|(a,b)| a.name == b.name && a.kind == b.kind) { return Ok(ExecutionReport::default()); }
-                    return db_error("NOE200", format!("table {name} already has a different schema"));
+            Statement::Database(name) => {
+                if let Some(existing) = &self.name {
+                    if existing != name { return db_error("NOE101", "cannot change database identity"); }
                 }
-                let mut names = BTreeSet::new(); for field in fields { if !names.insert(field.name.clone()) { return db_error("NOE201", format!("duplicate field {}", field.name)); } }
-                self.tables.insert(name.clone(), Table { fields: fields.clone(), rows: Vec::new(), next_auto: 1 }); Ok(ExecutionReport::default())
+                self.name = Some(name.clone());
+                Ok(ExecutionReport::default())
+            }
+            Statement::Table(name, fields) => {
+                if self.tables.contains_key(name) { return db_error("NOE102", format!("duplicate table {name}")); }
+                if fields.is_empty() || fields.len() > 256 { return db_error("NOE109", "table requires 1..256 fields"); }
+                let mut names = BTreeSet::new();
+                let mut keys = 0usize;
+                let mut autos = 0usize;
+                for field in fields {
+                    if !names.insert(field.name.clone()) { return db_error("NOE103", format!("duplicate field {}", field.name)); }
+                    if field.key {
+                        keys += 1;
+                        if field.kind != ValueType::Int { return db_error("NOE105", "primary key must be int"); }
+                    }
+                    if field.auto {
+                        autos += 1;
+                        if !field.key || field.kind != ValueType::Int { return db_error("NOE106", "auto requires int key"); }
+                    }
+                    if field.reference.is_some() && field.default.is_some() { return db_error("NOE107", "references cannot have defaults"); }
+                }
+                if keys != 1 || autos > 1 { return db_error("NOE108", "exactly one integer primary key required"); }
+                self.tables.insert(name.clone(), Table { fields: fields.clone(), rows: Vec::new(), next_auto: 1 });
+                Ok(ExecutionReport::default())
             }
             Statement::AlterAdd(name, fields) => {
-                let table = self.tables.get_mut(name).ok_or_else(|| db_failure("NOE202", format!("unknown table {name}")))?;
+                if fields.is_empty() { return db_error("NOE240", "alter add requires at least one new field"); }
+                let table = self.tables.get_mut(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
+                let mut added = BTreeSet::new();
                 for field in fields {
-                    if table.fields.iter().any(|f| f.name == field.name) { return db_error("NOE201", format!("duplicate field {}", field.name)); }
-                    let value = if let Some(default) = &field.default { eval(default, &Row::new(), params)? } else { Value::Null };
-                    if field.required && value == Value::Null { return db_error("NOE203", format!("required field {} needs default", field.name)); }
+                    if table.fields.iter().any(|f| f.name == field.name) || !added.insert(field.name.clone()) {
+                        return db_error("NOE241", format!("duplicate migration field {}", field.name));
+                    }
+                    if !matches!(field.kind, ValueType::Int | ValueType::Text | ValueType::Bool)
+                        || field.key || field.auto || field.unique || field.reference.is_some() {
+                        return db_error("NOE242", "alter add supports only scalar non-key, non-unique fields");
+                    }
+                    let value = if let Some(default) = &field.default {
+                        match default {
+                            Expr::Literal(value) if field.kind.accepts(value) => value.clone(),
+                            _ => return db_error("NOE243", "migration default must be a typed literal"),
+                        }
+                    } else { Value::Null };
+                    if !table.rows.is_empty() && field.required && value == Value::Null {
+                        return db_error("NOE244", "required new column needs a nonnull default on nonempty table");
+                    }
                     for row in &mut table.rows { row.insert(field.name.clone(), value.clone()); }
                     table.fields.push(field.clone());
                 }
+                self.version = self.version.checked_add(1).ok_or_else(|| db_failure("NOE245", "schema version exhausted"))?;
+                Ok(ExecutionReport::default())
+            }
+            Statement::Index { name, table, columns } => {
+                if self.indexes.contains_key(name) { return db_error("NOE110", format!("duplicate index {name}")); }
+                let target = self.tables.get(table).ok_or_else(|| db_failure("NOE100", format!("unknown table {table}")))?;
+                if columns.is_empty() || columns.len() > 16 {
+                    return db_error("NOE111", "index requires 1..16 columns");
+                }
+                let unique: BTreeSet<_> = columns.iter().collect();
+                if unique.len() != columns.len() { return db_error("NOE111", "index columns must be unique"); }
+                for column in columns {
+                    if !target.fields.iter().any(|field| &field.name == column) {
+                        return db_error("NOE112", format!("unknown index field {column}"));
+                    }
+                }
+                self.indexes.insert(name.clone(), IndexDefinition { table: table.clone(), columns: columns.clone() });
+                Ok(ExecutionReport::default())
+            }
+            Statement::Query { name, params: declared, select } => {
+                if self.queries.contains_key(name) { return db_error("NOE113", format!("duplicate query {name}")); }
+                if !self.tables.contains_key(&select.table) { return db_error("NOE100", format!("unknown table {}", select.table)); }
+                let mut names = BTreeSet::new();
+                for param in declared {
+                    if !names.insert(param.name.clone()) { return db_error("NOE114", format!("duplicate parameter {}", param.name)); }
+                    if let Some(default) = &param.default {
+                        let value = eval(default, &Row::new(), &Params::new())?;
+                        if !param.kind.accepts(&value) || value == Value::Null {
+                            return db_error("NOE115", format!("invalid default for parameter {}", param.name));
+                        }
+                    }
+                }
+                self.queries.insert(name.clone(), NamedQuery { params: declared.clone(), select: select.clone() });
                 Ok(ExecutionReport::default())
             }
             Statement::Add(name, values) => self.insert(name, values, params),
