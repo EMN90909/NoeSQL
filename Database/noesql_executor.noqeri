@@ -58,7 +58,37 @@ function noeUniqueCells(columns: []NoeColumn, values: []NoeValue, rows: usize, b
 // Results contain flattened projected values for GET. INSERT input is one
 // full schema row. No user data is copied to the destination until all checks
 // succeed. Write predicates are mandatory; full-table mutation is rejected.
-export function noeExecute(plan: *NoeIrPlan, columns: []NoeColumn, original: []NoeValue, scratch: []NoeValue, rowCount: usize, insertRow: []NoeValue, projections: []usize, output: []NoeValue, bytes: []u8, version: u32, result: *NoeExecutionResult): isize {
+record NoeExecutionRequest {
+    plan: *NoeIrPlan
+    columns: []NoeColumn
+    original: []NoeValue
+    scratch: []NoeValue
+    rowCount: usize
+    insertRow: []NoeValue
+    projections: []usize
+    output: []NoeValue
+    bytes: []u8
+    version: u32
+    result: *NoeExecutionResult
+}
+
+// Single-pointer execution ABI. The native Noqeri x86-64 backend currently
+// supports at most six machine-level arguments, so keeping executor state in
+// this request record makes the relational kernel AOT-compilable and gives
+// Rust one stable FFI boundary.
+export function noeExecute(req: *NoeExecutionRequest): isize {
+    if req == null { return -20 as isize }
+    let plan: *NoeIrPlan = req.plan
+    let columns: []NoeColumn = req.columns
+    let original: []NoeValue = req.original
+    let scratch: []NoeValue = req.scratch
+    let rowCount: usize = req.rowCount
+    let insertRow: []NoeValue = req.insertRow
+    let projections: []usize = req.projections
+    let output: []NoeValue = req.output
+    let bytes: []u8 = req.bytes
+    let version: u32 = req.version
+    let result: *NoeExecutionResult = req.result
     if result == null { return -20 as isize }
     result.affected = 0 as usize
     result.returned = 0 as usize
