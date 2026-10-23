@@ -5,6 +5,10 @@ edition = "2021"
 license = "GPL-3.0-only"
 description = "Native Rust host/runtime for NoeSQL Noqeri + C++ + Zig engine components"
 
+[features]
+default = []
+zig-pager = []
+
 [lib]
 name = "noesql_runtime"
 crate-type = ["rlib", "staticlib"]
