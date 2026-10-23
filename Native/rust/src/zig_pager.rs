@@ -8,6 +8,7 @@ use std::ptr::NonNull;
 
 const ABI_VERSION: u32 = 2;
 const STATUS_OK: i32 = 0;
+const STATUS_NOT_FOUND: i32 = 1;
 const STATUS_BUFFER_TOO_SMALL: i32 = -3;
 const MAX_SNAPSHOT_BYTES: usize = 255 * 4096;
 
@@ -65,4 +66,12 @@ pub fn checkpoint(path: &Path) -> Result<(), Error> {
     let pager = Pager::open(path)?;
     let status = unsafe { noesql_zig_page_checkpoint(pager.as_ptr()) };
     if status == STATUS_OK { Ok(()) } else { Err(Error::Provider(status)) }
+}
+
+pub fn load_or_default(path: &Path) -> Result<Database, Error> {
+    match load(path) {
+        Ok(database) => Ok(database),
+        Err(Error::Provider(STATUS_NOT_FOUND)) => Ok(Database::default()),
+        Err(error) => Err(error),
+    }
 }
