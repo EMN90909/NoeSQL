@@ -4,19 +4,19 @@ use std::ffi::CString;
 use std::path::Path;
 
 unsafe extern "C" {
-    fn noesqlNativeApiVersion() -> u32;
-    fn noesqlNativeBoolRow(
+    fn noesql_cpp_noqeri_bridge_version() -> u32;
+    fn noesql_cpp_noqeri_bool_row(
         path: *const c_char,
         page_id: u32,
         row_id: i64,
         enabled: u8,
         operation: i32,
         out_enabled: *mut u8,
-    ) -> isize;
+    ) -> i32;
 }
 
 pub fn api_version() -> u32 {
-    unsafe { noesqlNativeApiVersion() }
+    unsafe { noesql_cpp_noqeri_bridge_version() }
 }
 
 fn execute(path: &Path, page_id: u32, row_id: i64, enabled: bool, operation: i32) -> Result<Option<bool>, Error> {
@@ -25,13 +25,26 @@ fn execute(path: &Path, page_id: u32, row_id: i64, enabled: bool, operation: i32
     let path = path.to_str().ok_or(Error::InvalidDatabasePath)?;
     let path = CString::new(path).map_err(|_| Error::InvalidDatabasePath)?;
     let mut output = 0u8;
-    let status = unsafe { noesqlNativeBoolRow(path.as_ptr(), page_id, row_id, u8::from(enabled), operation, &mut output) };
-    if status < 0 { return Err(Error::Provider(status as i32)); }
+    let status = unsafe {
+        noesql_cpp_noqeri_bool_row(
+            path.as_ptr(),
+            page_id,
+            row_id,
+            u8::from(enabled),
+            operation,
+            &mut output,
+        )
+    };
+
     if operation == 1 {
-        if status == 1 { Ok(None) } else { Ok(Some(output != 0)) }
-    } else {
-        Ok(None)
+        return match status {
+            0 => Ok(Some(output != 0)),
+            1 => Ok(None),
+            other => Err(Error::Provider(other)),
+        };
     }
+
+    if status == 0 { Ok(None) } else { Err(Error::Provider(status)) }
 }
 
 pub fn insert_bool_row(path: &Path, page_id: u32, row_id: i64, enabled: bool) -> Result<(), Error> {
