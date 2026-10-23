@@ -1,0 +1,110 @@
+module noqeri.database.noesql.native_bridge
+import "noesql_zig_relational.noqeri"
+
+// C-compatible native bridge used by the Rust host. The ABI intentionally
+// stays at six primitive arguments so it can be emitted by today's x86-64
+// Noqeri Stage-0 AOT backend.
+//
+// operation:
+//   1 = get
+//   2 = insert
+//   3 = set enabled
+//   4 = delete
+//
+// A row occupies one Zig page in this bounded native slice. The full Rust
+// relational runtime handles general schemas while native Noqeri execution
+// continues expanding behind this stable typed boundary.
+export function noesqlNativeBoolRow(
+    path: string,
+    pageId: u32,
+    rowId: i64,
+    enabled: bool,
+    operation: int,
+    outEnabled: *u8
+): isize {
+    if outEnabled == null { return -400 as isize }
+    if operation < 1 || operation > 4 { return -401 as isize }
+
+    let ctx: NoeQueryContext
+    ctx.abiVersion = noeApiVersion()
+    ctx.schemaVersion = 1 as u32
+    ctx.tenant = 1 as u64
+    ctx.principal.userId = 1 as u64
+    ctx.principal.authenticated = true
+    ctx.principal.disabled = false
+    ctx.principal.scope = 1 as u64
+    ctx.principal.roles = noeRoleAdmin()
+    if !noeBudgetInit(&ctx.budget, 1024 as u64, 32 as usize) { return -402 as isize }
+    ctx.maxReturnedRows = 4 as usize
+
+    let columns: [NoeColumn; 2]
+    columns[0].kind = noeTypeInt()
+    columns[0].primary = true
+    columns[0].required = true
+    columns[0].unique = true
+    columns[1].kind = noeTypeBool()
+    columns[1].primary = false
+    columns[1].required = true
+    columns[1].unique = false
+
+    let id: NoeValue
+    id.kind = noeTypeInt()
+    id.isNull = false
+    id.number = rowId
+    id.textStart = 0 as usize
+    id.textLength = 0 as usize
+
+    let flag: NoeValue
+    flag.kind = noeTypeBool()
+    flag.isNull = false
+    flag.number = 0 as i64
+    if enabled { flag.number = 1 as i64 }
+    flag.textStart = 0 as usize
+    flag.textLength = 0 as usize
+
+    let incoming: [NoeValue; 2]
+    incoming[0] = id
+    incoming[1] = flag
+    let projections: [usize; 2] = [0 as usize,1 as usize]
+    let output: [NoeValue; 4]
+    let result: NoeExecutionResult
+
+    let plan: NoeIrPlan
+    plan.schemaVersion = 1 as u32
+    plan.predicateColumn = 0 as usize
+    plan.predicateOperator = noePredicateEqual()
+    plan.predicateValue = id
+    plan.mutationColumn = 1 as usize
+    plan.mutationValue = flag
+    if operation == 1 { plan.operation = noePlanGet() }
+    if operation == 2 {
+        plan.operation = noePlanInsert()
+        plan.predicateOperator = noePredicateNone()
+    }
+    if operation == 3 { plan.operation = noePlanSet() }
+    if operation == 4 { plan.operation = noePlanDelete() }
+
+    let request: NoeZigExecutionRequest
+    request.path = path
+    request.pageId = pageId
+    request.ctx = &ctx
+    request.plan = &plan
+    request.columns = slice(columns)
+    request.insertRow = slice(incoming)
+    request.projections = slice(projections)
+    request.output = slice(output)
+    request.result = &result
+
+    let status: isize = noeZigSingleRowExecute(&request)
+    if status < 0 as isize { return status }
+    if operation == 1 {
+        if result.returned == 0 as usize { return 1 as isize }
+        if output[1].number != 0 as i64 { outEnabled[0] = 1 as u8 }
+        else { outEnabled[0] = 0 as u8 }
+    }
+    return 0 as isize
+}
+
+export function noesqlNativeApiVersion(): u32 {
+    return noeApiVersion()
+}
