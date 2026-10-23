@@ -1,3 +1,5 @@
+CXX ?= c++
+AR ?= ar
 .PHONY: test native native-chain stage2-chain test-zig test-rust test-cpp no-js clean
 
 test: no-js test-zig test-rust test-cpp
