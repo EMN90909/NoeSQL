@@ -9,6 +9,7 @@ description = "Native Rust host/runtime for NoeSQL Noqeri + C++ + Zig engine com
 default = []
 zig-pager = []
 noqeri-native = ["zig-pager"]
+stage2-nqri = ["zig-pager"]
 
 [lib]
 name = "noesql_runtime"
