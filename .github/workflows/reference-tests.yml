@@ -55,8 +55,32 @@ jobs:
       - name: Build Noqeri Stage-0 AOT compiler
         run: |
           cmake -S .ci-noqeri -B .ci-noqeri-build -DCMAKE_BUILD_TYPE=Release
-          cmake --build .ci-noqeri-build --target noqeri -j2
+          cmake --build .ci-noqeri-build --target noqeri noqeri-nqri -j2
           .ci-noqeri-build/noqeri version
+          .ci-noqeri-build/noqeri-nqri --selftest
+
+      - name: Reproduce Noqeri Stage-2 and Stage-3 NQRI compiler
+        run: |
+          test "$(sha256sum .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri | cut -d' ' -f1)" = "$(tr -d '[:space:]' < .ci-noqeri/Compiler/selfhost/trusted-stage1.sha256)"
+          .ci-noqeri-build/noqeri-nqri compile-manifest             .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage2.nqri 3
+          .ci-noqeri-build/noqeri-nqri compile-manifest             /tmp/noqeri-stage2.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage3.nqri 3
+          .ci-noqeri-build/noqeri-nqri diff /tmp/noqeri-stage2.nqri /tmp/noqeri-stage3.nqri
+          .ci-noqeri-build/noqeri-nqri has-export /tmp/noqeri-stage2.nqri stage2CompileToNqri
+
+      - name: Compile NoeSQL Stage-2 NQRI executor
+        run: |
+          mkdir -p Native/rust/native-stage2
+          .ci-noqeri-build/noqeri-nqri compile             /tmp/noqeri-stage2.nqri             Database/noesql_stage2_bridge.noqeri             Native/rust/native-stage2/noesql_stage2_bridge.nqri 3
+          .ci-noqeri-build/noqeri-nqri has-export             Native/rust/native-stage2/noesql_stage2_bridge.nqri             noesqlStage2BoolRow
+
+      - name: Execute Rust to Stage-2 NQRI to Zig storage chain
+        env:
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+          NOESQL_NQRI_VM: ${{ github.workspace }}/.ci-noqeri-build/noqeri-nqri
+          NOESQL_STAGE2_MODULE: ${{ github.workspace }}/Native/rust/native-stage2/noesql_stage2_bridge.nqri
+        run: |
+          cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features stage2-nqri
+          cargo run --manifest-path Native/rust/Cargo.toml --features stage2-nqri --bin stage2_chain_smoke
 
       - name: Compile NoeSQL Noqeri bridge with Rust builder
         run: |
