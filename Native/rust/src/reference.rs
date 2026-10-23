@@ -1,6 +1,7 @@
 use crate::value::{Value, ValueType};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use crate::planner::{choose_relational_plan, JoinPlan};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub type Row = BTreeMap<String, Value>;
 pub type Params = BTreeMap<String, Value>;
@@ -838,20 +839,69 @@ impl Database {
     }
 
     fn source_rows(&self, select: &Select, params: &Params) -> Result<Vec<Row>, ReferenceError> {
-        let left = self.tables.get(&select.table).ok_or_else(|| db_failure("NOE202", format!("unknown table {}", select.table)))?;
+        let left = self.tables.get(&select.table)
+            .ok_or_else(|| db_failure("NOE100", format!("unknown table {}", select.table)))?;
         let mut rows = Vec::new();
+
         if let Some(join) = &select.join {
-            let right = self.tables.get(&join.table).ok_or_else(|| db_failure("NOE202", format!("unknown table {}", join.table)))?;
-            for left_row in &left.rows {
-                let mut matched = false;
-                for right_row in &right.rows {
-                    let row = merge(&select.table, left_row, &join.table, Some(right_row));
-                    if predicate(Some(&join.on), &row, params)? { matched = true; rows.push(row); }
+            let right = self.tables.get(&join.table)
+                .ok_or_else(|| db_failure("NOE100", format!("unknown table {}", join.table)))?;
+            let plan = choose_relational_plan(select, left, Some(right));
+
+            match plan.join {
+                JoinPlan::Hash { left_key, right_key } => {
+                    let mut candidates: HashMap<Value, Vec<&Row>> = HashMap::new();
+                    for right_row in &right.rows {
+                        if let Some(value) = right_row.get(&right_key) {
+                            candidates.entry(value.clone()).or_default().push(right_row);
+                        }
+                    }
+
+                    for left_row in &left.rows {
+                        let mut matched = false;
+                        if let Some(key) = left_row.get(&left_key) {
+                            if let Some(right_rows) = candidates.get(key) {
+                                for right_row in right_rows {
+                                    let row = merge(&select.table, left_row, &join.table, Some(right_row));
+                                    if predicate(Some(&join.on), &row, params)? {
+                                        matched = true;
+                                        rows.push(row);
+                                    }
+                                }
+                            }
+                        }
+                        if join.left && !matched {
+                            rows.push(merge(&select.table, left_row, &join.table, None));
+                        }
+                    }
                 }
-                if join.left && !matched { rows.push(merge(&select.table, left_row, &join.table, None)); }
+                JoinPlan::Nested | JoinPlan::None => {
+                    for left_row in &left.rows {
+                        let mut matched = false;
+                        for right_row in &right.rows {
+                            let row = merge(&select.table, left_row, &join.table, Some(right_row));
+                            if predicate(Some(&join.on), &row, params)? {
+                                matched = true;
+                                rows.push(row);
+                            }
+                        }
+                        if join.left && !matched {
+                            rows.push(merge(&select.table, left_row, &join.table, None));
+                        }
+                    }
+                }
             }
-        } else { rows.extend(left.rows.iter().map(|row| qualified(&select.table, row))); }
-        rows.into_iter().filter_map(|row| match predicate(select.filter.as_ref(), &row, params) { Ok(true) => Some(Ok(row)), Ok(false) => None, Err(e) => Some(Err(e)) }).collect()
+        } else {
+            rows.extend(left.rows.iter().map(|row| qualified(&select.table, row)));
+        }
+
+        rows.into_iter()
+            .filter_map(|row| match predicate(select.filter.as_ref(), &row, params) {
+                Ok(true) => Some(Ok(row)),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
     fn aggregate(projection: &Projection, rows: &[Row]) -> Result<(String, Value), ReferenceError> {
         let Projection::Aggregate { function, argument, alias } = projection else { return db_error("NOE230", "expected aggregate"); };
