@@ -6,6 +6,8 @@ pub mod value;
 pub mod zig_pager;
 #[cfg(feature = "noqeri-native")]
 pub mod noqeri_native;
+#[cfg(feature = "stage2-nqri")]
+pub mod stage2_nqri;
 
 use core::ffi::c_void;
 use core::fmt;
