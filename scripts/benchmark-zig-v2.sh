@@ -1,13 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-if [[ "$(uname -s)" != "Linux" ]]; then echo "Zig pager v2 is Linux-only" >&2; exit 2; fi
+
+if [[ "$(uname -s)" != "Linux" ]]; then
+  echo "Zig pager benchmark is currently Linux-only" >&2
+  exit 2
+fi
+
 command -v zig >/dev/null || { echo 'Requires Zig 0.15.2' >&2; exit 2; }
+command -v cargo >/dev/null || { echo 'Requires Rust/Cargo' >&2; exit 2; }
 [[ "$(zig version)" == '0.15.2' ]] || { echo 'Requires Zig 0.15.2' >&2; exit 2; }
-(cd Native/zig && zig build -Doptimize=ReleaseSafe)
-cc -O2 -Wall -Wextra -Werror -I Native/zig Benchmarks/benchmark-zig-v2.c \
-    Native/zig/zig-out/lib/libnoesql_zig_pages.a -lsqlite3 -lm -lpthread -ldl \
-    -o Native/zig/zig-out/benchmark-zig-v2
+
+zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+
 workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
-Native/zig/zig-out/benchmark-zig-v2 "$workdir" "${1:-250}"
+
+NOESQL_ZIG_LIB_DIR="$PWD/Native/zig/zig-out/lib" \
+cargo run --release \
+  --manifest-path Native/rust/Cargo.toml \
+  --features sqlite-benchmark \
+  --bin benchmark_compare_sqlite -- \
+  "$workdir" "${1:-250}"
