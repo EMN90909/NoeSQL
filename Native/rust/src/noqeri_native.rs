@@ -90,7 +90,7 @@ fn execute(
     };
 
     let (present, current_id, current_enabled) = match current {
-        Some(row) => (1, row.id, i64::from(row.enabled)),
+        Some(row) => (1, row.id, if row.enabled { 1 } else { 0 }),
         None => (0, 0, 0),
     };
 
@@ -101,7 +101,7 @@ fn execute(
             current_id,
             current_enabled,
             row_id,
-            i64::from(enabled),
+            if enabled { 1 } else { 0 },
         )
     };
 
