@@ -11,6 +11,7 @@ const STATUS_OK: i32 = 0;
 const STATUS_NOT_FOUND: i32 = 1;
 const STATUS_BUFFER_TOO_SMALL: i32 = -3;
 const MAX_SNAPSHOT_BYTES: usize = 255 * PAGE_BYTES;
+const SNAPSHOT_MAGIC: &[u8; 8] = b"NQRS0001";
 pub(crate) const PAGE_BYTES: usize = 4096;
 
 unsafe extern "C" {
@@ -95,6 +96,24 @@ pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
         return Err(Error::OutputTooLarge(payload.len()));
     }
     let pager = Pager::open(path)?;
+    match pager.read_page(0)? {
+        Some(page) if &page[..8] == SNAPSHOT_MAGIC.as_slice() => {
+            // Refuse to destroy an existing snapshot whose checksums fail.
+            let valid = unsafe { noesql_zig_page_validate_reference_state(pager.as_ptr()) };
+            if valid != STATUS_OK {
+                return Err(Error::Provider(valid));
+            }
+        }
+        Some(_) => return Err(Error::Codec("page zero is not a NoeSQL snapshot manifest".into())),
+        None => {
+            // Legacy unmarked raw-row/index stores must not be overwritten.
+            for id in 1..=255u32 {
+                if pager.read_page(id)?.is_some() {
+                    return Err(Error::Codec("unmarked nonempty store cannot become a snapshot".into()));
+                }
+            }
+        }
+    }
     let status = unsafe { noesql_zig_snapshot_write(pager.as_ptr(), payload.as_ptr(), payload.len()) };
     if status != STATUS_OK {
         return Err(Error::Provider(status));
