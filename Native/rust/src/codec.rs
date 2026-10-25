@@ -70,6 +70,13 @@ impl<'a> Reader<'a> {
     fn count(&mut self) -> Result<usize, CodecError> {
         let value = self.u32()? as usize;
         if value > MAX_ITEMS { return Err(CodecError("snapshot item count exceeds limit".into())); }
+        // Every encoded item consumes at least one additional byte. Reject
+        // impossible counts before callers allocate vectors with attacker-
+        // controlled capacity (a corrupted 1 MiB snapshot used to request
+        // allocations for up to 16 million decoded rows/fields).
+        if value > self.bytes.len() - self.at {
+            return Err(CodecError("snapshot item count exceeds remaining payload".into()));
+        }
         Ok(value)
     }
     fn string(&mut self) -> Result<String, CodecError> {
@@ -447,6 +454,18 @@ pub fn decode(bytes: &[u8]) -> Result<Database, CodecError> {
 mod tests {
     use super::*;
     use crate::reference::Params;
+
+    #[test]
+    fn absurd_declared_counts_fail_before_allocating_large_vectors() {
+        let mut corrupt = Vec::from(MAGIC.as_slice());
+        corrupt.extend_from_slice(&PAYLOAD_VERSION.to_le_bytes());
+        corrupt.extend_from_slice(&1u32.to_le_bytes()); // DB version
+        corrupt.push(0); // no name
+        corrupt.extend_from_slice(&(MAX_ITEMS as u32).to_le_bytes()); // impossible table count
+        let error = decode(&corrupt).unwrap_err();
+        assert!(error.0.contains("remaining payload"));
+    }
+
 
     #[test]
     fn snapshot_round_trip_preserves_rows_catalog_and_named_queries() {

@@ -54,6 +54,11 @@ pub const Index = struct {
             if (id == 0 or id >= pager.MAX_PAGES or (i != 0 and result.entries[i - 1].key >= signed)) return error.CorruptIndex;
             result.entries[i] = .{ .key = signed, .page_id = id };
         }
+        // Canonical zero padding detects rechecksummed foreign formats,
+        // hidden stale index entries and incorrectly sized index payloads.
+        for (page[HEADER + result.count * ENTRY .. pager.PAGE_BYTES - TRAILER]) |byte| {
+            if (byte != 0) return error.CorruptIndex;
+        }
         return result;
     }
     pub fn encode(self: *const Index) [pager.PAGE_BYTES]u8 {
@@ -136,6 +141,13 @@ test "persistent index bytes support unique lookup and bounded sorted range" {
     var corrupt = bytes;
     corrupt[25] ^= 1;
     try std.testing.expectError(error.CorruptIndex, Index.decode(&corrupt));
+    // Recompute a valid checksum over non-canonical padding. This must still
+    // fail, even though an attacker can recompute the page's outer hash.
+    var noncanonical = bytes;
+    noncanonical[HEADER + index.count * ENTRY] = 9;
+    const new_hash = checksum(noncanonical[0 .. pager.PAGE_BYTES - TRAILER]);
+    @memcpy(noncanonical[pager.PAGE_BYTES - TRAILER ..], &new_hash);
+    try std.testing.expectError(error.CorruptIndex, Index.decode(&noncanonical));
 }
 
 

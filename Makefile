@@ -21,13 +21,13 @@ no-c-family:
 	if [ -n "$$found" ]; then echo "C/C++ source remains in NoeSQL: $$found" >&2; exit 1; fi
 
 test-zig:
-	zig build --build-file Native/zig/build.zig test
+	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out test
 
 test-rust:
 	cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets
 
 test-rust-zig:
-	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
 		cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager
 
@@ -40,14 +40,14 @@ stress: no-js no-c-family
 	done
 
 native:
-	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
 		cargo build --release --manifest-path Native/rust/Cargo.toml --features zig-pager
 
 stage2-chain: no-js no-c-family
 	@test -n "$(NOQERI_REPO)" || (echo "Set NOQERI_REPO=/absolute/path/to/Noqeri" >&2; exit 2)
 	@test -x "$(NOQERI_NQRI_VM)" || (echo "Set NOQERI_NQRI_VM=/absolute/path/to/noqeri-nqri" >&2; exit 2)
-	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 	mkdir -p Native/rust/native-stage2
 	test "$(sha256sum "$(NOQERI_REPO)/Compiler/selfhost/trusted-stage1.nqri" | awk '{print $$1}')" = "$(awk '{print $$1}' "$(NOQERI_REPO)/Compiler/selfhost/trusted-stage1.sha256")"
 	"$(NOQERI_NQRI_VM)" compile-manifest \
@@ -72,7 +72,7 @@ stage2-chain: no-js no-c-family
 
 native-chain: no-js no-c-family
 	@test -n "$(NOQERI_COMPILER)" || (echo "Set NOQERI_COMPILER=/absolute/path/to/noqeri" >&2; exit 2)
-	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 	rm -rf Native/rust/native-lib
 	cargo run --manifest-path Native/rust/Cargo.toml --bin build_native -- \
 		"$(NOQERI_COMPILER)" \

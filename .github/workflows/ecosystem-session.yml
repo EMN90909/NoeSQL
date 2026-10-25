@@ -37,7 +37,7 @@ jobs:
         run: bash scripts/verify-ecosystem-local.sh
 
       - name: Build Zig storage library
-        run: zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+        run: zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 
       - name: Test Rust session snapshot cold-reopen through Zig
         env:

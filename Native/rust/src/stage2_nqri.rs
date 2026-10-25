@@ -151,6 +151,22 @@ fn execute(
         STATUS_OK => return Err(Error::Codec("database is not a Noqeri raw-row store".into())),
         other => return Err(Error::Provider(other)),
     };
+    if !marker_present {
+        // A missing marker is not permission to reinterpret legacy pages
+        // as an empty row store.
+        let mut scratch = [0u8; PAGE_BYTES];
+        for candidate in 1..=255u32 {
+            match unsafe {
+                noesql_zig_page_get(pager.ptr(), candidate, scratch.as_mut_ptr(), scratch.len())
+            } {
+                STATUS_NOT_FOUND => {}
+                STATUS_OK => return Err(Error::Codec(
+                    "unmarked nonempty database is not a raw-row store".into()
+                )),
+                other => return Err(Error::Provider(other)),
+            }
+        }
+    }
     let current = read_row(&pager, page_id)?;
     let result = runtime.invoke([
         operation,
@@ -207,4 +223,49 @@ pub fn set_bool_row(runtime: &Stage2Runtime, path: &Path, page_id: u32, row_id: 
 }
 pub fn delete_bool_row(runtime: &Stage2Runtime, path: &Path, page_id: u32, row_id: i64) -> Result<(), Error> {
     execute(runtime, path, page_id, row_id, false, 4).map(|_| ())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unmarked_legacy_pages_are_rejected_without_launching_stage2() {
+        let path = std::env::temp_dir().join(format!(
+            "noesql-unmarked-stage2-{}.noedb", std::process::id()
+        ));
+        for name in [
+            path.clone(),
+            PathBuf::from(format!("{}.wal", path.display())),
+            PathBuf::from(format!("{}.lck", path.display())),
+        ] {
+            let _ = std::fs::remove_file(name);
+        }
+        {
+            let pager = Pager::open(&path).unwrap();
+            let mut bytes = [0u8; PAGE_BYTES];
+            bytes[0] = 47;
+            let code = unsafe { noesql_zig_page_stage(pager.ptr(), 8, bytes.as_ptr(), bytes.len()) };
+            assert_eq!(code, STATUS_OK);
+            assert_eq!(unsafe { noesql_zig_page_commit(pager.ptr()) }, STATUS_OK);
+        }
+        let unavailable_vm = Stage2Runtime::new("/missing-nqri-vm", "/missing-module");
+        assert!(get_bool_row(&unavailable_vm, &path, 8, 44).is_err());
+        assert!(insert_bool_row(&unavailable_vm, &path, 9, 45, true).is_err());
+        {
+            let pager = Pager::open(&path).unwrap();
+            let mut bytes = [0u8; PAGE_BYTES];
+            assert_eq!(
+                unsafe { noesql_zig_page_get(pager.ptr(), 0, bytes.as_mut_ptr(), bytes.len()) },
+                STATUS_NOT_FOUND
+            );
+        }
+        for name in [
+            path.clone(),
+            PathBuf::from(format!("{}.wal", path.display())),
+            PathBuf::from(format!("{}.lck", path.display())),
+        ] {
+            let _ = std::fs::remove_file(name);
+        }
+    }
 }

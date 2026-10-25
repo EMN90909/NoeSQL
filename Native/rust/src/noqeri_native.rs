@@ -97,6 +97,15 @@ fn execute(
         if &header[..8] != STORE_MAGIC.as_slice() || header[8..].iter().any(|b| *b != 0) {
             return Err(Error::Codec("database is not a Noqeri raw-row store".into()));
         }
+    } else {
+        // Empty page zero is allowed only for an actually empty database.
+        // Otherwise a legacy/unmarked store could appear empty to read
+        // operations and be silently adopted on the first mutation.
+        for candidate in 1..=255 {
+            if pager.read_page(candidate)?.is_some() {
+                return Err(Error::Codec("unmarked nonempty database is not a raw-row store".into()));
+            }
+        }
     }
     let current = match pager.read_page(page_id)? {
         Some(page) => decode_row(&page)?,
@@ -184,6 +193,33 @@ pub fn delete_bool_row(path: &Path, page_id: u32, row_id: i64) -> Result<(), Err
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmarked_existing_pages_cannot_be_adopted_as_a_fresh_raw_row_store() {
+        let path = std::env::temp_dir().join(format!(
+            "noesql-unmarked-native-{}.noedb", std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}.lck", path.display()));
+        {
+            let pager = Pager::open(&path).unwrap();
+            let mut bytes = [0u8; PAGE_BYTES];
+            bytes[0] = 89;
+            pager.stage_page(17, &bytes).unwrap();
+            pager.commit().unwrap();
+        }
+        assert!(get_bool_row(&path, 17, 44).is_err());
+        assert!(insert_bool_row(&path, 99, 45, true).is_err());
+        {
+            let pager = Pager::open(&path).unwrap();
+            assert!(pager.read_page(0).unwrap().is_none());
+            assert_eq!(pager.read_page(17).unwrap().unwrap()[0], 89);
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}.wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}.lck", path.display()));
+    }
 
     #[test]
     fn row_codec_is_stable_and_rejects_bad_magic() {

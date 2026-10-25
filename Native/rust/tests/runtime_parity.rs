@@ -367,3 +367,21 @@ fn invalid_query_is_rejected_even_when_table_is_empty() {
         "NOE121"
     );
 }
+
+#[test]
+fn unary_negation_of_i64_min_returns_error_without_panicking_or_modifying_rows() {
+    let mut db = Database::default();
+    db.execute(
+        "table nums { id:int key auto\nvalue:int required }\nnums add {value:5}",
+        &params(),
+    ).unwrap();
+
+    let mut extreme = Params::new();
+    extreme.insert("min".into(), Value::Int(i64::MIN));
+    let error = db.execute("nums add {value:-$min}", &extreme).unwrap_err();
+    assert_eq!(error.code, "NOE124");
+
+    let rows = db.execute("nums get id,value sort id", &params()).unwrap().rows;
+    assert_eq!(rows.len(), 1, "failed overflow must roll back the whole statement");
+    assert_eq!(rows[0].get("value"), Some(&Value::Int(5)));
+}

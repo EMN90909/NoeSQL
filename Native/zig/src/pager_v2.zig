@@ -268,9 +268,11 @@ pub const Pager = struct {
         const digest = sha(h[0..56]);
         if (!std.mem.eql(u8, h[56..88], &digest)) return error.InvalidHeader;
         self.generation = u64get(h[16..24]);
+        var expected_end: usize = DB_HEADER;
         for (0..MAX_PAGES) |id| {
             if ((h[24 + id / 8] & (@as(u8, 1) << @as(u3, @intCast(id % 8)))) == 0) continue;
             const offset = DB_HEADER + id * DB_FRAME;
+            expected_end = offset + DB_FRAME;
             if (offset + DB_FRAME > n) return error.CorruptPage;
             var frame: [DB_FRAME]u8 = undefined;
             try seek(self.db, offset);
@@ -280,6 +282,9 @@ pub const Pager = struct {
             @memcpy(self.pages[id][0..], frame[0..PAGE_BYTES]);
             self.active[id] = true;
         }
+        // A valid checkpoint has an exact, deterministic file length.
+        // Extra bytes can contain stale private data or an unknown format.
+        if (n != expected_end) return error.CorruptPage;
     }
     fn recover(self: *Pager) Error!void {
         const n = try size(self.wal);
@@ -719,4 +724,36 @@ test "checkpoint interruption after rename preserves durable WAL and reopens" {
     try std.testing.expectEqual(@as(u8, 41), reopened.read(9).?[0]);
     try std.testing.expectEqual(@as(u64, 1), reopened.generation);
     try reopened.checkpoint();
+}
+
+test "checkpoint with appended undeclared bytes is rejected" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "trailing-file");
+    defer allocator.free(path);
+    var db_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &db_buf);
+    const wal = try pathZ(path, ".wal", &wal_buf);
+    const lock = try pathZ(path, ".lck", &lock_buf);
+    defer {
+        _ = c.unlink(data.ptr);
+        _ = c.unlink(wal.ptr);
+        _ = c.unlink(lock.ptr);
+    }
+    const store = try Pager.open(allocator, path);
+    var row = [_]u8{0} ** PAGE_BYTES;
+    row[0] = 72;
+    try store.stage(1, &row);
+    try store.commit();
+    try store.checkpoint();
+    store.close();
+
+    const fd = try openFile(data, false);
+    const before = try size(fd);
+    try seek(fd, before);
+    try writeAll(fd, "trailing garbage");
+    try durable(fd);
+    _ = c.close(fd);
+    try std.testing.expectError(error.CorruptPage, Pager.open(allocator, path));
 }

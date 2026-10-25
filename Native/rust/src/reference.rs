@@ -425,7 +425,14 @@ fn eval(expr: &Expr, row: &Row, params: &Params) -> Result<Value, ReferenceError
         Expr::Column(name) => lookup(row, name).cloned().ok_or_else(|| ReferenceError { code: "NOE120", line: 1, column: 1, message: format!("unknown field {name}") }),
         Expr::Param(name) => params.get(name).cloned().ok_or_else(|| ReferenceError { code: "NOE121", line: 1, column: 1, message: format!("unknown parameter ${name}") }),
         Expr::Unary(op, arg) => match (op.as_str(), eval(arg, row, params)?) {
-            ("!", Value::Bool(value)) => Ok(Value::Bool(!value)), ("-", Value::Int(value)) => Ok(Value::Int(-value)),
+            ("!", Value::Bool(value)) => Ok(Value::Bool(!value)),
+            ("-", Value::Int(value)) => value
+                .checked_neg()
+                .map(Value::Int)
+                .ok_or_else(|| ReferenceError {
+                    code: "NOE124", line: 1, column: 1,
+                    message: "integer arithmetic failed".into(),
+                }),
             _ => Err(ReferenceError { code: "NOE122", line: 1, column: 1, message: "invalid unary operand".into() }),
         },
         Expr::Binary(op, left, right) => {
