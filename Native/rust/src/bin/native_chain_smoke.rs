@@ -3,7 +3,7 @@ fn main() {
     use noesql_runtime::noqeri_native;
     use std::path::PathBuf;
 
-    if noqeri_native::api_version() != 1 {
+    if noqeri_native::api_version() != 2 {
         eprintln!("unexpected native NoeSQL API version");
         std::process::exit(1);
     }
