@@ -1,44 +1,46 @@
 # Native migration parity gates
 
-PR #12 replaces the former JavaScript/Node reference surface with a native Rust host/runtime and uses Zig for durable page/WAL/index storage. C++ remains a compatibility kernel while the Noqeri compiler itself completes native self-hosting.
+## 25 October 2026: Noqeri + Rust + Zig only
 
-## Completed in PR #12
+The old Native/cpp compatibility layer has been removed. NoeSQL implementation ownership is now:
 
-- [x] Removed JavaScript, Node.js, npm packaging, npm release workflows, and every `.js`/`.mjs`/`.cjs`/`.jsx` file from NoeSQL.
-- [x] Added a hard `make no-js` regression gate.
-- [x] Ported the reference lexer/parser to Rust with source, token, nesting, UTF-8, escape, and reserved-name validation.
-- [x] Ported typed values, schemas, required/key/unique/auto constraints, foreign keys, referenced-row delete protection, CRUD, predicates, bound parameters, whole-program atomic rollback, alter-add/default backfill, indexes, named queries, inner/left joins, grouping, HAVING, count/sum/min/max, sorting, skip/take, and JSON result encoding to Rust.
-- [x] Added a bounded Rust binary snapshot codec with corruption, version, length, UTF-8, and count checks.
-- [x] Added Rust CLI execution: `check`, `check-db`, `run`, and `query`.
-- [x] Connected Rust persistence to the Zig `NQDB0002` pager and `NQTX0002` WAL through a C ABI.
-- [x] Added atomic Zig snapshot read/write with SHA-256 manifest validation.
-- [x] Added Zig cold-reopen snapshot tests and Rust cold-reopen/checkpoint persistence tests.
-- [x] Refactored Noqeri executor calls behind request records so the current x86-64 AOT backend's six-argument calling-convention limit no longer blocks compilation.
-- [x] Added a C-compatible Noqeri native bridge and a Rust wrapper for it.
-- [x] Added a Rust native build helper that compiles the Noqeri bridge with the current Stage-0 AOT compiler, assembles it, and creates `libnoesql_noqeri.a`.
-- [x] Added an executable Rust -> Noqeri AOT -> Zig CRUD smoke chain.
-- [x] Added a verified Stage-1 -> Stage-2 -> Stage-3 NQRI bootstrap gate with Stage-2/Stage-3 byte equality.
-- [x] Added a Stage-2-compiled NoeSQL executor bridge and executable Rust -> Stage-2 NQRI -> Zig CRUD smoke chain.
-- [x] Ported the bounded relational query planner to Rust, including the hash-join fast path with full predicate rechecks.
-- [x] Restored Rust acceptance coverage for constraints, rollback, joins, grouping/HAVING, parameters, alter migration, large row workloads, and codec corruption.
-- [x] Preserved existing Zig pager/WAL/index and C++ compatibility/durability tests.
-- [x] CI now contains the full Stage-0 AOT build/link chain instead of Node-based reference tests.
+- Noqeri: typed database semantics and scalar native semantic kernels.
+- Rust: host/runtime, parser/reference behavior, safe native boundary, CLI and snapshot codec.
+- Zig: pages, WAL, indexes, recovery and durable storage.
 
-## Native compiler status
+Completed by this migration:
 
-Noqeri's **current Stage-0 C++ compiler can emit native Linux x86-64 assembly**, so PR #12 uses it to build the real NoeSQL Noqeri bridge. This is genuine native Noqeri program execution.
+- [x] Delete Native/cpp and its C++ page-store, ABI shims, tests and benchmarks.
+- [x] Delete orphaned Native/link-tests C fixtures.
+- [x] Add Database/noesql_native_bridge.noqeri as the direct native semantic kernel.
+- [x] Replace Rust calls to noesql_cpp_* with direct scalar Noqeri exports.
+- [x] Keep pointer-heavy pager/handle operations in Rust and call Zig through its versioned C ABI.
+- [x] Preserve the existing NQNR0001 bool-row page encoding used by the native smoke path.
+- [x] Add source gates that reject JavaScript and C/C++ implementation files from NoeSQL.
+- [x] Update CI to compile the Noqeri kernel, verify its exported symbols, link Rust directly to it and execute the Rust -> Noqeri -> Zig smoke chain.
 
-Noqeri's self-hosted Stage-2 compiler is an NQRI bootstrap and is **not a native self-hosted compiler**. PR #12 now consumes that Stage-2 path honestly: CI rebuilds Stage-2, rebuilds Stage-3, requires byte equality, compiles a NoeSQL executor with Stage-2, and lets Rust host the NQRI execution while Zig owns durable storage. Native compiler self-hosting remains a Noqeri compiler milestone, not a reason to keep JavaScript in NoeSQL.
+## ABI rule
 
-Accordingly, PR #12 must not claim that Noqeri Stage-2 is natively self-hosted. The runtime migration itself no longer depends on JavaScript.
+Noqeri's current native backend does not yet claim a portable arbitrary C ABI for records, callbacks and pointer-heavy exports. The direct AOT boundary in NoeSQL is therefore intentionally scalar and currently qualified only for Linux x86-64. Rust owns the unsafe pointer/string/handle boundary to Zig.
+
+This is a stronger architecture than recreating the deleted C++ shim in Noqeri with unqualified pointer layouts.
+
+## Existing completed migration work
+
+- [x] JavaScript/Node runtime removed from NoeSQL.
+- [x] Reference lexer/parser and general relational runtime ported to Rust.
+- [x] Rust snapshot codec connected to Zig NQDB0002/NQTX0002 storage.
+- [x] Zig cold-reopen, WAL, checkpoint and index coverage retained.
+- [x] Verified Stage-1 -> Stage-2 -> Stage-3 NQRI bootstrap path retained.
+- [x] Executable Rust -> Stage-2 NQRI semantics -> Zig storage chain retained.
 
 ## Remaining qualification gates
 
-- [ ] Obtain an executing CI runner and record a green run of the new Rust/Noqeri/Zig/C++ matrix.
-- [ ] Expand the bounded native Noqeri page-row bridge into the full general-schema relational path.
+- [ ] Record a green executing Noqeri/Rust/Zig GitHub Actions run.
+- [ ] Expand the bounded native Noqeri row semantic kernel into the full general-schema relational path.
 - [ ] Add native differential tests against an independently trusted SQL oracle.
-- [ ] Complete concurrent-writer, crash-boundary, power-loss methodology, and platform qualification.
-- [ ] Complete explicit legacy `.nqd`/`.nqdb` -> `.noedb` migration qualification.
-- [ ] Replace Stage-0 AOT provenance with native self-hosted Stage-2 provenance only after Noqeri itself reaches that compiler milestone.
+- [ ] Complete concurrent-writer, crash-boundary, power-loss and platform qualification.
+- [ ] Complete explicit legacy .nqd/.nqdb -> .noedb migration qualification.
+- [ ] Replace Stage-0 AOT provenance with native self-hosted Stage-2 provenance only after Noqeri reaches that milestone.
 
-A GitHub Actions run with zero executed steps is a runner-provisioning failure, not source-test evidence. A green executing run is required before release qualification.
+A green source build is necessary but is not by itself a production database durability certificate.

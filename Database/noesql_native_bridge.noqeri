@@ -1,0 +1,45 @@
+module noqeri.database.noesql.native_bridge
+
+// Linux x86-64 scalar native kernel used by the Rust host.
+// Keep this boundary scalar-only until Noqeri's portable native export ABI is stable.
+export function noesqlNativeApiVersion(): u32 { return 1 as u32 }
+
+// operation: 1=get, 2=insert, 3=set, 4=delete
+// result codes:
+//   100/101 get found with enabled false/true
+//   110 get not found
+//   200/201 insert success with enabled false/true
+//   210 insert conflict
+//   300/301 update success with enabled false/true
+//   310 update not found
+//   400 delete success
+//   410 delete not found
+export function noesqlNativeBoolRow(
+    operation: i64,
+    present: i64,
+    currentId: i64,
+    currentEnabled: i64,
+    requestedId: i64,
+    requestedEnabled: i64
+): i64 {
+    if operation == 1 as i64 {
+        if present == 0 as i64 || currentId != requestedId { return 110 as i64 }
+        if currentEnabled != 0 as i64 { return 101 as i64 }
+        return 100 as i64
+    }
+    if operation == 2 as i64 {
+        if present != 0 as i64 { return 210 as i64 }
+        if requestedEnabled != 0 as i64 { return 201 as i64 }
+        return 200 as i64
+    }
+    if operation == 3 as i64 {
+        if present == 0 as i64 || currentId != requestedId { return 310 as i64 }
+        if requestedEnabled != 0 as i64 { return 301 as i64 }
+        return 300 as i64
+    }
+    if operation == 4 as i64 {
+        if present == 0 as i64 || currentId != requestedId { return 410 as i64 }
+        return 400 as i64
+    }
+    return -1 as i64
+}

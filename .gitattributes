@@ -1,0 +1,2 @@
+# The Zig ABI headers are interface declarations, not a C implementation layer.
+Native/zig/*.h linguist-detectable=false
