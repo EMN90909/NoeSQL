@@ -31,7 +31,7 @@ fn decode_row(page: &[u8; PAGE_BYTES]) -> Result<Option<Row>, Error> {
     if page.iter().all(|byte| *byte == 0) {
         return Ok(None);
     }
-    if page[..MAGIC.len()] != MAGIC {
+    if &page[..MAGIC.len()] != MAGIC.as_slice() {
         return Err(Error::Provider(-2));
     }
     if page[16] > 1 {
@@ -94,7 +94,7 @@ fn execute(
 
     let pager = Pager::open(path)?;
     if let Some(header) = pager.read_page(0)? {
-        if header[..8] != STORE_MAGIC || header[8..].iter().any(|b| *b != 0) {
+        if &header[..8] != STORE_MAGIC.as_slice() || header[8..].iter().any(|b| *b != 0) {
             return Err(Error::Codec("database is not a Noqeri raw-row store".into()));
         }
     }
