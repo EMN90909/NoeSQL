@@ -2,7 +2,7 @@ const std = @import("std");
 const storage = @import("pager_v2.zig");
 const index = @import("index_v2.zig");
 
-// Native Zig-owned pager ABI for FUTURE compiled Noqeri callers.
+// Native Zig-owned pager ABI for trusted Rust and compiled Noqeri callers.
 // ABI v2, experimental Linux-only; must not be treated as a public unauthenticated
 // SQL, multi-tenant, or database-server interface. Caller owns authorization.
 pub const COMPONENT_VERSION = "1.0.0";
@@ -71,9 +71,88 @@ fn indexRead(pager: *storage.Pager, page_id: u32) index.IndexError!index.Index {
     const bytes = pager.readPending(page_id) orelse return index.Index{};
     return index.Index.decode(bytes);
 }
+
+pub export fn noesql_zig_index_find(
+    handle: ?*anyopaque,
+    index_page: u32,
+    key: i64,
+    out_page: ?*u32,
+) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    const output = out_page orelse return STATUS_INVALID;
+    output.* = 0;
+    if (!indexPageValid(index_page)) return STATUS_INVALID;
+
+    const value = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    const found = value.find(key) orelse return STATUS_NOT_FOUND;
+    output.* = found;
+    return STATUS_OK;
 }
+
+pub export fn noesql_zig_index_insert(
+    handle: ?*anyopaque,
+    index_page: u32,
+    key: i64,
+    data_page: u32,
+) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    if (!indexPageValid(index_page) or data_page == 0 or data_page >= storage.MAX_PAGES or data_page == index_page) {
+        return STATUS_INVALID;
+    }
+
+    var value = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    value.insert(key, data_page) catch |err| return switch (err) {
+        error.Duplicate => STATUS_DUPLICATE,
+        error.IndexFull => STATUS_INDEX_FULL,
+        error.CorruptIndex => STATUS_FAILURE,
+        error.NotFound => STATUS_FAILURE,
+    };
+    const encoded = value.encode();
+    pager.stage(index_page, &encoded) catch return STATUS_FAILURE;
+    return STATUS_OK;
 }
+
+pub export fn noesql_zig_index_delete(
+    handle: ?*anyopaque,
+    index_page: u32,
+    key: i64,
+) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    if (!indexPageValid(index_page)) return STATUS_INVALID;
+
+    var value = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    value.delete(key) catch |err| return switch (err) {
+        error.NotFound => STATUS_NOT_FOUND,
+        error.CorruptIndex => STATUS_FAILURE,
+        error.Duplicate => STATUS_FAILURE,
+        error.IndexFull => STATUS_FAILURE,
+    };
+    const encoded = value.encode();
+    pager.stage(index_page, &encoded) catch return STATUS_FAILURE;
+    return STATUS_OK;
 }
+
+pub export fn noesql_zig_index_range(
+    handle: ?*anyopaque,
+    index_page: u32,
+    minimum: i64,
+    maximum: i64,
+    keys: ?[*]i64,
+    pages: ?[*]u32,
+    capacity: usize,
+    written: ?*usize,
+) i32 {
+    const pager = cast(handle) orelse return STATUS_INVALID;
+    const out_len = written orelse return STATUS_INVALID;
+    out_len.* = 0;
+    if (!indexPageValid(index_page)) return STATUS_INVALID;
+
+    const value = indexRead(pager, index_page) catch return STATUS_FAILURE;
+    const items = value.range(minimum, maximum);
+    out_len.* = items.len;
+    if (capacity < items.len) return STATUS_BUFFER_TOO_SMALL;
+    if (items.len == 0) return STATUS_OK;
+
     const output_keys = keys orelse return STATUS_INVALID;
     const output_pages = pages orelse return STATUS_INVALID;
     for (items, 0..) |item, i| {
@@ -135,7 +214,7 @@ fn putLittle32(bytes: []u8, value: u32) void {
 pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8, size: usize) i32 {
     const pager = cast(handle) orelse return STATUS_INVALID;
     const source_ptr = input orelse return STATUS_INVALID;
-    if (size == 0) return STATUS_INVALID;
+    if (size == 0 or size > (storage.MAX_TX_PAGES - 1) * storage.PAGE_BYTES) return STATUS_INVALID;
     const count = (size + storage.PAGE_BYTES - 1) / storage.PAGE_BYTES;
     if (count == 0 or count >= storage.MAX_TX_PAGES) return STATUS_INVALID;
 
@@ -313,17 +392,4 @@ test "snapshot ABI atomically persists and reloads Rust-owned payload bytes" {
     written = 0;
     try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &output, output.len, &written));
     try std.testing.expect(std.mem.eql(u8, payload, output[0..written]));
-}
-// Stub replacement logic
-pub export fn noesql_zig_index_find(handle: ?*anyopaque, index_page: u32, key: i64, out_page: ?*u32) i32 {
-    _ = handle; _ = index_page; _ = key; _ = out_page; return -1;
-}
-pub export fn noesql_zig_index_insert(handle: ?*anyopaque, index_page: u32, key: i64, data_page: u32) i32 {
-    _ = handle; _ = index_page; _ = key; _ = data_page; return -1;
-}
-pub export fn noesql_zig_index_delete(handle: ?*anyopaque, index_page: u32, key: i64) i32 {
-    _ = handle; _ = index_page; _ = key; return -1;
-}
-pub export fn noesql_zig_index_range(handle: ?*anyopaque, index_page: u32, minimum: i64, maximum: i64, keys: ?[*]i64, pages: ?[*]u32, capacity: usize, written: ?*usize) i32 {
-    _ = handle; _ = index_page; _ = minimum; _ = maximum; _ = keys; _ = pages; _ = capacity; _ = written; return -1;
 }

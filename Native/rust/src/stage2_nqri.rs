@@ -9,7 +9,8 @@ const ABI_VERSION: u32 = 2;
 const PAGE_BYTES: usize = 4096;
 const STATUS_OK: i32 = 0;
 const STATUS_NOT_FOUND: i32 = 1;
-const MAGIC: &[u8; 8] = b"NQS20001";
+const MAGIC: &[u8; 8] = b"NQNR0001";
+const STORE_MAGIC: &[u8; 8] = b"NQRO0001";
 
 unsafe extern "C" {
     fn noesql_zig_page_open(version: u32, path: *const c_char, output: *mut *mut c_void) -> i32;
@@ -76,6 +77,9 @@ fn decode_page(page: &[u8; PAGE_BYTES]) -> Result<Option<BoolRow>, Error> {
     if page.iter().all(|byte| *byte == 0) { return Ok(None); }
     if &page[0..8] != MAGIC { return Err(Error::Codec("invalid Stage-2 row page magic".into())); }
     let id = i64::from_le_bytes(page[8..16].try_into().map_err(|_| Error::Codec("bad row id".into()))?);
+    if page[17..].iter().any(|byte| *byte != 0) {
+        return Err(Error::Codec("nonzero Stage-2 row padding".into()));
+    }
     match page[16] {
         0 => Ok(Some(BoolRow { id, enabled: false })),
         1 => Ok(Some(BoolRow { id, enabled: true })),
@@ -103,7 +107,16 @@ fn read_row(pager: &Pager, page_id: u32) -> Result<Option<BoolRow>, Error> {
     }
 }
 
-fn commit_row(pager: &Pager, page_id: u32, row: Option<BoolRow>) -> Result<(), Error> {
+fn commit_row(pager: &Pager, page_id: u32, row: Option<BoolRow>, marker_present: bool) -> Result<(), Error> {
+    if !marker_present {
+        let mut header = [0u8; PAGE_BYTES];
+        header[..8].copy_from_slice(STORE_MAGIC);
+        let status = unsafe { noesql_zig_page_stage(pager.ptr(), 0, header.as_ptr(), header.len()) };
+        if status != STATUS_OK {
+            unsafe { noesql_zig_page_rollback(pager.ptr()) };
+            return Err(Error::Provider(status));
+        }
+    }
     let page = encode_page(row);
     let staged = unsafe { noesql_zig_page_stage(pager.ptr(), page_id, page.as_ptr(), page.len()) };
     if staged != STATUS_OK {
@@ -129,6 +142,15 @@ fn execute(
     validate_database_path(path)?;
     if page_id == 0 || page_id >= 256 { return Err(Error::Provider(-211)); }
     let pager = Pager::open(path)?;
+    let mut header = [0u8; PAGE_BYTES];
+    let marker_present = match unsafe {
+        noesql_zig_page_get(pager.ptr(), 0, header.as_mut_ptr(), header.len())
+    } {
+        STATUS_NOT_FOUND => false,
+        STATUS_OK if &header[..8] == STORE_MAGIC && header[8..].iter().all(|byte| *byte == 0) => true,
+        STATUS_OK => return Err(Error::Codec("database is not a Noqeri raw-row store".into())),
+        other => return Err(Error::Provider(other)),
+    };
     let current = read_row(&pager, page_id)?;
     let result = runtime.invoke([
         operation,
@@ -148,7 +170,7 @@ fn execute(
         },
         2 => match result {
             200 | 201 => {
-                commit_row(&pager, page_id, Some(BoolRow { id: row_id, enabled: result == 201 }))?;
+                commit_row(&pager, page_id, Some(BoolRow { id: row_id, enabled: result == 201 }), marker_present)?;
                 Ok(None)
             }
             210 => Err(Error::Provider(210)),
@@ -156,7 +178,7 @@ fn execute(
         },
         3 => match result {
             300 | 301 => {
-                commit_row(&pager, page_id, Some(BoolRow { id: row_id, enabled: result == 301 }))?;
+                commit_row(&pager, page_id, Some(BoolRow { id: row_id, enabled: result == 301 }), marker_present)?;
                 Ok(None)
             }
             310 => Err(Error::Provider(310)),
@@ -164,7 +186,7 @@ fn execute(
         },
         4 => match result {
             400 => {
-                commit_row(&pager, page_id, None)?;
+                commit_row(&pager, page_id, None, marker_present)?;
                 Ok(None)
             }
             410 => Err(Error::Provider(410)),

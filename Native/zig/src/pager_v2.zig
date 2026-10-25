@@ -32,8 +32,10 @@ const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 
 pub const PAGE_BYTES: usize = 4096;
-pub const MAX_PAGES: usize = 65536;
-pub const MAX_TX_PAGES: usize = 1024;
+// NQDB0002 header stores exactly 256 page-presence bits in bytes 24..56.
+// Do not increase this without a versioned on-disk format migration.
+pub const MAX_PAGES: usize = 256;
+pub const MAX_TX_PAGES: usize = 256;
 pub const MAX_WAL_BYTES: usize = 64 * 1024 * 1024;
 const FRAME: usize = 4 + PAGE_BYTES;
 const TX_HEADER: usize = 24;
@@ -215,7 +217,6 @@ pub const Pager = struct {
     pub fn rollback(self: *Pager) void { self.pending_count = 0; }
     pub fn commit(self: *Pager) Error!void {
         if (self.poisoned) return error.Io;
-        if (page.len != PAGE_BYTES) return error.InvalidHeader;
         if (self.pending_count == 0) return error.EmptyTransaction;
         const count = self.pending_count;
         const length = TX_HEADER + count * FRAME + TX_TRAILER;
@@ -352,7 +353,6 @@ pub const Pager = struct {
     }
     pub fn checkpoint(self: *Pager) Error!void {
         if (self.poisoned) return error.Io;
-        if (page.len != PAGE_BYTES) return error.InvalidHeader;
         if (self.pending_count != 0) return error.TooManyMutations;
         errdefer self.poisoned = true;
         var tmp_buf: [4096]u8 = undefined;
@@ -583,4 +583,35 @@ test "same generation checksum-valid but inconsistent WAL is rejected" {
     try durable(fd);
     _ = c.close(fd);
     try std.testing.expectError(error.CorruptWal, Pager.open(a, path));
+}
+
+test "NQDB0002 bitmap persists last addressable page and rejects overflow" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "bitmap-boundary");
+    defer allocator.free(path);
+    var db_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &db_buf);
+    const wal = try pathZ(path, ".wal", &wal_buf);
+    const lock = try pathZ(path, ".lck", &lock_buf);
+    defer {
+        _ = c.unlink(data.ptr);
+        _ = c.unlink(wal.ptr);
+        _ = c.unlink(lock.ptr);
+    }
+
+    const store = try Pager.open(allocator, path);
+    var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+    page[0] = 237;
+    try std.testing.expectError(error.TooManyPages, store.stage(@intCast(MAX_PAGES), &page));
+    try store.stage(@intCast(MAX_PAGES - 1), &page);
+    try store.commit();
+    try store.checkpoint();
+    store.close();
+
+    const reopened = try Pager.open(allocator, path);
+    defer reopened.close();
+    try std.testing.expectEqual(@as(u8, 237), reopened.read(@intCast(MAX_PAGES - 1)).?[0]);
+    try std.testing.expect(reopened.read(@intCast(MAX_PAGES)) == null);
 }

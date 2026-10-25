@@ -1,3 +1,5 @@
+> **Historical document.** This file describes an earlier C++/legacy migration stage and is retained only for engineering history. The C/C++ implementation it references has been removed from NoeSQL. The current source architecture is **Noqeri + Rust + Zig**. See `README.md`, `Doc/NOQERI_RUST_ZIG_INTEGRATION.md`, and `Doc/NOESQL_NATIVE_MIGRATION_PARITY.md` for current build and qualification guidance.
+
 # NoeSQL 0.7.5 release readiness
 
 Status: **0.7.5-rc.2, NOT STABLE and NOT production ready** (18 October 2026).
