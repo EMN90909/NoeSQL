@@ -34,7 +34,7 @@ fn decode_row(page: &[u8; PAGE_BYTES]) -> Result<Option<Row>, Error> {
     if &page[..MAGIC.len()] != MAGIC.as_slice() {
         return Err(Error::Provider(-2));
     }
-    if page[16] > 1 {
+    if page[16] > 1 || page[17..].iter().any(|byte| *byte != 0) {
         return Err(Error::Provider(-2));
     }
 
@@ -195,5 +195,11 @@ mod tests {
         let mut bad = page;
         bad[0] = b'X';
         assert!(decode_row(&bad).is_err());
+        let mut bad_padding = page;
+        bad_padding[PAGE_BYTES - 1] = 42;
+        assert!(decode_row(&bad_padding).is_err());
+        let mut bad_flag = page;
+        bad_flag[16] = 2;
+        assert!(decode_row(&bad_flag).is_err());
     }
 }
