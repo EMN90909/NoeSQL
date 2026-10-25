@@ -1,8 +1,8 @@
 CXX ?= c++
 AR ?= ar
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-cpp no-js clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust no-js clean
 
-test: no-js test-zig test-rust test-cpp
+test: no-js test-zig test-rust
 
 no-js:
 	@set -eu; found=$$(find . 		-path './.git' -prune -o 		-path './.ci-noqeri' -prune -o 		-path './.ci-noqeri-build' -prune -o 		-type f \( -name '*.js' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.jsx' \) -print -quit); 	if [ -n "$$found" ]; then echo "JavaScript file remains: $$found" >&2; exit 1; fi
@@ -13,13 +13,10 @@ test-zig:
 test-rust:
 	cargo test --manifest-path Native/rust/Cargo.toml --all-targets
 
-test-cpp:
-	$(MAKE) -C Native/cpp test
 
 native:
 	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
 	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" 		cargo build --release --manifest-path Native/rust/Cargo.toml --features zig-pager
-	$(MAKE) -C Native/cpp native-cli
 
 stage2-chain: no-js
 	@test -n "$(NOQERI_REPO)" || (echo "Set NOQERI_REPO=/absolute/path/to/Noqeri" >&2; exit 2)
@@ -43,4 +40,3 @@ native-chain: no-js
 
 clean:
 	rm -rf zig-out .zig-cache Native/zig/zig-out Native/zig/.zig-cache Native/rust/target Native/rust/native-lib Native/rust/native-stage2
-	$(MAKE) -C Native/cpp clean
