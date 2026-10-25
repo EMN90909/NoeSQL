@@ -97,6 +97,15 @@ fn execute(
         if &header[..8] != STORE_MAGIC.as_slice() || header[8..].iter().any(|b| *b != 0) {
             return Err(Error::Codec("database is not a Noqeri raw-row store".into()));
         }
+    } else {
+        // Empty page zero is allowed only for an actually empty database.
+        // Otherwise a legacy/unmarked store could appear empty to read
+        // operations and be silently adopted on the first mutation.
+        for candidate in 1..=255 {
+            if pager.read_page(candidate)?.is_some() {
+                return Err(Error::Codec("unmarked nonempty database is not a raw-row store".into()));
+            }
+        }
     }
     let current = match pager.read_page(page_id)? {
         Some(page) => decode_row(&page)?,
