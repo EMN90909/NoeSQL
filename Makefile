@@ -1,8 +1,8 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress no-js no-c-family clean
 
-test: no-js no-c-family test-zig test-rust
+test: no-js no-c-family test-zig test-rust test-rust-zig
 
 no-js:
 	@set -eu; found=$$(find . \
@@ -24,7 +24,20 @@ test-zig:
 	zig build --build-file Native/zig/build.zig test
 
 test-rust:
-	cargo test --manifest-path Native/rust/Cargo.toml --all-targets
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets
+
+test-rust-zig:
+	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
+		cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager
+
+# Three independent Rust↔Zig executions; the Zig ABI test binary itself
+# exercises 96 write/reopen/checkpoint cycles and corruption rejection cases.
+stress: no-js no-c-family
+	@set -eu; for iteration in 1 2 3; do \
+		echo "NoeSQL durability stress pass $iteration / 3"; \
+		$(MAKE) test-zig test-rust-zig; \
+	done
 
 native:
 	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
