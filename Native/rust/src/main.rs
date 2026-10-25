@@ -18,8 +18,16 @@ fn fail(error: impl std::fmt::Display) -> ! {
 fn run_script(database_path: &str, source: &str) {
     let path = Path::new(database_path);
     let mut database = noesql_runtime::zig_pager::load_or_default(path).unwrap_or_else(|error| fail(error));
+    // Reads must not add WAL transactions or rewrite snapshots. This also
+    // avoids consuming the finite WAL budget merely by querying the DB.
+    // Compare the canonical payload, not just the affected-row count: DDL
+    // can change schema without affecting any rows.
+    let original = noesql_runtime::codec::encode(&database).unwrap_or_else(|error| fail(error));
     let report = database.execute(source, &Params::new()).unwrap_or_else(|error| fail(error));
-    noesql_runtime::zig_pager::save(path, &database).unwrap_or_else(|error| fail(error));
+    let updated = noesql_runtime::codec::encode(&database).unwrap_or_else(|error| fail(error));
+    if updated != original {
+        noesql_runtime::zig_pager::save(path, &database).unwrap_or_else(|error| fail(error));
+    }
     if !report.rows.is_empty() {
         println!("{}", rows_json(&report.rows));
     } else {
