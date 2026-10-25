@@ -13,9 +13,8 @@ comptime {
 }
 const std = @import("std");
 
-// This Zig module replaces the historical C++ *dispatch bridge* only.
-// Query parsing and execution belong to the Noqeri-compiled callback.
-// Do not confuse this with the separate POSIX C++ page-store prototype.
+// Versioned Zig query-dispatch ABI. Query parsing and database semantics belong
+// to Noqeri; Rust owns the trusted host/runtime orchestration.
 pub const ABI_VERSION: u32 = 1;
 pub const MAX_SOURCE_BYTES: usize = 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
@@ -51,7 +50,6 @@ pub export fn noesql_zig_execute(
     output_capacity: usize,
     output_length: ?*usize,
 ) i32 {
-    // Reset early so callers never consume stale lengths following an error.
     const written = output_length orelse return INVALID_ARGUMENT;
     written.* = 0;
     const valid = noesql_zig_validate_engine(engine);
@@ -88,12 +86,13 @@ fn oversize(_: ?[*]const u8, _: usize, _: ?[*]u8, capacity: usize, written: ?*us
     written.?.* = capacity + 1;
     return 0;
 }
+
 fn fails(_: ?[*]const u8, _: usize, _: ?[*]u8, _: usize, written: ?*usize) callconv(.c) i32 {
     written.?.* = 99;
     return -42;
 }
 
-test "Zig C ABI validates callbacks and compatible versions" {
+test "Zig ABI validates callbacks and compatible versions" {
     const valid = EngineV1{ .abi_version = ABI_VERSION, .execute = echo };
     const invalid = EngineV1{ .abi_version = 2, .execute = echo };
     const missing = EngineV1{ .abi_version = ABI_VERSION, .execute = null };
