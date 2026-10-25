@@ -285,12 +285,14 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
     // *same* WAL transaction as the new manifest. The raw pager has no
     // page-free primitive yet, so stage canonical zero pages for the tail.
     // Maximum mutation count remains bounded by 256 physical pages.
-    for (count + 1..previous_count + 1) |page_id| {
-        const zero = [_]u8{0} ** storage.PAGE_BYTES;
-        pager.stage(@intCast(page_id), &zero) catch {
-            pager.rollback();
-            return STATUS_FAILURE;
-        };
+    if (previous_count > count) {
+        for (count + 1..previous_count + 1) |page_id| {
+            const zero = [_]u8{0} ** storage.PAGE_BYTES;
+            pager.stage(@intCast(page_id), &zero) catch {
+                pager.rollback();
+                return STATUS_FAILURE;
+            };
+        }
     }
 
     pager.commit() catch {
