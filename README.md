@@ -199,6 +199,14 @@ build.zig        top-level native build/test orchestration
 Makefile         native developer entrypoints and stack guards
 ```
 
+## Store format and safety boundaries
+
+The current `NQDB0002` header has a 32-byte active-page bitmap: only **256 physical pages (0..255)** are representable. This branch enforces the actual format limit rather than permitting writes that overflow the header. The bounded snapshot interface supports at most 255 data pages plus the page-zero manifest.
+
+The native Noqeri scalar-row fixture and the Stage-2 NQRI fixture use the same `NQNR0001` row encoding and `NQRO0001` page-zero store marker. The Rust relational snapshot path uses its distinct `NQRS0001` page-zero manifest. Both sides must **reject rather than overwrite** an incompatible store type. Earlier experimental Stage-2 `NQS20001` pages require an explicit migration and are not silently reinterpreted.
+
+This repository contains source-level fixes and executable tests for cold reopening, WAL corruption rejection, index mutations, format bounds, and native/Stage-2 cross-mode behavior, but passing source review is **not** a replacement for a successful test run. The full Noqeri + Rust + Zig stack must execute on a trusted Linux x86-64 runner before merge or production deployment.
+
 ## Release qualification
 
 The source migration is complete, but production qualification is not. Remaining gates include:

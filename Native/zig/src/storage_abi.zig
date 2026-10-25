@@ -214,7 +214,7 @@ fn putLittle32(bytes: []u8, value: u32) void {
 pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8, size: usize) i32 {
     const pager = cast(handle) orelse return STATUS_INVALID;
     const source_ptr = input orelse return STATUS_INVALID;
-    if (size == 0) return STATUS_INVALID;
+    if (size == 0 or size > (storage.MAX_TX_PAGES - 1) * storage.PAGE_BYTES) return STATUS_INVALID;
     const count = (size + storage.PAGE_BYTES - 1) / storage.PAGE_BYTES;
     if (count == 0 or count >= storage.MAX_TX_PAGES) return STATUS_INVALID;
 

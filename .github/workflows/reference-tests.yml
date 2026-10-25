@@ -5,17 +5,27 @@ on:
     branches: [main, refactor/no-cpp-noqeri-rust-zig]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: noesql-native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   native:
     name: Noqeri + Rust + Zig
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install toolchain dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake libssl-dev
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -25,73 +35,110 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Install compiler/bootstrap dependencies
+      - name: Record toolchain provenance
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev
+          zig version
+          rustc --version
+          cargo --version
+          cc --version
+          cmake --version
 
-      - name: Enforce NoeSQL source stack
+      - name: Enforce source stack
         run: make no-js no-c-family
 
-      - name: Run Rust runtime tests
-        run: cargo test --manifest-path Native/rust/Cargo.toml --all-targets
+      - name: Rust reference/runtime tests
+        run: cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets
 
-      - name: Run Zig pager WAL and index tests
-        run: zig build --build-file Native/zig/build.zig test
+      - name: Zig WAL/page/index corruption and recovery tests
+        run: zig build --build-file Native/zig/build.zig test -Doptimize=Debug
 
-      - name: Build release-safe Zig pager
+      - name: Zig ReleaseSafe library build
         run: zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
 
-      - name: Checkout Noqeri compiler
+      - name: Rust -> Zig snapshot durability tests
+        env:
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+        run: cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager
+
+      - name: Checkout pinned Noqeri compiler source
         uses: actions/checkout@v4
         with:
           repository: EMN90909/Noqeri
-          ref: main
+          ref: 4842fa34dc06afe39b4ba216b52c8ec7bb576984
           path: .ci-noqeri
+          persist-credentials: false
 
-      - name: Build Noqeri Stage-0 AOT compiler and NQRI VM
+      - name: Build Stage-0 compiler and NQRI VM
         run: |
-          cmake -S .ci-noqeri -B .ci-noqeri-build -DCMAKE_BUILD_TYPE=Release
-          cmake --build .ci-noqeri-build --target noqeri noqeri-nqri -j2
+          cmake -S .ci-noqeri -B .ci-noqeri-build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNOQERI_GRAPHICS_PORTABLE_BUILD=ON
+          cmake --build .ci-noqeri-build --target noqeri noqeri-nqri --parallel 2
           .ci-noqeri-build/noqeri version
           .ci-noqeri-build/noqeri-nqri --selftest
 
-      - name: Reproduce Noqeri Stage-2 and Stage-3 NQRI compiler
+      - name: Verify Stage-2/Stage-3 compiler bootstrap
         run: |
-          test "$(sha256sum .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri | awk '{print $1}')" = "$(awk '{print $1}' .ci-noqeri/Compiler/selfhost/trusted-stage1.sha256)"
-          .ci-noqeri-build/noqeri-nqri compile-manifest             .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage2.nqri 3
-          .ci-noqeri-build/noqeri-nqri compile-manifest             /tmp/noqeri-stage2.nqri             .ci-noqeri             .ci-noqeri/Compiler/selfhost/stage2-sources.txt             /tmp/noqeri-stage3.nqri 3
+          test "$(sha256sum .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri | awk '{print $1}')" = \
+            "$(awk '{print $1}' .ci-noqeri/Compiler/selfhost/trusted-stage1.sha256)"
+          .ci-noqeri-build/noqeri-nqri compile-manifest \
+            .ci-noqeri/Compiler/selfhost/trusted-stage1.nqri \
+            .ci-noqeri \
+            .ci-noqeri/Compiler/selfhost/stage2-sources.txt \
+            /tmp/noqeri-stage2.nqri 3
+          .ci-noqeri-build/noqeri-nqri compile-manifest \
+            /tmp/noqeri-stage2.nqri \
+            .ci-noqeri \
+            .ci-noqeri/Compiler/selfhost/stage2-sources.txt \
+            /tmp/noqeri-stage3.nqri 3
           .ci-noqeri-build/noqeri-nqri diff /tmp/noqeri-stage2.nqri /tmp/noqeri-stage3.nqri
           .ci-noqeri-build/noqeri-nqri has-export /tmp/noqeri-stage2.nqri stage2CompileToNqri
 
-      - name: Compile NoeSQL Stage-2 NQRI executor
+      - name: Compile NoeSQL Stage-2 semantic module
         run: |
           mkdir -p Native/rust/native-stage2
-          .ci-noqeri-build/noqeri-nqri compile             /tmp/noqeri-stage2.nqri             Database/noesql_stage2_bridge.noqeri             Native/rust/native-stage2/noesql_stage2_bridge.nqri 3
-          .ci-noqeri-build/noqeri-nqri has-export             Native/rust/native-stage2/noesql_stage2_bridge.nqri             noesqlStage2BoolRow
+          .ci-noqeri-build/noqeri-nqri compile \
+            /tmp/noqeri-stage2.nqri \
+            Database/noesql_stage2_bridge.noqeri \
+            Native/rust/native-stage2/noesql_stage2_bridge.nqri 3
+          .ci-noqeri-build/noqeri-nqri has-export \
+            Native/rust/native-stage2/noesql_stage2_bridge.nqri \
+            noesqlStage2BoolRow
 
-      - name: Execute Rust to Stage-2 NQRI to Zig storage chain
+      - name: Execute Rust -> Stage-2 NQRI -> Zig
         env:
           NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
           NOESQL_NQRI_VM: ${{ github.workspace }}/.ci-noqeri-build/noqeri-nqri
           NOESQL_STAGE2_MODULE: ${{ github.workspace }}/Native/rust/native-stage2/noesql_stage2_bridge.nqri
         run: |
-          cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features stage2-nqri
-          cargo run --manifest-path Native/rust/Cargo.toml --features stage2-nqri --bin stage2_chain_smoke
+          cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features stage2-nqri
+          cargo run --locked --manifest-path Native/rust/Cargo.toml --features stage2-nqri --bin stage2_chain_smoke
 
-      - name: Compile native Noqeri bridge
+      - name: Build native Noqeri AOT archive
         run: |
-          rm -rf Native/rust/native-lib
-          cargo run --manifest-path Native/rust/Cargo.toml --bin build_native --             "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri"             "$GITHUB_WORKSPACE/Database/noesql_native_bridge.noqeri"             "$GITHUB_WORKSPACE/Native/rust/native-lib"
+          cargo run --locked --manifest-path Native/rust/Cargo.toml --bin build_native -- \
+            "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri" \
+            "$GITHUB_WORKSPACE/Database/noesql_native_bridge.noqeri" \
+            "$GITHUB_WORKSPACE/Native/rust/native-lib"
           test -s Native/rust/native-lib/libnoesql_noqeri.a
 
-      - name: Link Rust to native Noqeri and Zig
+      - name: Execute Rust -> Noqeri AOT -> Zig
         env:
           NOESQL_NOQERI_LIB_DIR: ${{ github.workspace }}/Native/rust/native-lib
           NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
         run: |
-          cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features noqeri-native
-          cargo run --manifest-path Native/rust/Cargo.toml --features noqeri-native --bin native_chain_smoke
+          cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features noqeri-native
+          cargo run --locked --manifest-path Native/rust/Cargo.toml --features noqeri-native --bin native_chain_smoke
 
-      - name: Verify source stack did not regress
+      - name: Cross-mode native/Stage-2 compatibility test
+        env:
+          NOESQL_NOQERI_LIB_DIR: ${{ github.workspace }}/Native/rust/native-lib
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+          NOESQL_NQRI_VM: ${{ github.workspace }}/.ci-noqeri-build/noqeri-nqri
+          NOESQL_STAGE2_MODULE: ${{ github.workspace }}/Native/rust/native-stage2/noesql_stage2_bridge.nqri
+        run: |
+          cargo test --locked --manifest-path Native/rust/Cargo.toml \
+            --test native_cross_mode --features noqeri-native,stage2-nqri
+
+      - name: Final repository source contract
         run: make no-js no-c-family

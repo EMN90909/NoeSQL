@@ -3,6 +3,7 @@ use crate::{validate_database_path, Error};
 use std::path::Path;
 
 const MAGIC: [u8; 8] = *b"NQNR0001";
+const STORE_MAGIC: [u8; 8] = *b"NQRO0001";
 
 unsafe extern "C" {
     fn noesqlNativeBridgeVersion() -> u32;
@@ -57,6 +58,14 @@ fn encode_row(row: Option<Row>) -> [u8; PAGE_BYTES] {
 
 fn stage_and_commit(pager: &Pager, page_id: u32, row: Option<Row>) -> Result<(), Error> {
     let page = encode_row(row);
+    if pager.read_page(0)?.is_none() {
+        let mut marker = [0u8; PAGE_BYTES];
+        marker[..STORE_MAGIC.len()].copy_from_slice(&STORE_MAGIC);
+        if let Err(error) = pager.stage_page(0, &marker) {
+            let _ = pager.rollback();
+            return Err(error);
+        }
+    }
     if let Err(error) = pager.stage_page(page_id, &page) {
         let _ = pager.rollback();
         return Err(error);
@@ -84,6 +93,11 @@ fn execute(
     }
 
     let pager = Pager::open(path)?;
+    if let Some(header) = pager.read_page(0)? {
+        if header[..8] != STORE_MAGIC || header[8..].iter().any(|b| *b != 0) {
+            return Err(Error::Codec("database is not a Noqeri raw-row store".into()));
+        }
+    }
     let current = match pager.read_page(page_id)? {
         Some(page) => decode_row(&page)?,
         None => None,

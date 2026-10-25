@@ -20,6 +20,7 @@ unsafe extern "C" {
     fn noesql_zig_page_commit(handle: *mut c_void) -> i32;
     fn noesql_zig_page_rollback(handle: *mut c_void) -> i32;
     fn noesql_zig_page_get(handle: *mut c_void, id: u32, output: *mut u8, capacity: usize) -> i32;
+    fn noesql_zig_page_validate_reference_state(handle: *mut c_void) -> i32;
     fn noesql_zig_page_checkpoint(handle: *mut c_void) -> i32;
     fn noesql_zig_snapshot_write(handle: *mut c_void, input: *const u8, size: usize) -> i32;
     fn noesql_zig_snapshot_read(handle: *mut c_void, output: *mut u8, capacity: usize, written: *mut usize) -> i32;
