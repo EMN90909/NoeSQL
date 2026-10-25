@@ -2,20 +2,21 @@
 
 NoeSQL is Noethric's native database language and storage engine project for Noqeri.
 
-> Development status: native migration in progress. The NoeSQL repository is JavaScript-free. Rust now owns the application/reference runtime, Zig owns durable page/WAL/index storage, Noqeri owns typed database semantics and native execution modules, and C++ remains a compatibility kernel while migration qualification is completed.
+> Development status: the NoeSQL source stack is now **Noqeri + Rust + Zig**. C and C++ source have been removed from this repository. Noqeri owns database semantics and native execution modules, Rust owns the safe host/runtime and ABI orchestration, and Zig owns durable page/WAL/index storage.
 
 ## Native stack
 
-- **Noqeri**: typed IR, policy/auth/limits, row encoding, relational executor, and native Zig-facing database modules in `Database/*.noqeri`.
-- **Rust**: lexer/parser, general relational runtime, CLI, persistence codec, session host, native-build tooling, and safe FFI wrappers in `Native/rust/`.
-- **Zig 0.15.2**: `NQDB0002` pages, `NQTX0002` WAL, index implementation, atomic snapshot ABI, and low-level storage tests in `Native/zig/`.
-- **C++17**: compatibility page-store/ABI and durability tests in `Native/cpp/`.
+- **Noqeri**: typed IR, policy/auth/limits, row semantics, relational executor modules, Stage-2 qualification code, and the native scalar decision bridge in `Database/*.noqeri`.
+- **Rust**: lexer/parser, general relational runtime, CLI, persistence codec, session host, native build tooling, direct native-Noqeri calls, and safe Zig FFI wrappers in `Native/rust/`.
+- **Zig 0.15.2**: `NQDB0002` pages, `NQTX0002` WAL, indexes, snapshot ABI, recovery, locking, and low-level storage tests in `Native/zig/`.
 
-There is **no JavaScript runtime, Node test suite, npm package, or JavaScript source file in NoeSQL**. `make no-js` fails if `.js`, `.mjs`, `.cjs`, or `.jsx` returns.
+There is **no JavaScript, C, or C++ source in NoeSQL**. `make no-js` and `make no-c-family` fail closed if those languages return to the repository.
 
-## What replaced the old JavaScript layer
+The current Noqeri Stage-0 compiler is still built from the separate Noqeri repository during CI until Noqeri completes native self-hosting. That bootstrap implementation is a compiler toolchain dependency outside NoeSQL, not part of NoeSQL's source stack.
 
-The Rust runtime now implements:
+## Runtime ownership
+
+The Rust runtime implements:
 
 - lexer/parser validation and source limits
 - typed values and schemas
@@ -36,47 +37,43 @@ The Rust runtime now implements:
 - bounded binary snapshot encoding/decoding
 - CLI execution and query commands
 
-Durability is not implemented by serializing files directly from Rust. Rust sends its bounded snapshot through the Zig pager ABI, which owns WAL ordering, checksummed pages, recovery, checkpointing, and file locking.
+Durability is not implemented by serializing files directly from Rust. Rust sends bounded snapshots and raw page operations through Zig's exported ABI. Zig owns WAL ordering, checksummed pages, recovery, checkpointing, and file locking.
 
-## Rust -> Noqeri -> Zig native chain
+## Rust -> Noqeri -> Rust -> Zig native chain
 
-Noqeri's current Stage-0 C++ compiler has a real Linux x86-64 AOT backend. PR #12 uses that backend rather than pretending the self-hosted NQRI Stage-2 compiler is already native.
+Noqeri's current Stage-0 compiler can emit Linux x86-64 machine code. NoeSQL uses that backend only for a deliberately narrow scalar boundary that is already qualified by the existing Noqeri backend.
 
 The native chain is:
 
 ```text
-Rust host
-   |
-   | C ABI
-   v
-Noqeri AOT bridge
-   |
-   | typed NoeQueryContext / NoeIrPlan
-   v
-Noqeri executor
-   |
-   | pager ABI
-   v
+Rust host/runtime
+      |
+      | scalar native call
+      v
+Noqeri AOT semantic bridge
+      |
+      | CRUD decision/result code
+      v
+Rust pager orchestration
+      |
+      | Zig exported ABI
+      v
 Zig NQDB0002 + NQTX0002 storage
 ```
 
-The Noqeri executor and relational bridge use request-record pointers so they remain compatible with the current x86-64 backend's six-register-argument limit.
+This removes the old C++ compatibility shim. Noqeri decides database semantics, Rust owns pointer/handle validation and orchestration, and Zig owns durable bytes.
 
-To build and execute this chain locally:
+Build and execute the direct native chain:
 
 ```sh
 make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
 ```
 
-That builds Zig storage, uses the Rust `build_native` helper to compile `Database/noesql_native_bridge.noqeri` into `libnoesql_noqeri.a`, links it into Rust, and executes native CRUD through Rust -> Noqeri -> Zig.
-
-This proves a native machine-code integration route without claiming that Noqeri's self-hosted Stage-2 compiler is native.
+The build compiles `Database/noesql_native_bridge.noqeri` into `libnoesql_noqeri.a`, links it with the Rust runtime and Zig pager, then executes native CRUD through the complete chain.
 
 ### Verified Stage-2 NQRI chain
 
-PR #12 also consumes Noqeri's actual self-hosted Stage-2 compiler path. It does not rename Stage-0 as Stage-2.
-
-The qualification chain is:
+NoeSQL also consumes Noqeri's self-hosted Stage-2 NQRI path without pretending it is already a native self-hosted compiler.
 
 ```text
 trusted Stage-1 NQRI
@@ -84,7 +81,6 @@ trusted Stage-1 NQRI
         v
 Stage-2 compiler NQRI
         |
-        | rebuild same source closure
         v
 Stage-3 compiler NQRI
         |
@@ -99,15 +95,13 @@ Rust host executes NQRI semantics
 Zig pager / WAL commit
 ```
 
-Run it locally after building Noqeri's native NQRI VM:
+Run it locally with:
 
 ```sh
 make stage2-chain \
   NOQERI_REPO=/absolute/path/to/Noqeri \
   NOQERI_NQRI_VM=/absolute/path/to/noqeri-nqri
 ```
-
-This gives NoeSQL a real Rust -> Stage-2 NQRI -> Zig execution path. It still does **not** claim native machine-code self-hosting for the Noqeri compiler, because Noqeri's own bootstrap contract explicitly says Stage-2 currently executes as NQRI.
 
 ## Canonical formats
 
@@ -123,29 +117,27 @@ Legacy `.nqd` and `.nqdb` are migration inputs only and must never be silently r
 
 ## Build and test
 
-Requirements:
+Requirements for NoeSQL itself:
 
 - Zig 0.15.2
 - stable Rust + Cargo
-- C++17 compiler
-- CMake
 - GNU Make
-- OpenSSL development headers
-- SQLite development headers for the compatibility benchmark
 
-Core native tests:
+For the direct native Noqeri chain, also provide a built Noqeri compiler plus the system assembler/archive tools used to turn emitted assembly into a static archive. CI currently builds that compiler from the separate Noqeri repository with its bootstrap dependencies.
+
+Core tests:
 
 ```sh
 make test
 ```
 
-Equivalent individual suites:
+Equivalent suites:
 
 ```sh
 cargo test --manifest-path Native/rust/Cargo.toml --all-targets
 zig build --build-file Native/zig/build.zig test
-make -C Native/cpp test
 make no-js
+make no-c-family
 ```
 
 Build the Rust + Zig runtime:
@@ -154,18 +146,10 @@ Build the Rust + Zig runtime:
 zig build native
 ```
 
-Build the direct AOT Rust -> Noqeri -> Zig integration:
+Build the direct AOT Noqeri integration:
 
 ```sh
 make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
-```
-
-Build the verified self-hosted Stage-2 NQRI -> Rust -> Zig integration:
-
-```sh
-make stage2-chain \
-  NOQERI_REPO=/absolute/path/to/Noqeri \
-  NOQERI_NQRI_VM=/absolute/path/to/noqeri-nqri
 ```
 
 ## CLI
@@ -204,29 +188,28 @@ users get name, age where age >= 18 sort name take 10
 
 ```text
 Database/        Noqeri semantic/executor/native bridge modules
-Native/rust/     Rust runtime, parser, codec, CLI, tests, FFI/build tooling
+Native/rust/     Rust runtime, parser, codec, CLI, FFI/build tooling
 Native/zig/      Zig pager, WAL, index, snapshot ABI and tests
-Native/cpp/      C++ compatibility kernel and ABI/durability tests
 Tools/           Zig repository contract tests
 Grammar/         NoeSQL grammar
 tests/           Noqeri native fixtures
-Benchmarks/      native benchmark sources and methodology
+Benchmarks/      native benchmark methodology and Noqeri fixtures
 Doc/             architecture, security and qualification notes
 build.zig        top-level native build/test orchestration
-Makefile         native developer entrypoints
+Makefile         native developer entrypoints and stack guards
 ```
 
 ## Release qualification
 
-The JavaScript migration is no longer the blocker. Remaining gates are native qualification work:
+The source migration is complete, but production qualification is not. Remaining gates include:
 
-1. obtain an executing CI runner and record a green Rust/Noqeri/Zig/C++ run;
-2. expand the current bounded native Noqeri row/page bridge to full general-schema relational execution;
+1. record a green executing Noqeri/Rust/Zig CI run;
+2. expand the bounded native Noqeri semantic bridge toward the full general-schema relational path;
 3. complete concurrency, crash-boundary, migration, fuzz, and differential qualification;
 4. qualify additional platforms before cross-platform claims;
-5. keep the verified Stage-2 NQRI path distinct from the Stage-0 AOT machine-code path, and claim native self-hosted Stage-2 provenance only after Noqeri itself supports native self-hosting.
+5. replace Stage-0 AOT provenance with native self-hosted Stage-2 provenance only after Noqeri itself reaches that milestone.
 
-See `Doc/NOESQL_NATIVE_MIGRATION_PARITY.md` for the exact matrix.
+See `Doc/NOESQL_NATIVE_MIGRATION_PARITY.md` for the current matrix.
 
 ## License
 

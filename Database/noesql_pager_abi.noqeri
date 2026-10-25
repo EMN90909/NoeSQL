@@ -1,8 +1,8 @@
 module noqeri.database.noesql_pager_abi
 
-// Experimental ABI-only declarations. Not a compiled or linked engine.
-// Caller must authorize principals and keep handles behind a trusted host.
-// Exact C ABI: Native/zig/noesql_zig_pages.h
+// Experimental trusted-host pager declarations.
+// The canonical implementation is Native/zig/src/*.zig. Rust mirrors the same
+// scalar ABI in Native/rust/src/zig_pager.rs. No C/C++ header is required.
 extern function noesql_zig_page_open(version: u32, path: string, out: *usize): int
 extern function noesql_zig_page_close(handle: usize): void
 extern function noesql_zig_page_stage(handle: usize, pageId: u32, bytes: *u8, count: usize): int

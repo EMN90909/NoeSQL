@@ -1,0 +1,21 @@
+module noqeri.database.noesql.native_bridge
+import "noesql_stage2_bridge.noqeri"
+
+// Native NoeSQL AOT surface.
+//
+// The imported Stage-2 bridge owns the scalar CRUD decision function
+// noesqlStage2BoolRow(...). Rust owns the ABI-safe host orchestration and
+// forwards durable page mutations to Zig. This keeps database semantics in
+// Noqeri without requiring a C or C++ compatibility shim inside NoeSQL.
+
+export function noesqlNativeBridgeVersion(): u32 {
+    return 2 as u32
+}
+
+export function noesqlNativePagerAbiVersion(): u32 {
+    return 2 as u32
+}
+
+export function noesqlNativePageBytes(): usize {
+    return 4096 as usize
+}
