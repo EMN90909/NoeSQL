@@ -180,7 +180,10 @@ pub export fn noesql_zig_page_validate_reference_state(handle: ?*anyopaque) i32 
     var hasher=std.crypto.hash.sha2.Sha256.init(.{});
     var remaining=length;
     for (0..count) |i| {
-        const page=pager.read(@intCast(i+1)) orelse return STATUS_NOT_FOUND;
+        // Page zero contains a valid manifest; a missing referenced data
+        // page is corruption, not an empty database. Returning NOT_FOUND
+        // here makes Rust load_or_default silently instantiate a fresh DB.
+        const page=pager.read(@intCast(i+1)) orelse return STATUS_FAILURE;
         const used=@min(remaining,storage.PAGE_BYTES);
         hasher.update(page[0..used]);
         for (page[used..]) |byte| {if (byte!=0) return STATUS_FAILURE;}
@@ -189,6 +192,16 @@ pub export fn noesql_zig_page_validate_reference_state(handle: ?*anyopaque) i32 
     var digest:[32]u8=undefined;
     hasher.final(&digest);
     if (!std.mem.eql(u8,manifest[20..52],&digest)) return STATUS_FAILURE;
+    // A prior shorter rewrite must not expose orphaned bytes through the
+    // physical page API. Unexpected nonzero pages are corruption, even when
+    // the manifest payload itself has a valid SHA-256 digest.
+    for (count + 1..storage.MAX_PAGES) |page_id| {
+        if (pager.read(@intCast(page_id))) |tail| {
+            for (tail) |byte| {
+                if (byte != 0) return STATUS_FAILURE;
+            }
+        }
+    }
     return STATUS_OK;
 }
 
@@ -221,11 +234,13 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
     // reference snapshot and permanently lose the original application data.
     // Do not combine a snapshot overwrite with unrelated pending mutations.
     if (pager.pending_count != 0) return STATUS_INVALID;
+    var previous_count: usize = 0;
     if (pager.read(0)) |header| {
         if (!std.mem.eql(u8, header[0..8], "NQRS0001")) return STATUS_INVALID;
         // A correct outer WAL checksum does not prove the logical snapshot is
         // uncorrupted. Never overwrite an invalid manifest/payload digest.
         if (noesql_zig_page_validate_reference_state(handle) != STATUS_OK) return STATUS_FAILURE;
+        previous_count = @intCast(little32(header[12..16]));
     } else {
         // Unmarked pre-migration physical pages are *not* an empty database.
         for (1..storage.MAX_PAGES) |page_id| {
@@ -264,6 +279,18 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
             return STATUS_FAILURE;
         };
         offset += used;
+    }
+
+    // A shorter snapshot must remove old sensitive payload bytes in the
+    // *same* WAL transaction as the new manifest. The raw pager has no
+    // page-free primitive yet, so stage canonical zero pages for the tail.
+    // Maximum mutation count remains bounded by 256 physical pages.
+    for (count + 1..previous_count + 1) |page_id| {
+        const zero = [_]u8{0} ** storage.PAGE_BYTES;
+        pager.stage(@intCast(page_id), &zero) catch {
+            pager.rollback();
+            return STATUS_FAILURE;
+        };
     }
 
     pager.commit() catch {
@@ -514,4 +541,88 @@ test "snapshot ABI repeatedly rewrites and cold-opens WAL before and after check
         noesql_zig_page_close(handle);
         handle = null;
     }
+}
+
+test "incomplete snapshot is corruption and cannot be interpreted as empty" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-missing-snapshot-page-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var dbbuf: [4096]u8 = undefined;
+    var walbuf: [4096]u8 = undefined;
+    var lockbuf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&dbbuf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&walbuf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lockbuf, "{s}.lck", .{path});
+    const libc = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = libc.unlink(data.ptr);
+        _ = libc.unlink(journal.ptr);
+        _ = libc.unlink(mutex.ptr);
+    }
+
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+
+    // A structurally plausible manifest references two pages, but only the
+    // first one is stored. The missing second page must fail closed.
+    var manifest = [_]u8{0} ** storage.PAGE_BYTES;
+    @memcpy(manifest[0..8], "NQRS0001");
+    putLittle32(manifest[8..12], 1);
+    putLittle32(manifest[12..16], 2);
+    putLittle32(manifest[16..20], storage.PAGE_BYTES + 1);
+    const data_page = [_]u8{0} ** storage.PAGE_BYTES;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_stage(handle, 0, &manifest, manifest.len));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_stage(handle, 1, &data_page, data_page.len));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_commit(handle));
+
+    var written: usize = 99;
+    try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_page_validate_reference_state(handle));
+    try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_snapshot_read(handle, null, 0, &written));
+    try std.testing.expectEqual(@as(usize, 0), written);
+    try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_snapshot_write(handle, "x".ptr, 1));
+}
+
+test "shortening a snapshot scrubs stale physical pages atomically" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-shrink-snapshot-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var dbbuf: [4096]u8 = undefined;
+    var walbuf: [4096]u8 = undefined;
+    var lockbuf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&dbbuf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&walbuf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lockbuf, "{s}.lck", .{path});
+    const libc = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = libc.unlink(data.ptr);
+        _ = libc.unlink(journal.ptr);
+        _ = libc.unlink(mutex.ptr);
+    }
+
+    const large: [3 * storage.PAGE_BYTES]u8 = [_]u8{0xab} ** (3 * storage.PAGE_BYTES);
+    const small: []const u8 = "clean";
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, &large, large.len));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, small.ptr, small.len));
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_checkpoint(handle));
+    noesql_zig_page_close(handle);
+    handle = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+
+    var bytes: [storage.PAGE_BYTES]u8 = undefined;
+    for ([_]u32{2, 3}) |page_id| {
+        try std.testing.expectEqual(STATUS_OK, noesql_zig_page_get(handle, page_id, &bytes, bytes.len));
+        for (bytes) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_validate_reference_state(handle));
+    var readback: [8]u8 = undefined;
+    var written: usize = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &readback, readback.len, &written));
+    try std.testing.expectEqual(small.len, written);
+    try std.testing.expect(std.mem.eql(u8, small, readback[0..written]));
 }
