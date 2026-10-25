@@ -10,6 +10,7 @@ default = []
 zig-pager = []
 noqeri-native = ["zig-pager"]
 stage2-nqri = ["zig-pager"]
+sqlite-benchmark = ["zig-pager"]
 
 [lib]
 name = "noesql_runtime"
@@ -30,3 +31,4 @@ unsafe_op_in_unsafe_fn = "deny"
 [[bin]]
 name = "benchmark_compare_sqlite"
 path = "src/bin/benchmark_compare_sqlite.rs"
+required-features = ["sqlite-benchmark"]
