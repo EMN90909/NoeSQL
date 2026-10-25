@@ -18,9 +18,9 @@ jobs:
         with:
           version: 0.15.2
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install C++ dependencies
+      - name: Install native/bootstrap dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev libsqlite3-dev
+          sudo apt-get install -y build-essential libssl-dev
       - name: Execute local native verification
         run: bash scripts/verify-ecosystem-local.sh
