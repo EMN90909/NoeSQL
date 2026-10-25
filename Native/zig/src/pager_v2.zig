@@ -654,3 +654,69 @@ test "checksum-valid snapshot with corrupted reserved header bytes fails closed"
     _ = c.close(fd);
     try std.testing.expectError(error.InvalidHeader, Pager.open(allocator, path));
 }
+
+test "crash after full WAL write replays a complete valid transaction" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "after-wal-write");
+    defer allocator.free(path);
+    var db_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &db_buf);
+    const wal = try pathZ(path, ".wal", &wal_buf);
+    const lock = try pathZ(path, ".lck", &lock_buf);
+    defer {
+        _ = c.unlink(data.ptr);
+        _ = c.unlink(wal.ptr);
+        _ = c.unlink(lock.ptr);
+    }
+
+    const store = try Pager.open(allocator, path);
+    var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+    page[8] = 89;
+    try store.stage(8, &page);
+    store.injectTestFault(.after_wal_write);
+    try std.testing.expectError(error.FaultInjected, store.commit());
+    // No partial data is visible in a handle whose commit failed.
+    try std.testing.expect(store.read(8) == null);
+    try std.testing.expectError(error.Io, store.commit());
+    store.close();
+
+    // Closing the file is not a power-loss simulation. This checks that a
+    // checksum-valid complete journal can be replayed after the writer faults.
+    const recovered = try Pager.open(allocator, path);
+    defer recovered.close();
+    try std.testing.expectEqual(@as(u8, 89), recovered.read(8).?[8]);
+    try std.testing.expectEqual(@as(u64, 1), recovered.generation);
+}
+
+test "checkpoint interruption after rename preserves durable WAL and reopens" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "after-checkpoint-rename");
+    defer allocator.free(path);
+    var db_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &db_buf);
+    const wal = try pathZ(path, ".wal", &wal_buf);
+    const lock = try pathZ(path, ".lck", &lock_buf);
+    defer {
+        _ = c.unlink(data.ptr);
+        _ = c.unlink(wal.ptr);
+        _ = c.unlink(lock.ptr);
+    }
+    const store = try Pager.open(allocator, path);
+    var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+    page[0] = 41;
+    try store.stage(9, &page);
+    try store.commit();
+    store.injectTestFault(.after_checkpoint_rename);
+    try std.testing.expectError(error.FaultInjected, store.checkpoint());
+    store.close();
+
+    const reopened = try Pager.open(allocator, path);
+    defer reopened.close();
+    try std.testing.expectEqual(@as(u8, 41), reopened.read(9).?[0]);
+    try std.testing.expectEqual(@as(u64, 1), reopened.generation);
+    try reopened.checkpoint();
+}
