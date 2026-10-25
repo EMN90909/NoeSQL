@@ -151,6 +151,22 @@ fn execute(
         STATUS_OK => return Err(Error::Codec("database is not a Noqeri raw-row store".into())),
         other => return Err(Error::Provider(other)),
     };
+    if !marker_present {
+        // A missing marker is not permission to reinterpret legacy pages
+        // as an empty row store.
+        let mut scratch = [0u8; PAGE_BYTES];
+        for candidate in 1..=255u32 {
+            match unsafe {
+                noesql_zig_page_get(pager.ptr(), candidate, scratch.as_mut_ptr(), scratch.len())
+            } {
+                STATUS_NOT_FOUND => {}
+                STATUS_OK => return Err(Error::Codec(
+                    "unmarked nonempty database is not a raw-row store".into()
+                )),
+                other => return Err(Error::Provider(other)),
+            }
+        }
+    }
     let current = read_row(&pager, page_id)?;
     let result = runtime.invoke([
         operation,
