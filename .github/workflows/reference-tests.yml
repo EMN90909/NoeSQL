@@ -25,7 +25,7 @@ jobs:
       - name: Install toolchain dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential cmake libssl-dev
+          sudo apt-get install -y build-essential cmake libssl-dev libsqlite3-dev
 
       - uses: mlugg/setup-zig@v2
         with:
@@ -129,6 +129,23 @@ jobs:
         run: |
           cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features noqeri-native
           cargo run --locked --manifest-path Native/rust/Cargo.toml --features noqeri-native --bin native_chain_smoke
+
+      - name: Benchmark Noqeri AOT vs SQLite WAL with correctness verification
+        env:
+          NOESQL_NOQERI_LIB_DIR: ${{ github.workspace }}/Native/rust/native-lib
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+        run: |
+          cargo run --release --locked --manifest-path Native/rust/Cargo.toml \
+            --features noqeri-native --bin benchmark_compare_sqlite \
+            | tee native-sqlite-benchmark.txt
+
+      - name: Preserve benchmark output
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-sqlite-benchmark
+          path: native-sqlite-benchmark.txt
+          if-no-files-found: ignore
 
       - name: Cross-mode native/Stage-2 compatibility test
         env:
