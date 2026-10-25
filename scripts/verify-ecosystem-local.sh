@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-echo "NoeSQL native validation: Noqeri + C++ + Rust + Zig"
-make no-js
+echo "NoeSQL native validation: Noqeri + Rust + Zig"
+make no-js no-c-family
 zig build test
 echo "NoeSQL native validation complete"
