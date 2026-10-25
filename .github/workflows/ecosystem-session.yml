@@ -1,7 +1,7 @@
 name: NoeSQL .noedb session integration
 on:
   push:
-    branches: [refactor/no-js-rust-zig-runtime, main]
+    branches: [refactor/no-js-rust-zig-runtime, refactor/noqeri-zig-rust-only, main]
   pull_request:
     branches: [main]
 
@@ -18,9 +18,11 @@ jobs:
         with:
           version: 0.15.2
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install C++ dependencies
+      - name: Install native toolchain dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential libssl-dev libsqlite3-dev
+          sudo apt-get install -y build-essential
+      - name: Enforce NoeSQL source stack
+        run: make no-js no-native-c-family
       - name: Execute local native verification
         run: bash scripts/verify-ecosystem-local.sh
