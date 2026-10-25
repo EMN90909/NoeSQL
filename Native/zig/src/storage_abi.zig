@@ -581,7 +581,8 @@ test "incomplete snapshot is corruption and cannot be interpreted as empty" {
     try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_page_validate_reference_state(handle));
     try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_snapshot_read(handle, null, 0, &written));
     try std.testing.expectEqual(@as(usize, 0), written);
-    try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_snapshot_write(handle, "x".ptr, 1));
+    const replacement: []const u8 = "x";
+    try std.testing.expectEqual(STATUS_FAILURE, noesql_zig_snapshot_write(handle, replacement.ptr, replacement.len));
 }
 
 test "shortening a snapshot scrubs stale physical pages atomically" {
