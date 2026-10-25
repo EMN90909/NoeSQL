@@ -32,8 +32,8 @@ const LOCK_EX: c_int = 2;
 const LOCK_NB: c_int = 4;
 
 pub const PAGE_BYTES: usize = 4096;
-pub const MAX_PAGES: usize = 256;
-pub const MAX_TX_PAGES: usize = 256;
+pub const MAX_PAGES: usize = 65536;
+pub const MAX_TX_PAGES: usize = 1024;
 pub const MAX_WAL_BYTES: usize = 64 * 1024 * 1024;
 const FRAME: usize = 4 + PAGE_BYTES;
 const TX_HEADER: usize = 24;
@@ -215,6 +215,7 @@ pub const Pager = struct {
     pub fn rollback(self: *Pager) void { self.pending_count = 0; }
     pub fn commit(self: *Pager) Error!void {
         if (self.poisoned) return error.Io;
+        if (page.len != PAGE_BYTES) return error.InvalidHeader;
         if (self.pending_count == 0) return error.EmptyTransaction;
         const count = self.pending_count;
         const length = TX_HEADER + count * FRAME + TX_TRAILER;
@@ -351,6 +352,7 @@ pub const Pager = struct {
     }
     pub fn checkpoint(self: *Pager) Error!void {
         if (self.poisoned) return error.Io;
+        if (page.len != PAGE_BYTES) return error.InvalidHeader;
         if (self.pending_count != 0) return error.TooManyMutations;
         errdefer self.poisoned = true;
         var tmp_buf: [4096]u8 = undefined;

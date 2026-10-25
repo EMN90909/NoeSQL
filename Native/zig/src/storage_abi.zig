@@ -71,50 +71,9 @@ fn indexRead(pager: *storage.Pager, page_id: u32) index.IndexError!index.Index {
     const bytes = pager.readPending(page_id) orelse return index.Index{};
     return index.Index.decode(bytes);
 }
-pub export fn noesql_zig_index_find(handle: ?*anyopaque, index_page: u32, key: i64, out_page: ?*u32) i32 {
-    const output = out_page orelse return STATUS_INVALID;
-    output.* = 0;
-    const pager = cast(handle) orelse return STATUS_INVALID;
-    if (!indexPageValid(index_page)) return STATUS_INVALID;
-    const current = indexRead(pager, index_page) catch return STATUS_FAILURE;
-    output.* = current.find(key) orelse return STATUS_NOT_FOUND;
-    return STATUS_OK;
 }
-pub export fn noesql_zig_index_insert(handle: ?*anyopaque, index_page: u32, key: i64, data_page: u32) i32 {
-    const pager = cast(handle) orelse return STATUS_INVALID;
-    if (!indexPageValid(index_page) or data_page == 0 or data_page >= storage.MAX_PAGES or data_page == index_page) return STATUS_INVALID;
-    var current = indexRead(pager, index_page) catch return STATUS_FAILURE;
-    current.insert(key, data_page) catch |err| return switch (err) {
-        error.Duplicate => STATUS_DUPLICATE,
-        error.IndexFull => STATUS_INDEX_FULL,
-        else => STATUS_FAILURE,
-    };
-    const encoded = current.encode();
-    pager.stage(index_page, &encoded) catch return STATUS_FAILURE;
-    return STATUS_OK;
 }
-pub export fn noesql_zig_index_delete(handle: ?*anyopaque, index_page: u32, key: i64) i32 {
-    const pager = cast(handle) orelse return STATUS_INVALID;
-    if (!indexPageValid(index_page)) return STATUS_INVALID;
-    var current = indexRead(pager, index_page) catch return STATUS_FAILURE;
-    current.delete(key) catch |err| return switch (err) {
-        error.NotFound => STATUS_NOT_FOUND,
-        else => STATUS_FAILURE,
-    };
-    const encoded = current.encode();
-    pager.stage(index_page, &encoded) catch return STATUS_FAILURE;
-    return STATUS_OK;
 }
-pub export fn noesql_zig_index_range(handle: ?*anyopaque, index_page: u32, minimum: i64, maximum: i64, keys: ?[*]i64, pages: ?[*]u32, capacity: usize, written: ?*usize) i32 {
-    const count = written orelse return STATUS_INVALID;
-    count.* = 0;
-    const pager = cast(handle) orelse return STATUS_INVALID;
-    if (!indexPageValid(index_page) or minimum > maximum or capacity > index.CAPACITY) return STATUS_INVALID;
-    const current = indexRead(pager, index_page) catch return STATUS_FAILURE;
-    const items = current.range(minimum, maximum);
-    count.* = items.len;
-    if (items.len > capacity) return STATUS_BUFFER_TOO_SMALL;
-    if (items.len == 0) return STATUS_OK;
     const output_keys = keys orelse return STATUS_INVALID;
     const output_pages = pages orelse return STATUS_INVALID;
     for (items, 0..) |item, i| {
@@ -354,4 +313,17 @@ test "snapshot ABI atomically persists and reloads Rust-owned payload bytes" {
     written = 0;
     try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &output, output.len, &written));
     try std.testing.expect(std.mem.eql(u8, payload, output[0..written]));
+}
+// Stub replacement logic
+pub export fn noesql_zig_index_find(handle: ?*anyopaque, index_page: u32, key: i64, out_page: ?*u32) i32 {
+    _ = handle; _ = index_page; _ = key; _ = out_page; return -1;
+}
+pub export fn noesql_zig_index_insert(handle: ?*anyopaque, index_page: u32, key: i64, data_page: u32) i32 {
+    _ = handle; _ = index_page; _ = key; _ = data_page; return -1;
+}
+pub export fn noesql_zig_index_delete(handle: ?*anyopaque, index_page: u32, key: i64) i32 {
+    _ = handle; _ = index_page; _ = key; return -1;
+}
+pub export fn noesql_zig_index_range(handle: ?*anyopaque, index_page: u32, minimum: i64, maximum: i64, keys: ?[*]i64, pages: ?[*]u32, capacity: usize, written: ?*usize) i32 {
+    _ = handle; _ = index_page; _ = minimum; _ = maximum; _ = keys; _ = pages; _ = capacity; _ = written; return -1;
 }

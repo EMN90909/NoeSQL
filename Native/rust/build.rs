@@ -11,12 +11,8 @@ fn main() {
             .unwrap_or_else(|| PathBuf::from("native-lib"));
         println!("cargo:rustc-link-search=native={}", lib_dir.display());
         // Link order matters for static archives:
-        // Rust -> C++ shim -> Noqeri scalar kernel -> Zig pager.
-        println!("cargo:rustc-link-lib=static=noesql_noqeri_cpp");
+        // Rust -> Noqeri scalar kernel -> Zig pager.
         println!("cargo:rustc-link-lib=static=noesql_noqeri");
-        if cfg!(target_os = "linux") {
-            println!("cargo:rustc-link-lib=dylib=stdc++");
-        }
         println!("cargo:rerun-if-env-changed=NOESQL_NOQERI_LIB_DIR");
     }
 

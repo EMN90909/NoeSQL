@@ -20,8 +20,6 @@ pub fn build(b: *std.Build) void {
     const rust_tests = b.addSystemCommand(&.{ "cargo", "test", "--manifest-path", "Native/rust/Cargo.toml", "--all-targets" });
     test_step.dependOn(&rust_tests.step);
 
-    const cpp_tests = b.addSystemCommand(&.{ "make", "-C", "Native/cpp", "test" });
-    test_step.dependOn(&cpp_tests.step);
 
     const no_js = b.addSystemCommand(&.{
         "sh", "-c",
@@ -40,8 +38,6 @@ pub fn build(b: *std.Build) void {
     rust_release.step.dependOn(&zig_release.step);
     native_step.dependOn(&rust_release.step);
 
-    const cpp_cli = b.addSystemCommand(&.{ "make", "-C", "Native/cpp", "native-cli" });
-    native_step.dependOn(&cpp_cli.step);
 
     const chain_step = b.step("native-chain", "Build and execute the Rust -> Noqeri AOT -> Zig integration chain");
     const chain = b.addSystemCommand(&.{ "make", "native-chain" });

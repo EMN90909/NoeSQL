@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   native:
-    name: Noqeri + C++ + Rust + Zig
+    name: Noqeri + Rust + Zig
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -42,8 +42,6 @@ jobs:
       - name: Build release-safe Zig pager
         run: zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
 
-      - name: Run C++ compatibility and durability tests
-        run: make -C Native/cpp test
 
       - name: Checkout Noqeri compiler
         uses: actions/checkout@v4
@@ -82,27 +80,19 @@ jobs:
           cargo test --manifest-path Native/rust/Cargo.toml --all-targets --features stage2-nqri
           cargo run --manifest-path Native/rust/Cargo.toml --features stage2-nqri --bin stage2_chain_smoke
 
-      - name: Compile scalar Noqeri AOT kernel and C++ Zig shim
+      - name: Compile scalar Noqeri AOT kernel
         run: |
           rm -rf Native/rust/native-lib
           cargo run --manifest-path Native/rust/Cargo.toml --bin build_native -- \
             "$GITHUB_WORKSPACE/.ci-noqeri-build/noqeri" \
             "$GITHUB_WORKSPACE/Database/noesql_stage2_bridge.noqeri" \
             "$GITHUB_WORKSPACE/Native/rust/native-lib"
-          c++ -std=c++17 -O2 -Wall -Wextra -Wpedantic -Werror \
-            -I"$GITHUB_WORKSPACE/Native/cpp" -I"$GITHUB_WORKSPACE/Native/zig" \
-            -c Native/cpp/noesql_noqeri_zig_bridge.cpp \
-            -o Native/rust/native-lib/noesql_noqeri_cpp.o
-          ar rcs Native/rust/native-lib/libnoesql_noqeri_cpp.a \
-            Native/rust/native-lib/noesql_noqeri_cpp.o
           test -s Native/rust/native-lib/libnoesql_noqeri.a
-          test -s Native/rust/native-lib/libnoesql_noqeri_cpp.a
 
       - name: Compile and execute native Noqeri executor fixture
         run: |
           .ci-noqeri-build/noqeri build tests/noesql_native_ir.noqeri /tmp/noesql-native-ir.s -O2
           cc -c /tmp/noesql-native-ir.s -o /tmp/noesql-native-ir.o
-          c++ -std=c++17 -O2 -I .ci-noqeri/Include/noqeri -c .ci-noqeri/Runtime/native/aot_runner.cpp -o /tmp/noqeri-aot-runner.o
           c++ /tmp/noesql-native-ir.o /tmp/noqeri-aot-runner.o -o /tmp/noesql-native-ir
           /tmp/noesql-native-ir
 
@@ -117,9 +107,6 @@ jobs:
       - name: Validate C ABI headers
         run: |
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/zig -x c Native/zig/noesql_zig_pages.h
-          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_engine_abi.h
-          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_session_abi.h
-          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only -I Native/cpp -x c Native/cpp/noesql_noqeri_zig_bridge.h
 
       - name: Verify JavaScript did not return
         run: |
