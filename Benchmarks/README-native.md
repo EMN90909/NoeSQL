@@ -1,39 +1,36 @@
-# NoeSQL native physical-store microbenchmark
+# NoeSQL native benchmark status
 
-Run `make -C Native/cpp benchmark` to compile and run the C++ benchmark locally. The printed JSON reports:
+The former C++ page-store benchmark was retired with the NoeSQL C++ compatibility layer.
 
-- Batched rows committed per second in one durable transaction.
-- 20 independent durable single-row commits per second.
-- Authenticated session B+ tree point-read P50, P95, and P99 latencies.
-- Database checkpoint size after the workload.
+The active NoeSQL source stack is:
 
-By default this uses 500 rows. To change the row count compile `noesql_page_store.cpp` with `benchmark_page_store.cpp` and run the binary with a value from 1 to 5000. Each run uses a fresh temporary database and removes it afterward. No SQLite/PostgreSQL numbers are produced, and results must not be presented as competitive claims. The current v1 kernel does full-image WAL and checkpoint rewrites for each transaction.
+- Noqeri for database semantics and native execution modules
+- Rust for the host/runtime, relational reference runtime, codecs, and ABI orchestration
+- Zig for durable pages, WAL, indexes, recovery, snapshots, and locking
 
-## SQLite side-by-side baseline (requires libsqlite3-dev)
+The historical C++ benchmark numbers that previously lived in this document are **not current NoeSQL performance results** and must not be used for performance claims.
 
-Run `make -C Native/cpp benchmark-compare`. The C++ harness
-`benchmark_compare_sqlite.cpp` executes 500 (configurable 1..5000) keyed
-120-byte values using one durable batch transaction, 500 point lookups,
-and 20 independent durable commits for each engine. SQLite uses
-`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL` and `WITHOUT ROWID` primary
-keys. NoeSQL uses `Store::login` once and passes a session to operations.
+## Current benchmark policy
 
-These are **not exactly equivalent**: SQLite has no embedded password system,
-NoeSQL maintains a credential record and checks session revocation on every
-operation, and NoeSQL's WAL/checkpoint implementation differs architecturally.
-Both tests use fresh databases on the same machine, in one process, and do not
-include server/network latency. Small in-memory cache-friendly datasets cannot
-predict real workloads. Run repeated trials on target production filesystems,
-record hardware, OS, filesystem, caching, process counts and real data sizes.
+Before claiming NoeSQL is faster than SQLite, PostgreSQL, or another database, the benchmark must exercise the current Noqeri + Rust + Zig path and must record:
 
-Example two local Debian/GCC 14.2 trials (500 rows; 18 Oct 2026):
+- exact NoeSQL commit and Noqeri compiler commit
+- hardware, OS, filesystem, storage device, and durability settings
+- dataset size and row/value widths
+- warm-up policy and cache state
+- transaction batch size
+- p50/p95/p99 latency and throughput
+- WAL/checkpoint write amplification
+- repeated runs with variance
+- equivalent durability settings for every compared database
 
-| Engine | Batch rows/s | Independent commits/s | Lookup P99 ms |
-| --- | ---: | ---: | ---: |
-| NoeSQL native run 1 | 185056 | 566 | 0.0361 |
-| SQLite WAL FULL run 1 | 661459 | 4182 | 0.0019 |
-| NoeSQL native run 2 | 148699 | 399 | 0.0435 |
-| SQLite WAL FULL run 2 | 651745 | 4366 | 0.0014 |
+`Native/rust/src/bin/benchmark_compare_sqlite.rs` is currently only a placeholder. It is not evidence of comparative performance.
 
-SQLite wins these three sampled workloads. No PostgreSQL server benchmark was
-conducted. Do **not** claim NoeSQL exceeds or matches SQLite or PostgreSQL.
+The supported validation commands are:
+
+```sh
+make test
+make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
+```
+
+Do not revive the removed C++ benchmark harness as a compatibility shortcut. New benchmark code should use the current Noqeri + Rust + Zig architecture.
