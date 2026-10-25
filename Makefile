@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -84,6 +84,20 @@ native-chain: no-js no-c-family
 	NOESQL_NOQERI_LIB_DIR="$(CURDIR)/Native/rust/native-lib" \
 	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
 		cargo run --manifest-path Native/rust/Cargo.toml --features noqeri-native --bin native_chain_smoke
+
+# Run the actual native Noqeri AOT + Rust + Zig WAL path against a local
+# SQLite build. Both engines update/read/checkpoint a durable single bool row.
+benchmark-native-sqlite: no-js no-c-family
+	@test -n "$(NOQERI_COMPILER)" || (echo "Set NOQERI_COMPILER=/absolute/path/to/noqeri" >&2; exit 2)
+	zig build --build-file Native/zig/build.zig -Doptimize=ReleaseSafe
+	mkdir -p Native/rust/native-lib
+	cargo run --locked --manifest-path Native/rust/Cargo.toml --bin build_native -- \
+		"$(NOQERI_COMPILER)" "$(CURDIR)/Database/noesql_native_bridge.noqeri" \
+		"$(CURDIR)/Native/rust/native-lib"
+	NOESQL_NOQERI_LIB_DIR="$(CURDIR)/Native/rust/native-lib" \
+	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
+		cargo run --release --locked --manifest-path Native/rust/Cargo.toml \
+		--features noqeri-native --bin benchmark_compare_sqlite
 
 clean:
 	rm -rf zig-out .zig-cache Native/zig/zig-out Native/zig/.zig-cache Native/rust/target Native/rust/native-lib Native/rust/native-stage2
