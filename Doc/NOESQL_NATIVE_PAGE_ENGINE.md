@@ -1,3 +1,5 @@
+> **Historical document.** This file describes an earlier C++/legacy migration stage and is retained only for engineering history. The C/C++ implementation it references has been removed from NoeSQL. The current source architecture is **Noqeri + Rust + Zig**. See `README.md`, `Doc/NOQERI_RUST_ZIG_INTEGRATION.md`, and `Doc/NOESQL_NATIVE_MIGRATION_PARITY.md` for current build and qualification guidance.
+
 # Native page-store v1: implemented prototype, not a production NoeSQL release
 
 Date: 2026-10-18. This is a **native C++17 storage-kernel prototype**, not yet a native Noqeri-compiled SQL engine, not an approved migration from the JavaScript `.nqd` reference format, and not production-ready. It deliberately does **not** replace `Database/*.nqr`, `Runtime/noesql-reference.mjs`, or the established `noesql_engine_v1` callback ABI.
