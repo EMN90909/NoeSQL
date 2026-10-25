@@ -9,7 +9,8 @@ const ABI_VERSION: u32 = 2;
 const PAGE_BYTES: usize = 4096;
 const STATUS_OK: i32 = 0;
 const STATUS_NOT_FOUND: i32 = 1;
-const MAGIC: &[u8; 8] = b"NQS20001";
+const MAGIC: &[u8; 8] = b"NQNR0001";
+const STORE_MAGIC: &[u8; 8] = b"NQRO0001";
 
 unsafe extern "C" {
     fn noesql_zig_page_open(version: u32, path: *const c_char, output: *mut *mut c_void) -> i32;
@@ -76,6 +77,9 @@ fn decode_page(page: &[u8; PAGE_BYTES]) -> Result<Option<BoolRow>, Error> {
     if page.iter().all(|byte| *byte == 0) { return Ok(None); }
     if &page[0..8] != MAGIC { return Err(Error::Codec("invalid Stage-2 row page magic".into())); }
     let id = i64::from_le_bytes(page[8..16].try_into().map_err(|_| Error::Codec("bad row id".into()))?);
+    if page[17..].iter().any(|byte| *byte != 0) {
+        return Err(Error::Codec("nonzero Stage-2 row padding".into()));
+    }
     match page[16] {
         0 => Ok(Some(BoolRow { id, enabled: false })),
         1 => Ok(Some(BoolRow { id, enabled: true })),
