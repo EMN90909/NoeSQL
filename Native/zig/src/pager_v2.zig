@@ -259,6 +259,12 @@ pub const Pager = struct {
         try readAll(self.db, &h);
         if (!std.mem.eql(u8, h[0..8], DB_MAGIC)) return error.IncompatibleFormat;
         if (u32get(h[8..12]) != PAGE_BYTES or u32get(h[12..16]) != MAX_PAGES) return error.InvalidHeader;
+        // Bytes 88..95 are reserved in NQDB0002 and deliberately zeroed
+        // by checkpoint. They are not covered by the legacy header digest.
+        // Reject unknown or damaged extensions instead of silently ignoring.
+        for (h[88..DB_HEADER]) |byte| {
+            if (byte != 0) return error.InvalidHeader;
+        }
         const digest = sha(h[0..56]);
         if (!std.mem.eql(u8, h[56..88], &digest)) return error.InvalidHeader;
         self.generation = u64get(h[16..24]);
@@ -614,4 +620,37 @@ test "NQDB0002 bitmap persists last addressable page and rejects overflow" {
     defer reopened.close();
     try std.testing.expectEqual(@as(u8, 237), reopened.read(@intCast(MAX_PAGES - 1)).?[0]);
     try std.testing.expect(reopened.read(@intCast(MAX_PAGES)) == null);
+}
+
+test "checksum-valid snapshot with corrupted reserved header bytes fails closed" {
+    const allocator = std.testing.allocator;
+    const path = try testPath(allocator, "reserved-header");
+    defer allocator.free(path);
+    var db_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &db_buf);
+    const wal = try pathZ(path, ".wal", &wal_buf);
+    const lock = try pathZ(path, ".lck", &lock_buf);
+    defer {
+        _ = c.unlink(data.ptr);
+        _ = c.unlink(wal.ptr);
+        _ = c.unlink(lock.ptr);
+    }
+
+    const store = try Pager.open(allocator, path);
+    var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+    page[2] = 79;
+    try store.stage(2, &page);
+    try store.commit();
+    try store.checkpoint();
+    store.close();
+
+    const fd = try openFile(data, false);
+    try seek(fd, 90);
+    const corrupted = [_]u8{1};
+    try writeAll(fd, &corrupted);
+    try durable(fd);
+    _ = c.close(fd);
+    try std.testing.expectError(error.InvalidHeader, Pager.open(allocator, path));
 }
