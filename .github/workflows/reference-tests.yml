@@ -140,5 +140,10 @@ jobs:
           cargo test --locked --manifest-path Native/rust/Cargo.toml \
             --test native_cross_mode --features noqeri-native,stage2-nqri
 
+      - name: Repeat Zig and Rust durability/corruption suites three times
+        env:
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+        run: make stress
+
       - name: Final repository source contract
         run: make no-js no-c-family
