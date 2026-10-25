@@ -222,6 +222,27 @@ users add {name:"Brian",active:false}"#,
     }
 
     #[test]
+    fn missing_manifest_payload_page_never_falls_back_to_new_database() {
+        let path = temp_path("missing-manifest-page");
+        let pager = Pager::open(&path).unwrap();
+        let mut manifest = [0u8; PAGE_BYTES];
+        manifest[..8].copy_from_slice(b"NQRS0001");
+        manifest[8..12].copy_from_slice(&1u32.to_le_bytes());
+        manifest[12..16].copy_from_slice(&2u32.to_le_bytes());
+        manifest[16..20].copy_from_slice(&((PAGE_BYTES + 1) as u32).to_le_bytes());
+        pager.stage_page(0, &manifest).unwrap();
+        pager.stage_page(1, &[0u8; PAGE_BYTES]).unwrap();
+        pager.commit().unwrap();
+        drop(pager);
+
+        assert!(
+            matches!(load_or_default(&path), Err(Error::Provider(-2))),
+            "a declared but missing snapshot data page is corruption, not an empty DB",
+        );
+        cleanup(&path);
+    }
+
+    #[test]
     fn empty_zig_store_loads_as_new_database_only_via_load_or_default() {
         let path = temp_path("empty");
         assert!(load(&path).is_err());
