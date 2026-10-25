@@ -51,7 +51,7 @@ pub const Index = struct {
             const at = HEADER + i * ENTRY;
             const signed: i64 = @bitCast(get64(page[at .. at + 8]));
             const id = get32(page[at + 8 .. at + 12]);
-            if (id >= pager.MAX_PAGES or (i != 0 and result.entries[i - 1].key >= signed)) return error.CorruptIndex;
+            if (id == 0 or id >= pager.MAX_PAGES or (i != 0 and result.entries[i - 1].key >= signed)) return error.CorruptIndex;
             result.entries[i] = .{ .key = signed, .page_id = id };
         }
         return result;
@@ -98,7 +98,7 @@ pub const Index = struct {
         return self.entries[first..self.upperBound(max)];
     }
     pub fn insert(self: *Index, key: i64, page_id: u32) IndexError!void {
-        if (page_id >= pager.MAX_PAGES) return error.CorruptIndex;
+        if (page_id == 0 or page_id >= pager.MAX_PAGES) return error.CorruptIndex;
         const at = self.lowerBound(key);
         if (at < self.count and self.entries[at].key == key) return error.Duplicate;
         if (self.count >= CAPACITY) return error.IndexFull;
@@ -122,6 +122,8 @@ test "persistent index bytes support unique lookup and bounded sorted range" {
     try index.insert(-2, 7);
     try index.insert(5, 4);
     try std.testing.expectError(error.Duplicate, index.insert(5, 9));
+    try std.testing.expectError(error.CorruptIndex, index.insert(999, 0));
+    try std.testing.expectError(error.CorruptIndex, index.insert(999, @intCast(pager.MAX_PAGES)));
     try std.testing.expectEqual(@as(?u32, 7), index.find(-2));
     const bytes = index.encode();
     var loaded = try Index.decode(&bytes);
