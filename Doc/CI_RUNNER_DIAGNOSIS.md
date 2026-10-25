@@ -35,3 +35,33 @@ Then build the separate Noqeri compiler, run the Stage-2/Stage-3 hash/equality p
 The repository now contains **zero C/C++ source/header files**. NoeSQL nevertheless depends on the separate Noqeri Stage-0 bootstrap toolchain for the current AOT route. C ABI linkage is a calling convention, not a claim that NoeSQL itself contains C source.
 
 Storage qualification still requires full crash/power-loss testing, concurrency interleavings, fuzz/property tests, filesystem/platform checks, and format-migration fixtures. No database can be guaranteed free from all corruption merely by passing its test suite.
+
+
+## 2026-10-25: What can and cannot be fixed in repository code
+
+The hosted jobs on main and benchmark branches continue failing before runner
+allocation: `runner_id=0`, no job steps and no build/test logs. Adjusting
+`zig build`, Rust source, job steps, or checkout actions cannot repair an
+account-level runner/billing authorization denial. GitHub repository owners
+must inspect **Settings > Actions > General / Runners** and account
+**Billing and licensing > Actions**. If the job details report a failed
+payment, exhausted spending budget, or Actions minute eligibility restriction,
+resolve that account problem or provision an authorized self-hosted Linux runner.
+
+Do **not** label NoeSQL as passing CI while runner assignment is blocked.
+After the runner is active, run `make test`, `make stress`, native Noqeri
+Stage-2/AOT compatibility checks and the correctness-gated SQLite benchmark.
+Treat failures as real compiler/runtime defects and fix them based on full logs.
+
+Additional data-integrity risks addressed in fix/snapshot-data-integrity-20261025:
+a manifest that references a missing payload page must return corruption rather
+than NOT_FOUND; snapshot shrink rewrites now overwrite old pages with zeros in
+the same transaction; a snapshot containing unexpected trailing nonzero pages
+must fail validation; snapshot checkpoint files containing undeclared trailing
+bytes must be rejected; index pages require canonical padding; raw-row code
+rejects unmarked populated stores; read-only CLI queries must not create
+spurious WAL transactions.
+
+These are source changes and *proposed* regression tests, not a claim that
+Zig/Rust/Noqeri builds have passed. Memory and disk sanitization is not
+cryptographic erasure of historical WAL blocks or flash storage.
