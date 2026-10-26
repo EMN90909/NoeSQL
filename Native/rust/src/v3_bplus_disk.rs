@@ -566,7 +566,8 @@ mod tests {
             legacy.extend_from_slice(table.as_bytes());
             legacy.extend_from_slice(field.as_bytes());
         }
-        legacy.extend_from_slice(&sha256(&legacy));
+        let digest = sha256(&legacy);
+        legacy.extend_from_slice(&digest);
         load_index_manifest(&base, &db, &legacy).unwrap();
         let command = parse("records where id == 12 delete").unwrap();
         let before = capture_dirty_indexes(&db, &command).unwrap();
