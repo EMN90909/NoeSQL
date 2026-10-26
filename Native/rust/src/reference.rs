@@ -413,7 +413,7 @@ impl Parser {
 }
 pub fn parse(source: &str) -> Result<Vec<Statement>, ReferenceError> { Parser::new(tokenize(source)?).parse() }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Table {
     pub fields: Vec<Field>,
     pub rows: Vec<Row>,
