@@ -1010,7 +1010,9 @@ impl Database {
         }
         if let Some(sort) = &select.sort { rows.sort_by(|a,b| lookup(a, sort).unwrap_or(&Value::Null).compare(lookup(b, sort).unwrap_or(&Value::Null)).unwrap_or(Ordering::Equal)); }
         let start = select.skip.min(rows.len()); let end = select.take.map(|n| start.saturating_add(n).min(rows.len())).unwrap_or(rows.len());
-        Ok(ExecutionReport { affected: 0, rows: rows[start..end].to_vec() })
+        // Consume the query buffer instead of cloning every projected row a
+        // second time when applying SKIP/TAKE to the result.
+        Ok(ExecutionReport { affected: 0, rows: rows.into_iter().skip(start).take(end - start).collect() })
     }
     fn update(&mut self, name: &str, filter: &Expr, values: &[(String, Expr)], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let table = self.tables.get(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
