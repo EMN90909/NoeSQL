@@ -348,14 +348,17 @@ pub fn migrate_copy_v2(source: &Path, target: &Path) -> V3Result<()> {
     validate_path(target)?;
     if source == target { return Err(invalid("v2 source and v3 target must differ")); }
     crate::zig_pager::with_locked_snapshot(source, |db| {
-        create_new(target, db).map_err(|e| e.to_string())
+        // Source is not mutated. Verify the target before releasing the v2
+        // lock, so a concurrent v2 writer cannot invalidate the comparison.
+        create_new(target, db).map_err(|e| e.to_string())?;
+        let imported = snapshot(target).map_err(|e| e.to_string())?;
+        let before = codec::encode(db).map_err(|e| e.to_string())?;
+        let after = codec::encode(&imported.database).map_err(|e| e.to_string())?;
+        if before != after {
+            return Err("v2/v3 migration verification mismatch".into());
+        }
+        Ok(())
     }).map_err(invalid)?;
-    let origin = crate::zig_pager::load(source).map_err(|e| invalid(e.to_string()))?;
-    let imported = snapshot(target)?;
-    if codec::encode(&origin).map_err(|e| invalid(e.to_string()))? !=
-       codec::encode(&imported.database).map_err(|e| invalid(e.to_string()))? {
-        return Err(invalid("source changed after migration; compare at migration lock boundary instead"));
-    }
     Ok(())
 }
 #[cfg(test)]
@@ -445,6 +448,32 @@ mod tests {
         bytes[16] ^= 1;
         fs::write(&target, bytes).unwrap();
         assert!(snapshot(&target).is_err());
+        cleanup(&target);
+    }
+    #[test]
+    fn v3_live_data_exceeds_the_legacy_256_page_ceiling() {
+        use std::collections::BTreeMap;
+        let target = path("more-than-v2");
+        let mut source = Database::default();
+        source.execute("table objects { id:int key auto\n content:text required }",
+            &Params::new()).unwrap();
+        let table = source.tables.get_mut("objects").unwrap();
+        for id in 1..=300i64 {
+            let mut row = BTreeMap::new();
+            row.insert("id".into(), Value::Int(id));
+            row.insert("content".into(), Value::Text("x".repeat(4050)));
+            table.rows.push(row);
+        }
+        table.next_auto = 301;
+        create_new(&target, &source).unwrap();
+        let (_, bytes, pages) = inspect(&target).unwrap();
+        assert!(bytes > (256 * PAGE_SIZE) as u64);
+        assert!(pages > 256 && pages as usize <= MAX_PAGES);
+        let reopened = snapshot(&target).unwrap();
+        assert_eq!(reopened.query("objects get id take 1", &Params::new())
+            .unwrap().rows.len(), 1);
+        assert_eq!(reopened.query("objects get id", &Params::new())
+            .unwrap().rows.len(), 300);
         cleanup(&target);
     }
     #[test]
