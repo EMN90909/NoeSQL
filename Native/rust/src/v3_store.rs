@@ -769,6 +769,46 @@ mod tests {
     }
 
     #[test]
+    fn stable_primary_key_deletion_and_key_update_only_copy_logarithmic_index_paths() {
+        use std::collections::BTreeMap;
+        let target = path("cow-stable-row-id");
+        let mut original = Database::default();
+        original.execute("table events { id:int key auto\n owner:int required\n score:int required }\nindex by_owner on events(owner)",
+            &Params::new()).unwrap();
+        let table = original.tables.get_mut("events").unwrap();
+        for id in 1..=720i64 {
+            let mut row = BTreeMap::new();
+            row.insert("id".into(), Value::Int(id));
+            row.insert("owner".into(), Value::Int(id / 3));
+            row.insert("score".into(), Value::Int(id));
+            table.rows.push(row);
+        }
+        table.next_auto = 721;
+        create_new(&target, &original).unwrap();
+        let original_reader = snapshot(&target).unwrap();
+        let index_dir = versions(&target).join("index-pages");
+        let prior_pages = fs::read_dir(&index_dir).unwrap().count();
+        execute(&target, "events where id == 2 delete", &Params::new()).unwrap();
+        let deleted_pages = fs::read_dir(&index_dir).unwrap().count() - prior_pages;
+        assert!(deleted_pages <= 6, "DELETE rewrote unrelated B+ pages: {deleted_pages}");
+        let after_delete = snapshot(&target).unwrap();
+        assert_eq!(after_delete.query("events get id where owner == 1", &Params::new())
+            .unwrap().rows.len(), 3);
+        assert_eq!(after_delete.query("events get id where owner == 0", &Params::new())
+            .unwrap().rows.len(), 1);
+        assert_eq!(after_delete.query("events get id where id == 3", &Params::new())
+            .unwrap().rows.len(), 1);
+        execute(&target, "events where id == 719 set owner = 0", &Params::new()).unwrap();
+        let after_key_change = snapshot(&target).unwrap();
+        assert_eq!(after_key_change.query("events get id where owner == 0", &Params::new())
+            .unwrap().rows.len(), 2);
+        assert_eq!(original_reader.query("events get id where owner == 0", &Params::new())
+            .unwrap().rows.len(), 2);
+        assert_eq!(after_key_change.query("events get id", &Params::new()).unwrap().rows.len(), 719);
+        cleanup(&target);
+    }
+
+    #[test]
     fn persisted_bplus_pages_survive_cold_reopen_and_reuse_unchanged_pages() {
         use std::collections::BTreeSet;
         let target = path("disk-bplus");
