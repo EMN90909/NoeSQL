@@ -49,19 +49,19 @@ pub fn valid_binary_hex(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 2 && b.len() <= 2 * 1024 * 1024 + 2 &&
         b.starts_with(b"0x") && (b.len() - 2) % 2 == 0 &&
-        b[2..].iter().all(|c| matches!(c, b'0'..=b'9' | b'a'..=b'f'))
+        b[2..].iter().all(|c| matches!(*c, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 struct Json<'a> { src: &'a [u8], at: usize }
 impl Json<'_> {
     fn ws(&mut self) {
-        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.src.get(self.at) {
+        while let Some(b' ' | b'\t' | b'\n' | b'\r') = self.src.get(self.at).copied() {
             self.at += 1;
         }
     }
     fn one(&mut self, ch: u8) -> bool {
         self.ws();
-        if self.src.get(self.at) == Some(&ch) { self.at += 1; true } else { false }
+        if self.src.get(self.at) == Some(ch) { self.at += 1; true } else { false }
     }
     fn hex4(&mut self) -> Option<u16> {
         let bytes = self.src.get(self.at..self.at + 4)?;
@@ -109,7 +109,7 @@ impl Json<'_> {
     }
     fn number(&mut self) -> bool {
         let start = self.at;
-        if self.src.get(self.at) == Some(&b'-') { self.at += 1; }
+        if self.src.get(self.at) == Some(b'-') { self.at += 1; }
         match self.src.get(self.at).copied() {
             Some(b'0') => self.at += 1,
             Some(b'1'..=b'9') => {
@@ -118,7 +118,7 @@ impl Json<'_> {
             },
             _ => return false,
         }
-        if self.src.get(self.at) == Some(&b'.') {
+        if self.src.get(self.at) == Some(b'.') {
             self.at += 1;
             if !matches!(self.src.get(self.at), Some(b'0'..=b'9')) { return false; }
             while matches!(self.src.get(self.at), Some(b'0'..=b'9')) { self.at += 1; }
