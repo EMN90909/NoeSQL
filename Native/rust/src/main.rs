@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -73,6 +73,26 @@ fn main() {
             }
             #[cfg(not(feature = "zig-pager"))]
             fail("EXPLAIN requires the zig-pager feature");
+        }
+        Some("schema-check") => {
+            let database = args.next().unwrap_or_else(|| usage());
+            let script = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            let source = read_source(&script).unwrap_or_else(|error| fail(error));
+            #[cfg(feature = "zig-pager")]
+            {
+                let mut simulated = noesql_runtime::zig_pager::load(Path::new(&database))
+                    .unwrap_or_else(|error| fail(error));
+                let original_version = simulated.version;
+                let report = simulated.execute(&source, &Params::new())
+                    .unwrap_or_else(|error| fail(error));
+                println!(
+                    "schema-check valid: version {} -> {}; affected={} (not applied)",
+                    original_version, simulated.version, report.affected
+                );
+            }
+            #[cfg(not(feature = "zig-pager"))]
+            fail("schema-check requires the zig-pager feature");
         }
         Some(operation @ ("backup" | "restore")) => {
             let from = args.next().unwrap_or_else(|| usage());
