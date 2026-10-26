@@ -653,3 +653,61 @@ test "shortening a snapshot scrubs stale physical pages atomically" {
     try std.testing.expectEqual(small.len, written);
     try std.testing.expect(std.mem.eql(u8, small, readback[0..written]));
 }
+
+test "snapshot WAL journals dirty pages only and skips unchanged rewrites" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-dirty-pages-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var path_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&wal_buf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lock_buf, "{s}.lck", .{path});
+    const c_api = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = c_api.unlink(data.ptr);
+        _ = c_api.unlink(journal.ptr);
+        _ = c_api.unlink(mutex.ptr);
+    }
+
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    const source = try allocator.alloc(u8, 3 * storage.PAGE_BYTES);
+    defer allocator.free(source);
+    @memset(source, 0);
+    source[0] = 8;
+    source[storage.PAGE_BYTES] = 17;
+    source[2 * storage.PAGE_BYTES] = 25;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, source.ptr, source.len));
+    try std.testing.expectEqual(@as(u64, 1), noesql_zig_page_generation(handle));
+
+    const original_size = (try std.fs.cwd().statFile(journal)).size;
+    source[storage.PAGE_BYTES + 23] = 19; // exactly one data page changes
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, source.ptr, source.len));
+    const delta = (try std.fs.cwd().statFile(journal)).size - original_size;
+    // WAL frame = page ID (4) + payload (4096), plus transaction header/trailer.
+    const expected_delta: u64 = 24 + 2 * (4 + storage.PAGE_BYTES) + 40;
+    try std.testing.expectEqual(expected_delta, delta);
+    try std.testing.expectEqual(@as(u64, 2), noesql_zig_page_generation(handle));
+
+    // Replaying identical payload must not create a WAL transaction.
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, source.ptr, source.len));
+    try std.testing.expectEqual(@as(u64, 2), noesql_zig_page_generation(handle));
+    try std.testing.expectEqual(
+        original_size + expected_delta,
+        (try std.fs.cwd().statFile(journal)).size,
+    );
+    noesql_zig_page_close(handle);
+    handle = null;
+
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+    const copy = try allocator.alloc(u8, source.len);
+    defer allocator.free(copy);
+    var written: usize = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, copy.ptr, copy.len, &written));
+    try std.testing.expectEqual(source.len, written);
+    try std.testing.expect(std.mem.eql(u8, source, copy));
+}
