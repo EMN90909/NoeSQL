@@ -12,7 +12,7 @@
 //! default NoeSQL engine until crash/fault/soak qualification is executed.
 use crate::codec;
 use crate::hash256::{sha256, Sha256};
-use crate::reference::{parse, Database, ExecutionReport, Params};
+use crate::reference::{parse, Database, ExecutionReport, Params, Statement};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -345,6 +345,12 @@ pub fn inspect(path: &Path) -> V3Result<(u64, u64, u32)> {
     let _ = read_generation(path, &head)?;
     Ok((head.generation, head.bytes, head.pages))
 }
+fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
+    affected != 0 || statements.iter().any(|statement| !matches!(
+        statement, Statement::Get(_) | Statement::Set(_, _, _) | Statement::Delete(_, _)
+    ))
+}
+
 fn execute_internal(
     path: &Path, source: &str, params: &Params, fault: FaultPoint
 ) -> V3Result<ExecutionReport> {
@@ -357,10 +363,11 @@ fn execute_internal(
     let _lock = take_lock(path, true)?;
     let head = read_head(path)?;
     let mut db = read_generation(path, &head)?;
-    let before = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    let report = db.execute_parsed(&statements, params).map_err(|e| invalid(e.to_string()))?;
-    let after = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    if before != after {
+    // Private generation: no database-state clone and no redundant before/
+    // after codec passes. Unsuccessful execution is never published.
+    let report = db.execute_isolated_parsed(&statements, params)
+        .map_err(|e| invalid(e.to_string()))?;
+    if material_change_possible(&statements, report.affected) {
         let next = head.generation.checked_add(1)
             .ok_or_else(|| invalid("generation counter exhausted"))?;
         let published = write_generation(path, next, &db)?;
@@ -391,14 +398,11 @@ pub fn execute_if_generation(
         )));
     }
     let mut db = read_generation(path, &head)?;
-    let before = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    let report = if Database::statements_read_only(&statements) {
-        db.query_parsed(&statements, params)
-    } else {
-        db.execute_parsed(&statements, params)
-    }.map_err(|e| invalid(e.to_string()))?;
-    let after = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    if before == after { return Ok((head.generation, report)); }
+    let report = db.execute_isolated_parsed(&statements, params)
+        .map_err(|e| invalid(e.to_string()))?;
+    if !material_change_possible(&statements, report.affected) {
+        return Ok((head.generation, report));
+    }
     let next = head.generation.checked_add(1)
         .ok_or_else(|| invalid("generation counter exhausted"))?;
     let published = write_generation(path, next, &db)?;
@@ -605,6 +609,35 @@ mod tests {
         assert_eq!(expected.rows[0].get("owner"), Some(&Value::Int(1)));
         cleanup(&target);
     }
+    #[test]
+    fn no_op_mutations_do_not_publish_new_generations() {
+        let target = path("no-op");
+        create_new(&target, &db()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 1);
+        assert_eq!(execute(&target, "entries where id == 999 set owner = 2", &Params::new())
+            .unwrap().affected, 0);
+        assert_eq!(execute(&target, "entries where id == 999 delete", &Params::new())
+            .unwrap().affected, 0);
+        assert_eq!(snapshot(&target).unwrap().generation, 1);
+        execute(&target, "entries add {owner:7}", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        cleanup(&target);
+    }
+    #[test]
+    fn late_failure_on_private_mutation_does_not_publish() {
+        let target = path("uncommitted");
+        create_new(&target, &db()).unwrap();
+        assert!(execute(&target, "atomic { entries add {owner:2}; entries add {owner:2} }",
+            &Params::new()).is_ok());
+        let base = snapshot(&target).unwrap().generation;
+        assert!(execute(&target, "atomic { entries add {owner:3}; entries add {id:1,owner:4} }",
+            &Params::new()).is_err());
+        assert_eq!(snapshot(&target).unwrap().generation, base);
+        assert_eq!(snapshot(&target).unwrap().query("entries get owner", &Params::new())
+            .unwrap().rows.len(), 3);
+        cleanup(&target);
+    }
+
     #[test]
     fn stale_generation_cannot_overwrite_durable_committed_rows() {
         let target = path("optimistic-cas");
