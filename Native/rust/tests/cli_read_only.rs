@@ -52,13 +52,13 @@ users add {name:"Amina"}"#,
     let db = path.to_str().expect("UTF-8 temp directory");
     let script = schema.to_str().expect("UTF-8 schema file");
 
-    command(&["run", db, script]);
+    command(&["v2-run", db, script]);
     let wal_path = PathBuf::from(format!("{}.wal", path.display()));
     let before = fs::metadata(&wal_path).unwrap().len();
     assert!(before > 0, "creating a row must write the WAL");
 
     for _ in 0..32 {
-        let output = command(&["query", db, "users get id,name sort id"]);
+        let output = command(&["v2-query", db, "users get id,name sort id"]);
         let text = String::from_utf8(output.stdout).unwrap();
         assert!(text.contains("Amina"), "read returned the wrong row: {text}");
     }

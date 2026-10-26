@@ -46,6 +46,11 @@ stress: no-js no-c-family
 		$(MAKE) test-zig test-rust-zig; \
 	done
 
+# Profile only the in-memory immutable B+ access path against a full scan.
+# Do not use this benchmark as an on-disk throughput or MVCC latency claim.
+benchmark-bplus: no-js no-c-family
+	cargo run --release --locked --manifest-path Native/rust/Cargo.toml --bin benchmark_v3_index
+
 # Isolated Rust compiler/parser and read execution microbenchmark.
 # This is NOT a substitute for a multi-client transactional load test.
 benchmark-parser-reads: no-js no-c-family

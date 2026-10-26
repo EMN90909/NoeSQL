@@ -60,7 +60,7 @@ fn multiple_independent_writers_do_not_lose_committed_rows() {
     ).unwrap();
     let path_str = path.to_str().unwrap().to_owned();
     let schema_str = schema.to_str().unwrap().to_owned();
-    call(&["run", &path_str, &schema_str]);
+    call(&["v2-run", &path_str, &schema_str]);
 
     let start = Arc::new(Barrier::new(WRITERS));
     let mut workers = Vec::new();
@@ -73,7 +73,7 @@ fn multiple_independent_writers_do_not_lose_committed_rows() {
                 let command = format!(
                     "events add {{token:\"writer-{writer}-entry-{sequence}\"}}"
                 );
-                let output = call(&["query", &path_str, &command]);
+                let output = call(&["v2-query", &path_str, &command]);
                 assert!(
                     output.contains("affected=1"),
                     "successful command must insert exactly one row: {output}"
@@ -87,7 +87,7 @@ fn multiple_independent_writers_do_not_lose_committed_rows() {
 
     // Opening the data after ALL writing handles are closed must replay
     // a durable WAL, not read process-local cache state.
-    let output = call(&["query", &path_str, "events get id,token sort id"]);
+    let output = call(&["v2-query", &path_str, "events get id,token sort id"]);
     assert_eq!(
         output.matches("\"token\":").count(),
         EXPECTED,

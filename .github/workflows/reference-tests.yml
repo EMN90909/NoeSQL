@@ -2,7 +2,7 @@ name: NoeSQL native validation
 
 on:
   push:
-    branches: [main, refactor/no-cpp-noqeri-rust-zig]
+    branches: [main, refactor/no-cpp-noqeri-rust-zig, feat/noesql-mvcc-security-types-20261026]
   pull_request:
     branches: [main, fix/stress-concurrent-cli-20261026, feat/noesql-release-qualification-20261026]
   workflow_dispatch:

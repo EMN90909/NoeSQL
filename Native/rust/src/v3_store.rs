@@ -11,10 +11,11 @@
 //! Zig allocator, or upgrade in place. These limitations block release as the
 //! default NoeSQL engine until crash/fault/soak qualification is executed.
 use crate::codec;
+use crate::v3_bplus_disk;
 use crate::hash256::{sha256, Sha256};
-use crate::reference::{parse, Database, ExecutionReport, Params};
+use crate::reference::{parse, Database, ExecutionReport, Params, Statement};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -168,11 +169,30 @@ fn read_head(path: &Path) -> V3Result<Head> {
     decode_head(&buffer)
 }
 fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Head> {
+    write_generation_delta(path, generation, db, None, &[], None)
+}
+fn write_generation_delta(
+    path: &Path,
+    generation: u64,
+    db: &Database,
+    previous: Option<&[u8]>,
+    statements: &[Statement],
+    before: Option<&v3_bplus_disk::IndexCapture>,
+) -> V3Result<Head> {
     let payload = codec::encode(db).map_err(|e| invalid(e.to_string()))?;
     if payload.is_empty() || payload.len() > MAX_PAYLOAD {
         return Err(invalid("v3 snapshot exceeds 65,536 pages"));
     }
     let pages = payload.len().div_ceil(PAGE_SIZE);
+    // Write/sync dirty content-addressed B+ pages before publishing the
+    // generation. The full index manifest is part of the generation digest.
+    let index_manifest = v3_bplus_disk::write_index_manifest_delta(
+        &versions(path), db, previous, statements, before
+    ).map_err(invalid)?;
+    let index_pages = index_manifest.len().div_ceil(PAGE_SIZE);
+    if pages.checked_add(index_pages).is_none_or(|count| count > MAX_PAGES) {
+        return Err(invalid("combined data and index manifest exceed 65,536 pages"));
+    }
     let filename = format!("{generation}-{}.pages", unique_nonce()?);
     let name = versions(path).join(&filename);
     let mut file = OpenOptions::new().write(true).create_new(true).open(&name)?;
@@ -182,10 +202,13 @@ fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Hea
     header[8..16].copy_from_slice(&generation.to_le_bytes());
     header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
     header[24..28].copy_from_slice(&(pages as u32).to_le_bytes());
+    // Format extension: zero means legacy NQPG0003 without persistent
+    // indexes; nonzero is the page count of the manifest after data frames.
+    header[28..32].copy_from_slice(&(index_pages as u32).to_le_bytes());
     header[32..64].copy_from_slice(&sha256(&payload));
     file.write_all(&header)?;
     outer.update(&header);
-    for chunk in payload.chunks(PAGE_SIZE) {
+    for chunk in payload.chunks(PAGE_SIZE).chain(index_manifest.chunks(PAGE_SIZE)) {
         let mut block = [0u8; PAGE_SIZE];
         block[..chunk.len()].copy_from_slice(chunk);
         let digest = sha256(&block);
@@ -206,17 +229,22 @@ fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Hea
 fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
     let version = versions(path).join(&head.filename);
     let mut reader = File::open(&version)?;
-    let expected_size = PAGE_HEADER as u64 + head.pages as u64 * FRAME_LEN as u64;
+    let mut header = [0u8; PAGE_HEADER];
+    reader.read_exact(&mut header)?;
+    let index_pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
+    if (head.pages as usize).checked_add(index_pages)
+        .is_none_or(|count| count > MAX_PAGES) {
+        return Err(invalid("index manifest page count exceeds v3 capacity"));
+    }
+    let expected_size = PAGE_HEADER as u64 +
+        (head.pages as u64 + index_pages as u64) * FRAME_LEN as u64;
     if reader.metadata()?.len() != expected_size {
         return Err(invalid("generation file length mismatch"));
     }
-    let mut header = [0u8; PAGE_HEADER];
-    reader.read_exact(&mut header)?;
     if &header[..8] != PAGE_MAGIC ||
        u64::from_le_bytes(header[8..16].try_into().unwrap()) != head.generation ||
        u64::from_le_bytes(header[16..24].try_into().unwrap()) != head.bytes ||
-       u32::from_le_bytes(header[24..28].try_into().unwrap()) != head.pages ||
-       header[28..32].iter().any(|byte| *byte != 0) {
+       u32::from_le_bytes(header[24..28].try_into().unwrap()) != head.pages {
         return Err(invalid("generation header mismatch"));
     }
     let mut outer = Sha256::default();
@@ -236,11 +264,60 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
         }
         payload.extend_from_slice(&block[..n]);
     }
+    // The committed HEAD SHA also covers these manifest frames. Never
+    // trust/rebuild a corrupt index silently after a cold reopen.
+    let mut index_manifest = Vec::with_capacity(index_pages * PAGE_SIZE);
+    for page_index in 0..index_pages {
+        let mut block = [0u8; PAGE_SIZE];
+        let mut digest = [0u8; 32];
+        reader.read_exact(&mut block)?;
+        reader.read_exact(&mut digest)?;
+        if sha256(&block) != digest {
+            return Err(invalid(format!("index manifest page {page_index} checksum mismatch")));
+        }
+        outer.update(&block);
+        outer.update(&digest);
+        index_manifest.extend_from_slice(&block);
+    }
     if outer.finalize() != head.digest || sha256(&payload).as_slice() != &header[32..64] {
         return Err(invalid("generation payload checksum mismatch"));
     }
-    codec::decode(&payload).map_err(|e| invalid(format!("relational snapshot rejected: {e}")))
+    let db = codec::decode(&payload)
+        .map_err(|e| invalid(format!("relational snapshot rejected: {e}")))?;
+    if index_pages != 0 {
+        v3_bplus_disk::load_index_manifest(&versions(path), &db, &index_manifest)
+            .map_err(invalid)?;
+    }
+    Ok(db)
 }
+/// Fetch the authenticated previous index roots. read_generation has
+/// already verified the committed HEAD digest, all manifest pages, and
+/// content-addressed nodes before a write reaches this function.
+fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>>> {
+    let mut file = File::open(versions(path).join(&head.filename))?;
+    let mut header = [0u8; PAGE_HEADER];
+    file.read_exact(&mut header)?;
+    let pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
+    if pages == 0 { return Ok(None); } // pre-index NQDB0003 generation
+    if pages > MAX_PAGES || (head.pages as usize).saturating_add(pages) > MAX_PAGES {
+        return Err(invalid("committed index manifest exceeds v3 capacity"));
+    }
+    file.seek(SeekFrom::Start(PAGE_HEADER as u64 +
+        head.pages as u64 * FRAME_LEN as u64))?;
+    let mut manifest = Vec::with_capacity(pages * PAGE_SIZE);
+    for _ in 0..pages {
+        let mut page = [0u8; PAGE_SIZE];
+        let mut checksum = [0u8; 32];
+        file.read_exact(&mut page)?;
+        file.read_exact(&mut checksum)?;
+        if sha256(&page) != checksum {
+            return Err(invalid("previous generation index manifest checksum mismatch"));
+        }
+        manifest.extend_from_slice(&page);
+    }
+    Ok(Some(manifest))
+}
+
 fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
     let tmp = PathBuf::from(format!("{}.publish-{}", path.display(), unique_nonce()?));
     let result = (|| {
@@ -297,20 +374,45 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
         return Err(invalid("v3 versions entry is not a directory"));
     }
     let mut files = Vec::new();
+    let mut index_pages = Vec::new();
+    let mut index_directory = None;
     for entry in fs::read_dir(&directory)? {
         let entry = entry?;
         let type_info = entry.file_type()?;
         let name = entry.file_name();
         let file_name = name.to_str().ok_or_else(|| invalid("unrecognized v3 orphan filename"))?;
-        if !type_info.is_file() ||
-           !file_name.ends_with(".pages") ||
-           !file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') ||
-           file_name.starts_with('.') || file_name.contains("..") {
+        if type_info.is_dir() && file_name == "index-pages" {
+            if index_directory.is_some() {
+                return Err(invalid("duplicate index-pages directory"));
+            }
+            for page in fs::read_dir(entry.path())? {
+                let page = page?;
+                if !page.file_type()?.is_file() ||
+                    !page.file_name().to_str().is_some_and(|name|
+                        v3_bplus_disk::safe_index_blob_name(name) ||
+                        v3_bplus_disk::safe_unpublished_index_temp_name(name)) {
+                    return Err(invalid("unexpected file in unpublished index-pages directory"));
+                }
+                index_pages.push(page.path());
+            }
+            index_directory = Some(entry.path());
+        } else if type_info.is_file() &&
+           file_name.ends_with(".pages") &&
+           file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') &&
+           !file_name.starts_with('.') && !file_name.contains("..") {
+            files.push(entry.path());
+        } else {
             return Err(invalid("unexpected entry in unpublished versions directory"));
         }
-        files.push(entry.path());
     }
+    // Validate every path before deleting anything. Published generations
+    // can never reach this cleanup path because HEAD existence is checked.
     for file in files { fs::remove_file(file)?; }
+    for page in index_pages { fs::remove_file(page)?; }
+    if let Some(index_directory) = index_directory {
+        sync_directory(&index_directory)?;
+        fs::remove_dir(index_directory)?;
+    }
     sync_directory(&directory)?;
     fs::remove_dir(&directory)?;
     sync_directory(parent_dir(path))?;
@@ -345,6 +447,12 @@ pub fn inspect(path: &Path) -> V3Result<(u64, u64, u32)> {
     let _ = read_generation(path, &head)?;
     Ok((head.generation, head.bytes, head.pages))
 }
+fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
+    affected != 0 || statements.iter().any(|statement| !matches!(
+        statement, Statement::Get(_) | Statement::Set(_, _, _) | Statement::Delete(_, _)
+    ))
+}
+
 fn execute_internal(
     path: &Path, source: &str, params: &Params, fault: FaultPoint
 ) -> V3Result<ExecutionReport> {
@@ -357,13 +465,17 @@ fn execute_internal(
     let _lock = take_lock(path, true)?;
     let head = read_head(path)?;
     let mut db = read_generation(path, &head)?;
-    let before = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    let report = db.execute_parsed(&statements, params).map_err(|e| invalid(e.to_string()))?;
-    let after = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    if before != after {
+    // Private generation: no database-state clone and no redundant before/
+    // after codec passes. Unsuccessful execution is never published.
+    let before_indexes = v3_bplus_disk::capture_dirty_indexes(&db, &statements)
+        .map_err(invalid)?;
+    let report = db.execute_isolated_parsed(&statements, params)
+        .map_err(|e| invalid(e.to_string()))?;
+    if material_change_possible(&statements, report.affected) {
         let next = head.generation.checked_add(1)
             .ok_or_else(|| invalid("generation counter exhausted"))?;
-        let published = write_generation(path, next, &db)?;
+        let prior = committed_index_manifest(path, &head)?;
+        let published = write_generation_delta(path, next, &db, prior.as_deref(), &statements, Some(&before_indexes))?;
         if fault == FaultPoint::BeforePublish {
             return Err(V3Error::Conflict("injected crash after generation fsync".into()));
         }
@@ -391,17 +503,19 @@ pub fn execute_if_generation(
         )));
     }
     let mut db = read_generation(path, &head)?;
-    let before = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    let report = if Database::statements_read_only(&statements) {
-        db.query_parsed(&statements, params)
-    } else {
-        db.execute_parsed(&statements, params)
-    }.map_err(|e| invalid(e.to_string()))?;
-    let after = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
-    if before == after { return Ok((head.generation, report)); }
+    let before_indexes = v3_bplus_disk::capture_dirty_indexes(&db, &statements)
+        .map_err(invalid)?;
+    let report = db.execute_isolated_parsed(&statements, params)
+        .map_err(|e| invalid(e.to_string()))?;
+    if !material_change_possible(&statements, report.affected) {
+        return Ok((head.generation, report));
+    }
     let next = head.generation.checked_add(1)
         .ok_or_else(|| invalid("generation counter exhausted"))?;
-    let published = write_generation(path, next, &db)?;
+    let prior = committed_index_manifest(path, &head)?;
+    let published = write_generation_delta(
+        path, next, &db, prior.as_deref(), &statements, Some(&before_indexes)
+    )?;
     stage_head(path, &published, false)?;
     Ok((next, report))
 }
@@ -410,6 +524,42 @@ pub fn execute_if_generation(
 /// versions. The full relational snapshot is still cloned and rewritten.
 pub fn execute(path: &Path, source: &str, params: &Params) -> V3Result<ExecutionReport> {
     execute_internal(path, source, params, FaultPoint::None)
+}
+
+
+impl Snapshot {
+    /// Trusted administrative inspection; do not give an unrestricted
+    /// Snapshot to untrusted tenants.
+    pub fn database(&self) -> &Database { &self.database }
+}
+
+/// Create a fresh NQDB0003 store on the first successful mutating program.
+/// Never auto-migrate an existing NQDB0002 file; an explicit migration target
+/// must be provided to the copy-and-verify CLI.
+pub fn execute_or_create(path: &Path, source: &str, params: &Params) -> V3Result<ExecutionReport> {
+    validate_path(path)?;
+    if path.exists() {
+        return execute(path, source, params);
+    }
+    if versions(path).exists() {
+        return Err(V3Error::Conflict(
+            "unpublished v3 generation directory exists; inspect or run v3-discard-unpublished".into()
+        ));
+    }
+    let statements = parse(source).map_err(|e| invalid(e.to_string()))?;
+    if Database::statements_read_only(&statements) {
+        return Err(invalid("database does not exist; create with a schema/write program"));
+    }
+    let mut initial = Database::default();
+    let report = initial.execute_parsed(&statements, params)
+        .map_err(|e| invalid(e.to_string()))?;
+    match create_new(path, &initial) {
+        Ok(()) => Ok(report),
+        // Concurrent creation may have won while this call validated the
+        // source. Never retry if the target is not a published valid v3 DB.
+        Err(V3Error::Conflict(_)) if path.exists() => execute(path, source, params),
+        Err(error) => Err(error),
+    }
 }
 
 /// Source v2 remains the rollback copy. Its Zig lock is held across validation
@@ -570,6 +720,170 @@ mod tests {
         cleanup(&target);
     }
     #[test]
+    fn no_op_mutations_do_not_publish_new_generations() {
+        let target = path("no-op");
+        create_new(&target, &db()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 1);
+        assert_eq!(execute(&target, "entries where id == 999 set owner = 2", &Params::new())
+            .unwrap().affected, 0);
+        assert_eq!(execute(&target, "entries where id == 999 delete", &Params::new())
+            .unwrap().affected, 0);
+        assert_eq!(snapshot(&target).unwrap().generation, 1);
+        execute(&target, "entries add {owner:7}", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        cleanup(&target);
+    }
+    #[test]
+    fn late_failure_on_private_mutation_does_not_publish() {
+        let target = path("uncommitted");
+        create_new(&target, &db()).unwrap();
+        assert!(execute(&target, "atomic { entries add {owner:2}; entries add {owner:2} }",
+            &Params::new()).is_ok());
+        let base = snapshot(&target).unwrap().generation;
+        assert!(execute(&target, "atomic { entries add {owner:3}; entries add {id:1,owner:4} }",
+            &Params::new()).is_err());
+        assert_eq!(snapshot(&target).unwrap().generation, base);
+        assert_eq!(snapshot(&target).unwrap().query("entries get owner", &Params::new())
+            .unwrap().rows.len(), 3);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn nonindexed_update_reuses_persisted_bplus_pages_without_writing_nodes() {
+        let target = path("unindexed-delta");
+        let mut initial = Database::default();
+        initial.execute("table events { id:int key auto\n owner:int required\n score:int required }\nindex by_owner on events(owner)\nevents add {owner:10,score:1}",
+            &Params::new()).unwrap();
+        create_new(&target, &initial).unwrap();
+        let blobs = versions(&target).join("index-pages");
+        let old_count = fs::read_dir(&blobs).unwrap().count();
+        let generation = snapshot(&target).unwrap().generation;
+        execute(&target, "events where id == 1 set score = 99", &Params::new()).unwrap();
+        let cold = snapshot(&target).unwrap();
+        assert_eq!(cold.generation, generation+1);
+        assert_eq!(fs::read_dir(&blobs).unwrap().count(), old_count,
+            "nonindexed field edit unexpectedly published dirty B+ pages");
+        assert_eq!(cold.query("events get id,score where owner == 10", &Params::new())
+            .unwrap().rows[0].get("score"), Some(&Value::Int(99)));
+        cleanup(&target);
+    }
+
+    #[test]
+    fn stable_primary_key_deletion_and_key_update_only_copy_logarithmic_index_paths() {
+        use std::collections::BTreeMap;
+        let target = path("cow-stable-row-id");
+        let mut original = Database::default();
+        original.execute("table events { id:int key auto\n owner:int required\n score:int required }\nindex by_owner on events(owner)",
+            &Params::new()).unwrap();
+        let table = original.tables.get_mut("events").unwrap();
+        for id in 1..=720i64 {
+            let mut row = BTreeMap::new();
+            row.insert("id".into(), Value::Int(id));
+            row.insert("owner".into(), Value::Int(id / 3));
+            row.insert("score".into(), Value::Int(id));
+            table.rows.push(row);
+        }
+        table.next_auto = 721;
+        create_new(&target, &original).unwrap();
+        let original_reader = snapshot(&target).unwrap();
+        let index_dir = versions(&target).join("index-pages");
+        let prior_pages = fs::read_dir(&index_dir).unwrap().count();
+        execute(&target, "events where id == 2 delete", &Params::new()).unwrap();
+        let deleted_pages = fs::read_dir(&index_dir).unwrap().count() - prior_pages;
+        assert!(deleted_pages <= 6, "DELETE rewrote unrelated B+ pages: {deleted_pages}");
+        let after_delete = snapshot(&target).unwrap();
+        assert_eq!(after_delete.query("events get id where owner == 1", &Params::new())
+            .unwrap().rows.len(), 3);
+        assert_eq!(after_delete.query("events get id where owner == 0", &Params::new())
+            .unwrap().rows.len(), 1);
+        assert_eq!(after_delete.query("events get id where id == 3", &Params::new())
+            .unwrap().rows.len(), 1);
+        execute(&target, "events where id == 719 set owner = 0", &Params::new()).unwrap();
+        let after_key_change = snapshot(&target).unwrap();
+        assert_eq!(after_key_change.query("events get id where owner == 0", &Params::new())
+            .unwrap().rows.len(), 2);
+        assert_eq!(original_reader.query("events get id where owner == 0", &Params::new())
+            .unwrap().rows.len(), 2);
+        assert_eq!(after_key_change.query("events get id", &Params::new()).unwrap().rows.len(), 719);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn persisted_bplus_pages_survive_cold_reopen_and_reuse_unchanged_pages() {
+        use std::collections::BTreeSet;
+        let target = path("disk-bplus");
+        let mut initial = Database::default();
+        initial.execute("table logs { id:int key auto\n owner:int required\n score:int required }\nindex owner_idx on logs(owner)",
+            &Params::new()).unwrap();
+        for i in 0..800usize {
+            initial.execute(&format!("logs add {{owner:{},score:{i}}}", i % 80), &Params::new()).unwrap();
+        }
+        create_new(&target, &initial).unwrap();
+        let index_dir = versions(&target).join("index-pages");
+        let old_files: BTreeSet<_> = fs::read_dir(&index_dir).unwrap()
+            .map(|e| e.unwrap().file_name()).collect();
+        assert!(old_files.len() > 3, "expected multiple physical 4 KiB B+ pages");
+        let head = read_head(&target).unwrap();
+        let file = fs::read(versions(&target).join(head.filename)).unwrap();
+        let manifest_pages = u32::from_le_bytes(file[28..32].try_into().unwrap());
+        assert!(manifest_pages > 0, "v3 generation omitted persistent B+ manifest");
+        let frozen = snapshot(&target).unwrap();
+        assert!(frozen.database().tables["logs"].seek_cache.get().is_some());
+        let matched = frozen.query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len();
+        assert_eq!(matched, 10);
+        execute(&target, "logs add {owner:7,score:1000}", &Params::new()).unwrap();
+        let new_files: BTreeSet<_> = fs::read_dir(&index_dir).unwrap()
+            .map(|e| e.unwrap().file_name()).collect();
+        assert!(new_files.len() > old_files.len());
+        let incremental = new_files.difference(&old_files).count();
+        assert!(incremental < old_files.len(),
+            "index write amplification rewrote more pages than initial index");
+        let cold = snapshot(&target).unwrap();
+        assert_eq!(cold.query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 11);
+        assert_eq!(frozen.query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 10);
+        execute(&target, "logs where id == 1 set owner = 7", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 12);
+        execute(&target, "logs where id == 1 delete", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 11);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn corrupted_persisted_index_page_fails_closed() {
+        let target = path("bplus-corrupt");
+        create_new(&target, &db()).unwrap();
+        let saved = snapshot(&target).unwrap();
+        let blobs = versions(&target).join("index-pages");
+        let page = fs::read_dir(&blobs).unwrap().next().unwrap().unwrap().path();
+        let mut file = OpenOptions::new().read(true).write(true).open(&page).unwrap();
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(71)).unwrap();
+        file.write_all(&[255]).unwrap();
+        file.sync_all().unwrap();
+        assert!(snapshot(&target).is_err(), "corrupt B+ index page was silently ignored");
+        assert_eq!(saved.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn index_pages_written_before_failed_head_publish_do_not_change_visible_snapshot() {
+        let target = path("bplus-fault");
+        create_new(&target, &db()).unwrap();
+        let generation = snapshot(&target).unwrap().generation;
+        assert!(execute_internal(&target, "entries add {owner:2}", &Params::new(),
+            FaultPoint::BeforePublish).is_err());
+        let persisted = snapshot(&target).unwrap();
+        assert_eq!(persisted.generation, generation);
+        assert_eq!(persisted.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
+    #[test]
     fn stale_generation_cannot_overwrite_durable_committed_rows() {
         let target = path("optimistic-cas");
         create_new(&target, &db()).unwrap();
@@ -587,6 +901,20 @@ mod tests {
         assert_eq!(fresh.generation, next);
         assert_eq!(fresh.query("entries get owner", &Params::new()).unwrap().rows.len(), 2);
         assert_eq!(pinned.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn default_auto_create_is_v3_only_and_refuses_unknown_existing_format() {
+        let target = path("default");
+        let report = execute_or_create(&target, "table messages { id:int key auto\n title:text required }\nmessages add {title:\"first\"}", &Params::new()).unwrap();
+        assert_eq!(report.affected, 1);
+        assert_eq!(snapshot(&target).unwrap().query("messages get title", &Params::new()).unwrap().rows.len(), 1);
+        let old = path("not-v3");
+        fs::write(&old, b"NQDB0002").unwrap();
+        assert!(execute_or_create(&old, "table messages { id:int key }", &Params::new()).is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"NQDB0002");
+        cleanup(&old);
         cleanup(&target);
     }
 

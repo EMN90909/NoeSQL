@@ -42,25 +42,25 @@ fn verified_backup_is_standalone_is_consistent_and_never_overwrites() {
     let source_name = source.to_str().unwrap();
     let backup_name = backup.to_str().unwrap();
     let restored_name = restored.to_str().unwrap();
-    cli(&["run", source_name, script.to_str().unwrap()], true);
-    cli(&["backup", source_name, backup_name], true);
+    cli(&["v2-run", source_name, script.to_str().unwrap()], true);
+    cli(&["v2-backup", source_name, backup_name], true);
     assert!(backup.exists());
     // A portable backup is checkpointed: reading the standalone .noedb
     // must not need a copied live WAL file.
     let journal = PathBuf::from(format!("{}.wal", backup.display()));
     assert!(!journal.exists(), "backups must not retain a live WAL");
-    assert!(cli(&["query", backup_name, "users get name"], true).contains("Amina"));
+    assert!(cli(&["v2-query", backup_name, "users get name"], true).contains("Amina"));
 
-    cli(&["query", source_name, "users add {name:\"Brian\"}"], true);
-    let snapshot = cli(&["query", backup_name, "users get name sort name"], true);
+    cli(&["v2-query", source_name, "users add {name:\"Brian\"}"], true);
+    let snapshot = cli(&["v2-query", backup_name, "users get name sort name"], true);
     assert!(snapshot.contains("Amina"));
     assert!(!snapshot.contains("Brian"), "backup changed after later live write");
 
-    cli(&["backup", source_name, backup_name], false);
-    assert_eq!(snapshot, cli(&["query", backup_name, "users get name sort name"], true));
-    cli(&["restore", backup_name, restored_name], true);
-    assert!(cli(&["query", restored_name, "users get name"], true).contains("Amina"));
-    assert!(!cli(&["query", restored_name, "users get name"], true).contains("Brian"));
+    cli(&["v2-backup", source_name, backup_name], false);
+    assert_eq!(snapshot, cli(&["v2-query", backup_name, "users get name sort name"], true));
+    cli(&["v2-restore", backup_name, restored_name], true);
+    assert!(cli(&["v2-query", restored_name, "users get name"], true).contains("Amina"));
+    assert!(!cli(&["v2-query", restored_name, "users get name"], true).contains("Brian"));
 
     for file in [&source, &backup, &restored] { clean(file); }
     let _ = fs::remove_file(script);
@@ -73,15 +73,15 @@ fn explain_reports_real_plan_and_rejects_mutations() {
     clean(&source);
     fs::write(&script, "table items {\n id:int key auto\n value:int required\n}\nitems add {value:1}").unwrap();
     let db = source.to_str().unwrap();
-    cli(&["run", db, script.to_str().unwrap()], true);
+    cli(&["v2-run", db, script.to_str().unwrap()], true);
 
-    let plan = cli(&["explain", db, "items get id,value where value >= 1 sort id"], true);
+    let plan = cli(&["v2-explain", db, "items get id,value where value >= 1 sort id"], true);
     assert!(plan.contains("access=full_scan"), "{plan}");
     assert!(plan.contains("join=none"), "{plan}");
     assert!(plan.contains("sort=id"), "{plan}");
-    cli(&["explain", db, "items add {value:2}"], false);
+    cli(&["v2-explain", db, "items add {value:2}"], false);
     assert_eq!(
-        cli(&["query", db, "items get id"], true).matches("\"id\":").count(), 1,
+        cli(&["v2-query", db, "items get id"], true).matches("\"id\":").count(), 1,
         "EXPLAIN must never mutate tables"
     );
 
@@ -98,15 +98,15 @@ fn schema_check_validates_evolution_but_never_applies_it() {
     fs::write(&setup, "table users {\n id:int key auto\n name:text required\n}\nusers add {name:\"Amina\"}").unwrap();
     fs::write(&evolution, "alter users add { active:bool required = true }").unwrap();
     let db = source.to_str().unwrap();
-    cli(&["run", db, setup.to_str().unwrap()], true);
-    let report = cli(&["schema-check", db, evolution.to_str().unwrap()], true);
+    cli(&["v2-run", db, setup.to_str().unwrap()], true);
+    let report = cli(&["v2-schema-check", db, evolution.to_str().unwrap()], true);
     assert!(report.contains("not applied"));
     assert!(report.contains("version 1 -> 2"));
-    cli(&["query", db, "users get name,active"], false);
-    assert!(cli(&["query", db, "users get name"], true).contains("Amina"));
+    cli(&["v2-query", db, "users get name,active"], false);
+    assert!(cli(&["v2-query", db, "users get name"], true).contains("Amina"));
 
     fs::write(&evolution, "alter unknown_table add { active:bool }").unwrap();
-    cli(&["schema-check", db, evolution.to_str().unwrap()], false);
+    cli(&["v2-schema-check", db, evolution.to_str().unwrap()], false);
 
     clean(&source);
     let _ = fs::remove_file(setup);

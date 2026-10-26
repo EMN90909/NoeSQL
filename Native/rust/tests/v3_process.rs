@@ -45,7 +45,7 @@ fn opt_in_v3_process_readers_and_writers_never_lose_committed_rows() {
             gate.wait();
             for n in 0..PER_WRITER {
                 let command = format!("items add {{value:\"writer-{writer}-{n}\"}}");
-                let result = cli(&["v3-exec", path.to_str().unwrap(), &command]);
+                let result = cli(&["query", path.to_str().unwrap(), &command]);
                 assert!(result.contains("affected=1"), "{result}");
             }
         }));
@@ -56,7 +56,7 @@ fn opt_in_v3_process_readers_and_writers_never_lose_committed_rows() {
         tasks.push(thread::spawn(move || {
             gate.wait();
             for _ in 0..12 {
-                let result = cli(&["v3-query", path.to_str().unwrap(), "items get id,value sort id"]);
+                let result = cli(&["query", path.to_str().unwrap(), "items get id,value sort id"]);
                 let ids = result.matches("\"id\":").count();
                 assert!(ids <= WRITERS * PER_WRITER);
                 assert_eq!(ids, result.matches("\"value\":").count());
