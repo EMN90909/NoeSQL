@@ -169,7 +169,7 @@ fn read_head(path: &Path) -> V3Result<Head> {
     decode_head(&buffer)
 }
 fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Head> {
-    write_generation_delta(path, generation, db, None, &[])
+    write_generation_delta(path, generation, db, None, &[], None)
 }
 fn write_generation_delta(
     path: &Path,
@@ -177,6 +177,7 @@ fn write_generation_delta(
     db: &Database,
     previous: Option<&[u8]>,
     statements: &[Statement],
+    before: Option<&v3_bplus_disk::IndexCapture>,
 ) -> V3Result<Head> {
     let payload = codec::encode(db).map_err(|e| invalid(e.to_string()))?;
     if payload.is_empty() || payload.len() > MAX_PAYLOAD {
@@ -186,7 +187,7 @@ fn write_generation_delta(
     // Write/sync dirty content-addressed B+ pages before publishing the
     // generation. The full index manifest is part of the generation digest.
     let index_manifest = v3_bplus_disk::write_index_manifest_delta(
-        &versions(path), db, previous, statements
+        &versions(path), db, previous, statements, before
     ).map_err(invalid)?;
     let index_pages = index_manifest.len().div_ceil(PAGE_SIZE);
     if pages.checked_add(index_pages).is_none_or(|count| count > MAX_PAGES) {
@@ -464,13 +465,15 @@ fn execute_internal(
     let mut db = read_generation(path, &head)?;
     // Private generation: no database-state clone and no redundant before/
     // after codec passes. Unsuccessful execution is never published.
+    let before_indexes = v3_bplus_disk::capture_dirty_indexes(&db, &statements)
+        .map_err(invalid)?;
     let report = db.execute_isolated_parsed(&statements, params)
         .map_err(|e| invalid(e.to_string()))?;
     if material_change_possible(&statements, report.affected) {
         let next = head.generation.checked_add(1)
             .ok_or_else(|| invalid("generation counter exhausted"))?;
         let prior = committed_index_manifest(path, &head)?;
-        let published = write_generation_delta(path, next, &db, prior.as_deref(), &statements)?;
+        let published = write_generation_delta(path, next, &db, prior.as_deref(), &statements, Some(&before_indexes))?;
         if fault == FaultPoint::BeforePublish {
             return Err(V3Error::Conflict("injected crash after generation fsync".into()));
         }
@@ -498,6 +501,8 @@ pub fn execute_if_generation(
         )));
     }
     let mut db = read_generation(path, &head)?;
+    let before_indexes = v3_bplus_disk::capture_dirty_indexes(&db, &statements)
+        .map_err(invalid)?;
     let report = db.execute_isolated_parsed(&statements, params)
         .map_err(|e| invalid(e.to_string()))?;
     if !material_change_possible(&statements, report.affected) {
@@ -505,7 +510,10 @@ pub fn execute_if_generation(
     }
     let next = head.generation.checked_add(1)
         .ok_or_else(|| invalid("generation counter exhausted"))?;
-    let published = write_generation(path, next, &db)?;
+    let prior = committed_index_manifest(path, &head)?;
+    let published = write_generation_delta(
+        path, next, &db, prior.as_deref(), &statements, Some(&before_indexes)
+    )?;
     stage_head(path, &published, false)?;
     Ok((next, report))
 }
