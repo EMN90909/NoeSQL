@@ -3,17 +3,22 @@
 //! Production API users must expose only an AuthorizedSession, not unrestricted
 //! Database::execute. No authentication, process isolation, RLS or cryptographic
 //! audit chain is claimed. The unguarded Database API is administrative.
-use crate::reference::{parse, Database, ExecutionReport, Params, ReferenceError, Select, Statement};
+use crate::reference::{parse, Database, ExecutionReport, Params, ReferenceError, Expr, Select, Statement};
 use std::collections::BTreeMap;
+use crate::value::Value;
 use std::fmt;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TableGrant { pub read: bool, pub write: bool }
 
 #[derive(Clone, Debug)]
+struct RowPolicy { field: String, equals: Value }
+
+#[derive(Clone, Debug)]
 pub struct AccessControl {
     pub schema_admin: bool,
     grants: BTreeMap<String, TableGrant>,
+    row_policies: BTreeMap<String, RowPolicy>,
     pub max_source_bytes: usize,
     pub max_returned_rows: usize,
 }
@@ -47,12 +52,76 @@ impl AccessControl {
         Self {
             schema_admin: false,
             grants: BTreeMap::new(),
+            row_policies: BTreeMap::new(),
             max_source_bytes: 64 * 1024,
             max_returned_rows: 10_000,
         }
     }
     pub fn grant(&mut self, table: impl Into<String>, read: bool, write: bool) {
         self.grants.insert(table.into(), TableGrant { read, write });
+    }
+
+    /// Require every visible/mutated row to match an immutable tenant value.
+    /// This scoped mode refuses JOINs involving policy-protected tables.
+    pub fn restrict_rows(&mut self, table: impl Into<String>, field: impl Into<String>, equals: Value) {
+        self.row_policies.insert(table.into(), RowPolicy { field: field.into(), equals });
+    }
+
+    fn constrained(&self, table: &str, filter: Expr) -> Expr {
+        if let Some(policy) = self.row_policies.get(table) {
+            let condition = Expr::Binary(
+                "==".into(),
+                Box::new(Expr::Column(policy.field.clone())),
+                Box::new(Expr::Literal(policy.equals.clone())),
+            );
+            Expr::Binary("&&".into(), Box::new(filter), Box::new(condition))
+        } else { filter }
+    }
+
+    fn scope_statement(&self, statement: &mut Statement, params: &Params) -> Result<(), AccessError> {
+        match statement {
+            Statement::Get(select) => {
+                if select.join.as_ref().is_some_and(|join|
+                    self.row_policies.contains_key(&select.table) ||
+                    self.row_policies.contains_key(&join.table))
+                {
+                    return Err(AccessError::Denied("row policies on joined tables require a verified join-aware executor".into()));
+                }
+                if self.row_policies.contains_key(&select.table) {
+                    let old = select.filter.take().unwrap_or(Expr::Literal(Value::Bool(true)));
+                    select.filter = Some(self.constrained(&select.table, old));
+                }
+            },
+            Statement::Set(table, filter, columns) => {
+                if let Some(policy) = self.row_policies.get(table) {
+                    if columns.iter().any(|(field, _)| field == &policy.field) {
+                        return Err(AccessError::Denied("cannot update a row-policy tenant column".into()));
+                    }
+                }
+                *filter = self.constrained(table, filter.clone());
+            },
+            Statement::Delete(table, filter) => {
+                *filter = self.constrained(table, filter.clone());
+            },
+            Statement::Add(table, columns) => {
+                if let Some(policy) = self.row_policies.get(table) {
+                    let tenant = columns.iter().find(|(field, _)| field == &policy.field);
+                    let matching = match tenant {
+                        Some((_, Expr::Literal(value))) => value == &policy.equals,
+                        Some((_, Expr::Param(name))) => params.get(name) == Some(&policy.equals),
+                        _ => false,
+                    };
+                    if !matching {
+                        return Err(AccessError::Denied("insert must supply the exact authorized row-policy value".into()));
+                    }
+                }
+            },
+            Statement::Atomic(statements) => {
+                for nested in statements { self.scope_statement(nested, params)?; }
+            },
+            _ => {},
+        }
+        Ok(())
     }
     fn table(&self, name: &str, write: bool) -> Result<(), AccessError> {
         let grant = self.grants.get(name).copied().unwrap_or_default();
@@ -93,9 +162,11 @@ impl AccessControl {
         if source.len() > self.max_source_bytes {
             return Err(AccessError::Budget("statement exceeds source-byte budget".into()));
         }
-        let statements = parse(source)?;
+        let mut statements = parse(source)?;
         for statement in &statements { self.check(statement)?; }
-        // Do not replace database on rejected budget or execution failure.
+        // Policy rewrites are performed only after authorization, and before
+        // cloning/publishing database state. Joins with RLS fail closed.
+        for statement in &mut statements { self.scope_statement(statement, params)?; }
         let mut working = database.clone();
         let result = working.execute_parsed(&statements, params)?;
         if result.rows.len() > self.max_returned_rows {
@@ -125,6 +196,31 @@ impl AuthorizedSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_policies_restrict_reads_writes_and_nested_transactions() {
+        let mut database = Database::default();
+        database.execute(
+            "table events { id:int key auto\\n owner:int required\\n value:int required }\\nevents add {owner:1,value:10}\\nevents add {owner:2,value:20}",
+            &Params::new(),
+        ).unwrap();
+        let mut rights = AccessControl::new();
+        rights.grant("events", true, true);
+        rights.restrict_rows("events", "owner", Value::Int(1));
+
+        assert_eq!(rights.execute(&mut database, "events get id,owner,value", &Params::new()).unwrap().rows.len(), 1);
+        assert_eq!(rights.execute(&mut database, "events where owner == 2 set value = 99", &Params::new()).unwrap().affected, 0);
+        assert_eq!(rights.execute(&mut database, "events where owner == 2 delete", &Params::new()).unwrap().affected, 0);
+        assert!(rights.execute(&mut database, "events add {owner:2,value:30}", &Params::new()).is_err());
+        assert!(rights.execute(&mut database, "events where owner == 1 set owner = 2", &Params::new()).is_err());
+        rights.execute(&mut database, "atomic { events add {owner:1,value:30} }", &Params::new()).unwrap();
+
+        // The unrestricted admin view retains tenant 2 unmodified.
+        let rows = database.execute("events get id,owner,value", &Params::new()).unwrap().rows;
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().any(|r| r.get("owner") == Some(&Value::Int(2)) &&
+            r.get("value") == Some(&Value::Int(20))));
+    }
 
     #[test]
     fn restricted_session_keeps_database_handle_private() {
