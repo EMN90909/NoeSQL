@@ -23,6 +23,7 @@ impl Writer {
     fn u8(&mut self, value: u8) { self.bytes.push(value); }
     fn u32(&mut self, value: u32) { self.bytes.extend_from_slice(&value.to_le_bytes()); }
     fn i64(&mut self, value: i64) { self.bytes.extend_from_slice(&value.to_le_bytes()); }
+    fn i128(&mut self, value: i128) { self.bytes.extend_from_slice(&value.to_le_bytes()); }
     fn count(&mut self, value: usize) -> Result<(), CodecError> {
         if value > u32::MAX as usize { return Err(CodecError("snapshot item count exceeds u32".into())); }
         self.u32(value as u32);
@@ -67,6 +68,9 @@ impl<'a> Reader<'a> {
     fn i64(&mut self) -> Result<i64, CodecError> {
         Ok(i64::from_le_bytes(self.take(8)?.try_into().map_err(|_| CodecError("bad i64".into()))?))
     }
+    fn i128(&mut self) -> Result<i128, CodecError> {
+        Ok(i128::from_le_bytes(self.take(16)?.try_into().map_err(|_| CodecError("bad i128".into()))?))
+    }
     fn count(&mut self) -> Result<usize, CodecError> {
         let value = self.u32()? as usize;
         if value > MAX_ITEMS { return Err(CodecError("snapshot item count exceeds limit".into())); }
@@ -107,6 +111,7 @@ fn encode_value(writer: &mut Writer, value: &Value) -> Result<(), CodecError> {
         Value::Bool(true) => writer.u8(2),
         Value::Int(value) => { writer.u8(3); writer.i64(*value); }
         Value::Text(value) => { writer.u8(4); writer.string(value)?; }
+        Value::Decimal(value) => { writer.u8(5); writer.i128(value.scaled()); }
     }
     Ok(())
 }
@@ -118,6 +123,8 @@ fn decode_value(reader: &mut Reader<'_>) -> Result<Value, CodecError> {
         2 => Ok(Value::Bool(true)),
         3 => Ok(Value::Int(reader.i64()?)),
         4 => Ok(Value::Text(reader.string()?)),
+        5 => Ok(Value::Decimal(crate::decimal::Decimal::from_scaled(reader.i128()?)
+            .ok_or_else(|| CodecError("decimal exceeds precision limit".into()))?)),
         _ => Err(CodecError("invalid value tag".into())),
     }
 }
@@ -169,6 +176,7 @@ fn kind_tag(kind: ValueType) -> u8 {
         ValueType::Uuid => 7,
         ValueType::Json => 8,
         ValueType::Binary => 9,
+        ValueType::Decimal => 10,
     }
 }
 fn decode_kind(tag: u8) -> Result<ValueType, CodecError> {
@@ -182,6 +190,7 @@ fn decode_kind(tag: u8) -> Result<ValueType, CodecError> {
         7 => Ok(ValueType::Uuid),
         8 => Ok(ValueType::Json),
         9 => Ok(ValueType::Binary),
+        10 => Ok(ValueType::Decimal),
         _ => Err(CodecError("invalid field type tag".into())),
     }
 }

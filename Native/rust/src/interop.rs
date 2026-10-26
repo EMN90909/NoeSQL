@@ -27,7 +27,9 @@ fn sql_type(kind: ValueType, dialect: Dialect) -> &'static str {
         (ValueType::Int | ValueType::Ref, Dialect::Sqlite) => "INTEGER",
         (ValueType::Int | ValueType::Ref, Dialect::Postgres) => "BIGINT",
         (ValueType::Bool, Dialect::Sqlite) => "INTEGER",
+        (ValueType::Decimal, Dialect::Sqlite) => "TEXT",
         (ValueType::Bool, Dialect::Postgres) => "BOOLEAN",
+        (ValueType::Decimal, Dialect::Postgres) => "NUMERIC(38,6)",
         (ValueType::Text | ValueType::Json | ValueType::Binary | ValueType::Date |
          ValueType::DateTime | ValueType::Uuid, Dialect::Sqlite) => "TEXT",
         (ValueType::Text, Dialect::Postgres) => "TEXT",
@@ -55,6 +57,10 @@ fn sql_value(value: &Value, kind: ValueType, dialect: Dialect) -> Result<String,
             Dialect::Postgres => if *flag { "TRUE" } else { "FALSE" },
         }.into()),
         Value::Int(n) => Ok(n.to_string()),
+        Value::Decimal(n) => match dialect {
+            Dialect::Postgres => Ok(n.to_string()),
+            Dialect::Sqlite => quote(&n.to_string()),
+        },
         Value::Text(s) if matches!((kind, dialect), (ValueType::Binary, Dialect::Postgres)) =>
             Ok(format!("decode({}, 'hex')", quote(&s[2..])?)),
         Value::Text(s) => quote(s),

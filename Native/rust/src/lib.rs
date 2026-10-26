@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod decimal;
 pub mod planner;
 pub mod mvcc;
 pub mod extended_types;

@@ -21,7 +21,7 @@ impl std::fmt::Display for ReferenceError {
 impl std::error::Error for ReferenceError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TokenKind { Ident, Int, Str, Op, Sep, Eof }
+enum TokenKind { Ident, Int, Decimal, Str, Op, Sep, Eof }
 #[derive(Clone, Debug)]
 struct Token { kind: TokenKind, text: String, line: usize, column: usize }
 
@@ -83,7 +83,13 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
         if ch.is_ascii_digit() {
             let start = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() { adv!(1); }
-            out.push(Token { kind: TokenKind::Int, text: source[start..i].into(), line: at_line, column: at_column });
+            let decimal = i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit();
+            if decimal {
+                adv!(1);
+                while i < bytes.len() && bytes[i].is_ascii_digit() { adv!(1); }
+            }
+            out.push(Token { kind: if decimal { TokenKind::Decimal } else { TokenKind::Int },
+                text: source[start..i].into(), line: at_line, column: at_column });
             continue;
         }
         if ch == b'"' {
@@ -258,6 +264,9 @@ impl Parser {
             "null" => Expr::Literal(Value::Null),
             _ if first.kind == TokenKind::Str => Expr::Literal(Value::Text(first.text)),
             _ if first.kind == TokenKind::Int => Expr::Literal(Value::Int(first.text.parse::<i64>().map_err(|_| failure("NOE014", &first, "integer out of range"))?)),
+            _ if first.kind == TokenKind::Decimal => Expr::Literal(Value::Decimal(
+                crate::decimal::Decimal::parse(&first.text)
+                    .ok_or_else(|| failure("NOE014", &first, "decimal precision exceeds 38 digits / six fractional places"))?)),
             _ if first.kind == TokenKind::Ident => {
                 let mut name = first.text;
                 while self.eat(".") { name.push('.'); name.push_str(&self.id()?); }
@@ -442,6 +451,10 @@ fn eval(expr: &Expr, row: &Row, params: &Params) -> Result<Value, ReferenceError
         Expr::Param(name) => params.get(name).cloned().ok_or_else(|| ReferenceError { code: "NOE121", line: 1, column: 1, message: format!("unknown parameter ${name}") }),
         Expr::Unary(op, arg) => match (op.as_str(), eval(arg, row, params)?) {
             ("!", Value::Bool(value)) => Ok(Value::Bool(!value)),
+            ("-", Value::Decimal(value)) => value.checked_neg()
+                .map(Value::Decimal)
+                .ok_or_else(|| ReferenceError { code: "NOE124", line: 1, column: 1,
+                    message: "decimal arithmetic overflow".into() }),
             ("-", Value::Int(value)) => value
                 .checked_neg()
                 .map(Value::Int)
@@ -459,6 +472,13 @@ fn eval(expr: &Expr, row: &Row, params: &Params) -> Result<Value, ReferenceError
             match op.as_str() {
                 "&&" | "||" => match (left, right) { (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(if op == "&&" { a && b } else { a || b })), _ => type_error("boolean operator requires bool") },
                 "+" | "-" | "*" | "/" => match (left, right) {
+                    (Value::Decimal(a), Value::Decimal(b)) => {
+                        let value = match op.as_str() {
+                            "+" => a.checked_add(b), "-" => a.checked_sub(b),
+                            "*" => a.checked_mul(b), "/" => a.checked_div(b), _ => None,
+                        }.ok_or_else(|| db_failure("NOE124", "decimal overflow, divide by zero or intermediate precision limit"))?;
+                        Ok(Value::Decimal(value))
+                    },
                     (Value::Int(a), Value::Int(b)) => {
                         let value = match op.as_str() { "+" => a.checked_add(b), "-" => a.checked_sub(b), "*" => a.checked_mul(b), "/" if b != 0 => a.checked_div(b), _ => None }
                             .ok_or_else(|| ReferenceError { code: "NOE124", line: 1, column: 1, message: "integer arithmetic failed".into() })?;
@@ -482,12 +502,13 @@ fn predicate(filter: Option<&Expr>, row: &Row, params: &Params) -> Result<bool, 
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExprType { Null, Int, Bool, Text }
+enum ExprType { Null, Int, Decimal, Bool, Text }
 
 fn value_expr_type(value: &Value) -> ExprType {
     match value {
         Value::Null => ExprType::Null,
         Value::Int(_) => ExprType::Int,
+        Value::Decimal(_) => ExprType::Decimal,
         Value::Bool(_) => ExprType::Bool,
         Value::Text(_) => ExprType::Text,
     }
@@ -496,6 +517,7 @@ fn value_expr_type(value: &Value) -> ExprType {
 fn field_expr_type(kind: ValueType) -> ExprType {
     match kind {
         ValueType::Int | ValueType::Ref => ExprType::Int,
+        ValueType::Decimal => ExprType::Decimal,
         ValueType::Bool => ExprType::Bool,
         ValueType::Text | ValueType::Date | ValueType::DateTime | ValueType::Uuid |
         ValueType::Json | ValueType::Binary => ExprType::Text,
@@ -518,6 +540,7 @@ fn infer_expr_type(
             match (op.as_str(), kind) {
                 ("!", ExprType::Bool) => Ok(ExprType::Bool),
                 ("-", ExprType::Int) => Ok(ExprType::Int),
+                ("-", ExprType::Decimal) => Ok(ExprType::Decimal),
                 _ => db_error("NOE122", "invalid unary operand"),
             }
         }
@@ -526,6 +549,7 @@ fn infer_expr_type(
             let right = infer_expr_type(right, columns, params)?;
             match op.as_str() {
                 "+" | "-" | "*" | "/" if left == ExprType::Int && right == ExprType::Int => Ok(ExprType::Int),
+                "+" | "-" | "*" | "/" if left == ExprType::Decimal && right == ExprType::Decimal => Ok(ExprType::Decimal),
                 "&&" | "||" if left == ExprType::Bool && right == ExprType::Bool => Ok(ExprType::Bool),
                 "==" | "!=" | "<" | "<=" | ">" | ">=" if left == right && left != ExprType::Null => Ok(ExprType::Bool),
                 _ => db_error("NOE123", format!("incompatible {left:?} {op} {right:?}")),
@@ -673,7 +697,7 @@ impl Database {
                     }
                     if !matches!(field.kind, ValueType::Int | ValueType::Text | ValueType::Bool |
                         ValueType::Date | ValueType::DateTime | ValueType::Uuid |
-                        ValueType::Json | ValueType::Binary)
+                        ValueType::Json | ValueType::Binary | ValueType::Decimal)
                         || field.key || field.auto || field.unique || field.reference.is_some() {
                         return db_error("NOE242", "alter add supports only scalar non-key, non-unique fields");
                     }
@@ -883,8 +907,10 @@ impl Database {
                             let field = argument.as_ref().ok_or_else(|| db_failure("NOE030", "sum requires a column"))?;
                             let kind = columns.get(field).copied()
                                 .ok_or_else(|| db_failure("NOE120", format!("unknown aggregate column {field}")))?;
-                            if kind != ExprType::Int { return db_error("NOE236", "sum requires int"); }
-                            ExprType::Int
+                            if !matches!(kind, ExprType::Int | ExprType::Decimal) {
+                                return db_error("NOE236", "sum requires int or decimal");
+                            }
+                            kind
                         }
                         "min" | "max" => {
                             let field = argument.as_ref().ok_or_else(|| db_failure("NOE030", format!("{function} requires a column")))?;
@@ -1003,9 +1029,24 @@ impl Database {
         let values: Vec<Value> = rows.iter().filter_map(|row| lookup(row, field).cloned()).filter(|v| *v != Value::Null).collect();
         let value = match function.as_str() {
             "sum" => {
-                let mut total = 0i64;
-                for value in values { total = total.checked_add(value.as_i64().ok_or_else(|| db_failure("NOE231", "sum requires int"))?).ok_or_else(|| db_failure("NOE232", "aggregate overflow"))?; }
-                Value::Int(total)
+                let mut total_int = 0i64;
+                let mut total_decimal = crate::decimal::Decimal::from_scaled(0).expect("zero is valid");
+                let mut decimal = false;
+                for value in values {
+                    match value {
+                        Value::Int(n) if !decimal => {
+                            total_int = total_int.checked_add(n).ok_or_else(|| db_failure("NOE232", "aggregate overflow"))?;
+                        },
+                        Value::Decimal(n) => {
+                            if total_int != 0 { return db_error("NOE231", "mixed numeric aggregate"); }
+                            decimal = true;
+                            total_decimal = total_decimal.checked_add(n)
+                                .ok_or_else(|| db_failure("NOE232", "decimal aggregate overflow"))?;
+                        },
+                        _ => return db_error("NOE231", "sum requires int or decimal"),
+                    }
+                }
+                if decimal { Value::Decimal(total_decimal) } else { Value::Int(total_int) }
             }
             "min" | "max" => {
                 let mut iter = values.into_iter(); let mut best = iter.next().unwrap_or(Value::Null);
@@ -1240,6 +1281,30 @@ metrics add {label:"west",region:"east|alpha",amount:11}"#, &params()).unwrap();
             (Value::Text("west".into()), Value::Text("east|alpha".into()), Value::Int(16)),
             (Value::Text("west|east".into()), Value::Text("alpha".into()), Value::Int(10)),
         ]);
+    }
+
+    #[test]
+    fn decimal_type_exact_arithmetic_grouping_and_codec() {
+        use crate::decimal::Decimal;
+        let mut db = Database::default();
+        db.execute(r#"table ledger { id:int key auto
+ category:text required
+ amount:decimal required }
+ledger add {category:"a",amount:0.1}
+ledger add {category:"a",amount:0.2}
+ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
+        let mut sums = db.execute("ledger get category,sum(amount) as total group category sort category",
+            &params()).unwrap().rows;
+        assert_eq!(sums.len(), 2);
+        assert_eq!(sums.remove(0).get("total"), Some(&Value::Decimal(Decimal::parse("0.3").unwrap())));
+        let check = db.execute("ledger get amount where amount >= 0.2", &params()).unwrap().rows;
+        assert_eq!(check.len(), 1);
+        let loaded = crate::codec::decode(&crate::codec::encode(&db).unwrap()).unwrap();
+        assert_eq!(loaded.execute("ledger get amount where amount == 0.1", &params()).unwrap().rows.len(), 1);
+        assert!(db.execute("ledger add {category:\"wrong\",amount:1.0000001}", &params()).is_err());
+        assert!(db.execute("ledger where id == 1 set amount = 1.0 / 0.0", &params()).is_err());
+        let out = crate::reference::rows_json(&db.execute("ledger get amount take 1", &params()).unwrap().rows);
+        assert!(out.contains("\"0.100000\""), "{out}");
     }
 
 }
