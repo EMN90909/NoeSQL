@@ -15,6 +15,11 @@ pub enum ValueType {
     Bool,
     Text,
     Ref,
+    Date,
+    DateTime,
+    Uuid,
+    Json,
+    Binary,
 }
 
 impl ValueType {
@@ -24,18 +29,28 @@ impl ValueType {
             "bool" => Some(Self::Bool),
             "text" => Some(Self::Text),
             "ref" => Some(Self::Ref),
+            "date" => Some(Self::Date),
+            "datetime" => Some(Self::DateTime),
+            "uuid" => Some(Self::Uuid),
+            "json" => Some(Self::Json),
+            "binary" => Some(Self::Binary),
             _ => None,
         }
     }
 
     pub fn accepts(self, value: &Value) -> bool {
-        matches!(value, Value::Null)
-            || matches!(
-                (self, value),
-                (Self::Int | Self::Ref, Value::Int(_))
-                    | (Self::Bool, Value::Bool(_))
-                    | (Self::Text, Value::Text(_))
-            )
+        match (self, value) {
+            (_, Value::Null) => true,
+            (Self::Int | Self::Ref, Value::Int(_)) => true,
+            (Self::Bool, Value::Bool(_)) => true,
+            (Self::Text, Value::Text(_)) => true,
+            (Self::Date, Value::Text(s)) => crate::extended_types::valid_date(s),
+            (Self::DateTime, Value::Text(s)) => crate::extended_types::valid_datetime(s),
+            (Self::Uuid, Value::Text(s)) => crate::extended_types::valid_uuid(s),
+            (Self::Json, Value::Text(s)) => crate::extended_types::valid_json(s),
+            (Self::Binary, Value::Text(s)) => crate::extended_types::valid_binary_hex(s),
+            _ => false,
+        }
     }
 }
 
