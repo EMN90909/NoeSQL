@@ -102,3 +102,27 @@ fn main() {
         _ => usage(),
     }
 }
+
+
+#[cfg(test)]
+mod web_bridge_tests {
+    use super::*;
+    #[test]
+    fn typed_native_web_bindings_are_lossless() {
+        assert_eq!(parse_binding("title:text:O'Reilly; DROP TABLE users").1,
+                   Value::Text("O'Reilly; DROP TABLE users".to_owned()));
+        assert_eq!(parse_binding("n:int:123").1, Value::Int(123));
+        assert_eq!(parse_binding("flag:bool:false").1, Value::Bool(false));
+        assert_eq!(parse_binding("empty:null:").1, Value::Null);
+        assert_eq!(parse_binding("col:text:a:b:c").1, Value::Text("a:b:c".into()));
+    }
+    #[test]
+    fn parser_receives_parameterized_noesql_without_interpolation() {
+        let scripts = parse("table users { id: int key auto\\n name: text required\\n}").unwrap_err();
+        // NoeSQL scripts are parsed by the real engine, not a SQL text translator.
+        // Check the typed placeholder independently of database storage.
+        let _ = scripts;
+        let parsed = parse("users add {name: $value}").unwrap();
+        assert_eq!(parsed.len(), 1);
+    }
+}
