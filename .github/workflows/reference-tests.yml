@@ -7,6 +7,9 @@ on:
     branches: [main]
   workflow_dispatch:
   workflow_call:
+    secrets:
+      NOQERI_READ_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -66,6 +69,9 @@ jobs:
         with:
           repository: EMN90909/Noqeri
           ref: 4842fa34dc06afe39b4ba216b52c8ec7bb576984
+          # Default GITHUB_TOKEN cannot necessarily read another private repo.
+          # The optional read-only secret must be configured when needed.
+          token: ${{ secrets.NOQERI_READ_TOKEN || github.token }}
           path: .ci-noqeri
           persist-credentials: false
 
