@@ -113,7 +113,7 @@ pub const PageMap = struct {
         const capacity = getU32(encoded[12..16]);
         if (capacity < 2 or capacity > MAX_PAGES) return error.BadManifest;
         const length = bitmapBytes(capacity);
-        if (getU32(encoded[20..24]) != length or
+        if (@as(usize, getU32(encoded[20..24])) != length or
             encoded.len != HEADER_BYTES + length + DIGEST_BYTES) return error.BadManifest;
         for (encoded[24..HEADER_BYTES]) |byte| {
             if (byte != 0) return error.BadManifest;
