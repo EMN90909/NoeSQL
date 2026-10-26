@@ -388,7 +388,9 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
             for page in fs::read_dir(entry.path())? {
                 let page = page?;
                 if !page.file_type()?.is_file() ||
-                    !page.file_name().to_str().is_some_and(v3_bplus_disk::safe_index_blob_name) {
+                    !page.file_name().to_str().is_some_and(|name|
+                        v3_bplus_disk::safe_index_blob_name(name) ||
+                        v3_bplus_disk::safe_unpublished_index_temp_name(name)) {
                     return Err(invalid("unexpected file in unpublished index-pages directory"));
                 }
                 index_pages.push(page.path());
