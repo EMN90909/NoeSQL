@@ -9,7 +9,6 @@
 //! Index mutations have logarithmic page complexity. The surrounding Rust
 //! relational executor still uses fully materialized tables and the v3 pager
 //! still rewrites a complete relational data snapshot per transaction.
-use crate::hash256::sha256;
 use crate::v3_bplus_disk::{publish_blob, read_blob, NODE_MAGIC_V2};
 use std::path::Path;
 type Result<T> = std::result::Result<T, String>;
@@ -199,9 +198,6 @@ pub fn insert(dir: &Path, current: Option<Child>, pair: Pair) -> Result<Option<C
     if nodes.len() == 1 { Ok(nodes.pop()) }
     else { Ok(Some(persist(dir, Node::Branch(nodes))?)) }
 }
-fn node_count(node: &Node) -> usize {
-    match node { Node::Leaf(xs) => xs.len(), Node::Branch(xs) => xs.len() }
-}
 fn is_underfull(dir: &Path, child: &Child) -> Result<bool> {
     let node = read_node(dir, &child.hash)?.0;
     Ok(match node {
@@ -342,10 +338,40 @@ mod tests {
         for pair in entries.iter().step_by(2).copied() {
             root = remove(&dir, root, pair).unwrap();
         }
-        expected.retain(|p| p.1%2 == 1);
+        expected.retain(|p| p.1%2 == 1 || p.1 == 100_000);
         assert_eq!(scan(&dir, root.clone()).unwrap(), expected);
         assert!(remove(&dir, root.clone(), (99, 999_999)).is_err());
         assert!(insert(&dir, root.clone(), expected[0]).is_err());
+        let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn three_level_tree_mutates_only_one_logarithmic_path() {
+        let dir = directory("three-level");
+        // Above LEAF_CAP * BRANCH_CAP entries requires >1 internal page.
+        let pairs: Vec<Pair> = (0..15_000i64).map(|id| (id, id)).collect();
+        let root = build(&dir, pairs.clone()).unwrap();
+        let initial_files = fs::read_dir(&dir).unwrap().count();
+        let after_insert = insert(&dir, root.clone(), (15_001, 15_001)).unwrap();
+        let incremental_files = fs::read_dir(&dir).unwrap().count() - initial_files;
+        assert!(incremental_files <= 3, "three-level insert touched unrelated pages: {incremental_files}");
+        assert_eq!(scan(&dir, root.clone()).unwrap(), pairs);
+        assert_eq!(scan(&dir, after_insert.clone()).unwrap().len(), 15_001);
+        let after_delete = remove(&dir, after_insert, (15_001, 15_001)).unwrap();
+        assert_eq!(scan(&dir, after_delete).unwrap(), pairs);
+        let _ = fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn deletions_at_leaf_boundaries_redistribute_and_collapse_root() {
+        let dir = directory("leaf-boundaries");
+        let mut current = build(&dir, (0..241i64).map(|n| (n/3, n)).collect()).unwrap();
+        for key in 0..241i64 {
+            current = remove(&dir, current, (key/3, key)).unwrap();
+            if key%50 == 0 || key == 240 {
+                let expected: Vec<Pair> = ((key+1)..241).map(|n| (n/3,n)).collect();
+                assert_eq!(scan(&dir, current.clone()).unwrap(), expected);
+            }
+        }
+        assert!(current.is_none());
         let _ = fs::remove_dir_all(dir);
     }
     #[test]
