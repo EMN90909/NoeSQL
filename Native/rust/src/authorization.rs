@@ -10,7 +10,7 @@ use std::fmt;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TableGrant { pub read: bool, pub write: bool }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct AccessControl {
     pub schema_admin: bool,
     grants: BTreeMap<String, TableGrant>,
@@ -36,6 +36,10 @@ impl fmt::Display for AccessError {
 impl std::error::Error for AccessError {}
 impl From<ReferenceError> for AccessError {
     fn from(error: ReferenceError) -> Self { Self::Query(error) }
+}
+
+impl Default for AccessControl {
+    fn default() -> Self { Self::new() }
 }
 
 impl AccessControl {
