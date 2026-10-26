@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -14,13 +14,15 @@ fn fail(error: impl std::fmt::Display) -> ! {
     std::process::exit(1);
 }
 
-#[cfg(feature = "zig-pager")]
-fn run_script(database_path: &str, source: &str) {
-    let path = Path::new(database_path);
-    // The Zig pager handle must remain open while the entire statement
-    // executes and commits, otherwise multiple CLI writers can lose updates.
-    let report = noesql_runtime::zig_pager::execute_locked(path, source, &Params::new())
-        .unwrap_or_else(|error| fail(error));
+fn default_path(raw: &str) -> std::path::PathBuf {
+    let path = Path::new(raw);
+    validate_database_path(path).unwrap_or_else(|error| fail(error));
+    if path.is_absolute() { path.to_path_buf() } else {
+        std::env::current_dir().unwrap_or_else(|error| fail(error)).join(path)
+    }
+}
+
+fn display_report(report: noesql_runtime::reference::ExecutionReport) {
     if !report.rows.is_empty() {
         println!("{}", rows_json(&report.rows));
     } else {
@@ -28,10 +30,28 @@ fn run_script(database_path: &str, source: &str) {
     }
 }
 
-#[cfg(not(feature = "zig-pager"))]
-fn run_script(_: &str, _: &str) {
-    fail("this binary was built without the zig-pager feature");
+/// NQDB0003 is the default for new databases; existing v2 files are never
+/// changed implicitly. The Rust v3 store intentionally requires an owned,
+/// private directory and an absolute filesystem path.
+fn run_script(database_path: &str, source: &str) {
+    let path = default_path(database_path);
+    let report = noesql_runtime::v3_store::execute_or_create(
+        &path, source, &Params::new()
+    ).unwrap_or_else(|error| fail(error));
+    display_report(report);
 }
+
+#[cfg(feature = "zig-pager")]
+fn run_v2(database_path: &str, source: &str) {
+    let path = Path::new(database_path);
+    display_report(noesql_runtime::zig_pager::execute_locked(path, source, &Params::new())
+        .unwrap_or_else(|error| fail(error)));
+}
+#[cfg(not(feature = "zig-pager"))]
+fn run_v2(_: &str, _: &str) {
+    fail("legacy v2 execution requires the zig-pager feature");
+}
+
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -48,31 +68,28 @@ fn main() {
             validate_database_path(Path::new(&path)).unwrap_or_else(|error| fail(error));
             println!("ok: canonical .noedb path");
         }
-        Some("run") => {
+        Some(operation @ ("run" | "v2-run")) => {
             let database = args.next().unwrap_or_else(|| usage());
             let script = args.next().unwrap_or_else(|| usage());
             let source = read_source(script).unwrap_or_else(|error| fail(error));
-            run_script(&database, &source);
+            if operation == "v2-run" { run_v2(&database, &source); }
+            else { run_script(&database, &source); }
         }
-        Some("query") => {
+        Some(operation @ ("query" | "v2-query")) => {
             let database = args.next().unwrap_or_else(|| usage());
             let query: Vec<String> = args.collect();
             if query.is_empty() { usage(); }
-            run_script(&database, &query.join(" "));
+            if operation == "v2-query" { run_v2(&database, &query.join(" ")); }
+            else { run_script(&database, &query.join(" ")); }
         }
         Some("explain") => {
             let database = args.next().unwrap_or_else(|| usage());
             let query: Vec<String> = args.collect();
             if query.is_empty() { usage(); }
-            #[cfg(feature = "zig-pager")]
-            {
-                let database = noesql_runtime::zig_pager::load(Path::new(&database))
-                    .unwrap_or_else(|error| fail(error));
-                println!("{}", database.explain(&query.join(" "), &Params::new())
-                    .unwrap_or_else(|error| fail(error)));
-            }
-            #[cfg(not(feature = "zig-pager"))]
-            fail("EXPLAIN requires the zig-pager feature");
+            let snapshot = noesql_runtime::v3_store::snapshot(&default_path(&database))
+                .unwrap_or_else(|error| fail(error));
+            println!("{}", snapshot.database().explain(&query.join(" "), &Params::new())
+                .unwrap_or_else(|error| fail(error)));
         }
         Some("export-sql") => {
             let database = args.next().unwrap_or_else(|| usage());
