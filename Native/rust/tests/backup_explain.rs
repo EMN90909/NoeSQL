@@ -43,7 +43,7 @@ fn verified_backup_is_standalone_is_consistent_and_never_overwrites() {
     let backup_name = backup.to_str().unwrap();
     let restored_name = restored.to_str().unwrap();
     cli(&["v2-run", source_name, script.to_str().unwrap()], true);
-    cli(&["backup", source_name, backup_name], true);
+    cli(&["v2-backup", source_name, backup_name], true);
     assert!(backup.exists());
     // A portable backup is checkpointed: reading the standalone .noedb
     // must not need a copied live WAL file.
@@ -56,9 +56,9 @@ fn verified_backup_is_standalone_is_consistent_and_never_overwrites() {
     assert!(snapshot.contains("Amina"));
     assert!(!snapshot.contains("Brian"), "backup changed after later live write");
 
-    cli(&["backup", source_name, backup_name], false);
+    cli(&["v2-backup", source_name, backup_name], false);
     assert_eq!(snapshot, cli(&["v2-query", backup_name, "users get name sort name"], true));
-    cli(&["restore", backup_name, restored_name], true);
+    cli(&["v2-restore", backup_name, restored_name], true);
     assert!(cli(&["v2-query", restored_name, "users get name"], true).contains("Amina"));
     assert!(!cli(&["v2-query", restored_name, "users get name"], true).contains("Brian"));
 
@@ -99,14 +99,14 @@ fn schema_check_validates_evolution_but_never_applies_it() {
     fs::write(&evolution, "alter users add { active:bool required = true }").unwrap();
     let db = source.to_str().unwrap();
     cli(&["v2-run", db, setup.to_str().unwrap()], true);
-    let report = cli(&["schema-check", db, evolution.to_str().unwrap()], true);
+    let report = cli(&["v2-schema-check", db, evolution.to_str().unwrap()], true);
     assert!(report.contains("not applied"));
     assert!(report.contains("version 1 -> 2"));
     cli(&["v2-query", db, "users get name,active"], false);
     assert!(cli(&["v2-query", db, "users get name"], true).contains("Amina"));
 
     fs::write(&evolution, "alter unknown_table add { active:bool }").unwrap();
-    cli(&["schema-check", db, evolution.to_str().unwrap()], false);
+    cli(&["v2-schema-check", db, evolution.to_str().unwrap()], false);
 
     clean(&source);
     let _ = fs::remove_file(setup);
