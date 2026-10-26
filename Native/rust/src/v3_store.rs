@@ -700,6 +700,81 @@ mod tests {
     }
 
     #[test]
+    fn persisted_bplus_pages_survive_cold_reopen_and_reuse_unchanged_pages() {
+        use std::collections::BTreeSet;
+        let target = path("disk-bplus");
+        let mut initial = Database::default();
+        initial.execute("table logs { id:int key auto\n owner:int required\n score:int required }\nindex owner_idx on logs(owner)",
+            &Params::new()).unwrap();
+        for i in 0..800usize {
+            initial.execute(&format!("logs add {{owner:{},score:{i}}}", i % 80), &Params::new()).unwrap();
+        }
+        create_new(&target, &initial).unwrap();
+        let index_dir = versions(&target).join("index-pages");
+        let old_files: BTreeSet<_> = fs::read_dir(&index_dir).unwrap()
+            .map(|e| e.unwrap().file_name()).collect();
+        assert!(old_files.len() > 3, "expected multiple physical 4 KiB B+ pages");
+        let head = read_head(&target).unwrap();
+        let file = fs::read(versions(&target).join(head.filename)).unwrap();
+        let manifest_pages = u32::from_le_bytes(file[28..32].try_into().unwrap());
+        assert!(manifest_pages > 0, "v3 generation omitted persistent B+ manifest");
+        let frozen = snapshot(&target).unwrap();
+        assert!(frozen.database().tables["logs"].seek_cache.get().is_some());
+        let matched = frozen.query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len();
+        assert_eq!(matched, 10);
+        execute(&target, "logs add {owner:7,score:1000}", &Params::new()).unwrap();
+        let new_files: BTreeSet<_> = fs::read_dir(&index_dir).unwrap()
+            .map(|e| e.unwrap().file_name()).collect();
+        assert!(new_files.len() > old_files.len());
+        let incremental = new_files.difference(&old_files).count();
+        assert!(incremental < old_files.len(),
+            "index write amplification rewrote more pages than initial index");
+        let cold = snapshot(&target).unwrap();
+        assert_eq!(cold.query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 11);
+        assert_eq!(frozen.query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 10);
+        execute(&target, "logs where id == 1 set owner = 7", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 12);
+        execute(&target, "logs where id == 1 delete", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().query("logs get id where owner == 7", &Params::new())
+            .unwrap().rows.len(), 11);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn corrupted_persisted_index_page_fails_closed() {
+        let target = path("bplus-corrupt");
+        create_new(&target, &db()).unwrap();
+        let saved = snapshot(&target).unwrap();
+        let blobs = versions(&target).join("index-pages");
+        let page = fs::read_dir(&blobs).unwrap().next().unwrap().unwrap().path();
+        let mut file = OpenOptions::new().read(true).write(true).open(&page).unwrap();
+        use std::io::{Seek, SeekFrom};
+        file.seek(SeekFrom::Start(71)).unwrap();
+        file.write_all(&[255]).unwrap();
+        file.sync_all().unwrap();
+        assert!(snapshot(&target).is_err(), "corrupt B+ index page was silently ignored");
+        assert_eq!(saved.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn index_pages_written_before_failed_head_publish_do_not_change_visible_snapshot() {
+        let target = path("bplus-fault");
+        create_new(&target, &db()).unwrap();
+        let generation = snapshot(&target).unwrap().generation;
+        assert!(execute_internal(&target, "entries add {owner:2}", &Params::new(),
+            FaultPoint::BeforePublish).is_err());
+        let persisted = snapshot(&target).unwrap();
+        assert_eq!(persisted.generation, generation);
+        assert_eq!(persisted.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
+    #[test]
     fn stale_generation_cannot_overwrite_durable_committed_rows() {
         let target = path("optimistic-cas");
         create_new(&target, &db()).unwrap();
