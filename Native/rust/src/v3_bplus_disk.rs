@@ -537,6 +537,51 @@ mod tests {
     use super::*;
     use crate::reference::Params;
     #[test]
+    fn legacy_row_ordinal_index_upgrades_once_to_stable_primary_key_format() {
+        use crate::reference::parse;
+        let base = std::env::temp_dir().join(format!("noesql-bplus-upgrade-{}",
+            std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+        let directory = prepare_dir(&base).unwrap();
+        let mut db = Database::default();
+        db.execute("table records { id:int key auto\n owner:int required }\nindex by_owner on records(owner)",
+            &Params::new()).unwrap();
+        for id in 0..260 {
+            db.execute(&format!("records add {{owner:{}}}", id%13), &Params::new()).unwrap();
+        }
+        // Reconstruct a genuine NQBI0001/NQIM0001 manifest using the legacy
+        // row-ordinal format and verify it before performing the migration.
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(MAP_MAGIC);
+        let fields = expected_indexes(&db);
+        legacy.extend_from_slice(&(fields.len() as u32).to_le_bytes());
+        for (table, field) in fields {
+            let entries = row_entries(&db, &table, &field).unwrap();
+            let root = persist_tree(&directory, &entries).unwrap();
+            legacy.extend_from_slice(&(table.len() as u16).to_le_bytes());
+            legacy.extend_from_slice(&(field.len() as u16).to_le_bytes());
+            legacy.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+            legacy.extend_from_slice(&root);
+            legacy.extend_from_slice(table.as_bytes());
+            legacy.extend_from_slice(field.as_bytes());
+        }
+        legacy.extend_from_slice(&sha256(&legacy));
+        load_index_manifest(&base, &db, &legacy).unwrap();
+        let command = parse("records where id == 12 delete").unwrap();
+        let before = capture_dirty_indexes(&db, &command).unwrap();
+        db.execute("records where id == 12 delete", &Params::new()).unwrap();
+        let new_manifest = write_index_manifest_delta(
+            &base, &db, Some(&legacy), &command, Some(&before)
+        ).unwrap();
+        assert_eq!(&new_manifest[..8], MAP_MAGIC_V2);
+        load_index_manifest(&base, &db, &new_manifest).unwrap();
+        assert_eq!(db.execute("records get id where owner == 11", &Params::new())
+            .unwrap().rows.len(), 19);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
     fn unchanged_indexed_columns_reuse_entire_previous_root_without_page_writes() {
         use crate::reference::parse;
         let base = std::env::temp_dir().join(format!(
