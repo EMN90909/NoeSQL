@@ -5,6 +5,7 @@ pub mod v3_store;
 #[cfg(feature = "zig-pager")]
 pub mod relational_abi;
 pub mod planner;
+pub mod bplus_index;
 pub mod mvcc;
 pub mod extended_types;
 pub mod authorization;
