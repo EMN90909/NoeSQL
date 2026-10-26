@@ -534,7 +534,7 @@ users add {name:"Brian",active:false}"#, &Params::new()).unwrap();
     fn logically_invalid_typed_rows_are_rejected_after_checksum_valid_decode() {
         let mut database = Database::default();
         database.execute(
-            "table events { id:int key auto\\n stamp:date required }\\nevents add {stamp:\\"2026-10-26\\"}",
+            "table events { id:int key auto\n stamp:date required }\nevents add {stamp:\"2026-10-26\"}",
             &Params::new(),
         ).unwrap();
         database.tables.get_mut("events").unwrap().rows[0]
