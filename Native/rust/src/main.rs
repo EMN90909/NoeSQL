@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -102,6 +102,21 @@ fn main() {
             }
             #[cfg(not(feature = "zig-pager"))]
             fail("SQL export requires the zig-pager feature");
+        }
+        Some("export-sqlite") => {
+            let source = args.next().unwrap_or_else(|| usage());
+            let target = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            #[cfg(all(feature = "zig-pager", feature = "sqlite-adapter"))]
+            {
+                let db = noesql_runtime::zig_pager::load(Path::new(&source))
+                    .unwrap_or_else(|error| fail(error));
+                noesql_runtime::sqlite_adapter::export_into_sqlite(&db, Path::new(&target))
+                    .unwrap_or_else(|error| fail(error));
+                println!("verified SQLite import: {target}");
+            }
+            #[cfg(not(all(feature = "zig-pager", feature = "sqlite-adapter")))]
+            fail("export-sqlite requires zig-pager and sqlite-adapter features");
         }
         Some("schema-check") => {
             let database = args.next().unwrap_or_else(|| usage());

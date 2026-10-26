@@ -8,6 +8,7 @@ description = "Native Rust host/runtime for the NoeSQL Noqeri + Rust + Zig engin
 [features]
 default = []
 zig-pager = []
+sqlite-adapter = []
 noqeri-native = ["zig-pager"]
 stage2-nqri = ["zig-pager"]
 
