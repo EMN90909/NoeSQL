@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -31,6 +31,13 @@ test-rust-zig:
 	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
 		cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager
 
+# Optional live SQLite compatibility suite (requires libsqlite3-dev).
+# Runs the actual Rust -> Zig durable path plus fresh-file SQLite import.
+test-sqlite: no-js no-c-family
+	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
+	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
+		cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager,sqlite-adapter
+
 # Three independent Rust↔Zig executions; the Zig ABI test binary itself
 # exercises 96 write/reopen/checkpoint cycles and corruption rejection cases.
 stress: no-js no-c-family
@@ -38,6 +45,11 @@ stress: no-js no-c-family
 		echo "NoeSQL durability stress pass $iteration / 3"; \
 		$(MAKE) test-zig test-rust-zig; \
 	done
+
+# Isolated Rust compiler/parser and read execution microbenchmark.
+# This is NOT a substitute for a multi-client transactional load test.
+benchmark-parser-reads: no-js no-c-family
+	cargo run --release --locked --manifest-path Native/rust/Cargo.toml --bin benchmark_parser_reads
 
 native:
 	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe

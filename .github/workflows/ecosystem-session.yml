@@ -4,8 +4,9 @@ on:
   push:
     branches: [main, refactor/no-cpp-noqeri-rust-zig]
   pull_request:
-    branches: [main]
+    branches: [main, fix/stress-concurrent-cli-20261026, feat/noesql-release-qualification-20261026]
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

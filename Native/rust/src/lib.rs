@@ -1,5 +1,16 @@
 pub mod codec;
+pub mod decimal;
+mod hash256;
+pub mod v3_store;
+#[cfg(feature = "zig-pager")]
+pub mod relational_abi;
 pub mod planner;
+pub mod mvcc;
+pub mod extended_types;
+pub mod authorization;
+pub mod interop;
+#[cfg(feature = "sqlite-adapter")]
+pub mod sqlite_adapter;
 pub mod reference;
 pub mod value;
 #[cfg(feature = "zig-pager")]

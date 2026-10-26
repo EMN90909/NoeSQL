@@ -59,6 +59,16 @@ pub fn build(b: *std.Build) void {
     const pager_tests = b.addTest(.{ .root_module = v2_pager });
     step.dependOn(&b.addRunArtifact(pager_tests).step);
 
+    // Experimental v3 page allocator/manifest has independent tests;
+    // not wired into the NQDB0002 storage ABI or migration path yet.
+    const v3_allocator = b.createModule(.{
+        .root_source_file = b.path("src/page_alloc_v3.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const v3_tests = b.addTest(.{ .root_module = v3_allocator });
+    step.dependOn(&b.addRunArtifact(v3_tests).step);
+
     const v2_index = b.createModule(.{
         .root_source_file = b.path("src/index_v2.zig"),
         .target = target,

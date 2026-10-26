@@ -1,5 +1,5 @@
 use crate::codec;
-use crate::reference::Database;
+use crate::reference::{parse, Database, ExecutionReport, Params};
 use crate::{validate_database_path, Error};
 use core::ffi::{c_char, c_void};
 use std::ffi::CString;
@@ -10,6 +10,7 @@ const ABI_VERSION: u32 = 2;
 const STATUS_OK: i32 = 0;
 const STATUS_NOT_FOUND: i32 = 1;
 const STATUS_BUFFER_TOO_SMALL: i32 = -3;
+const STATUS_LOCKED: i32 = -6;
 const MAX_SNAPSHOT_BYTES: usize = 255 * PAGE_BYTES;
 const SNAPSHOT_MAGIC: &[u8; 8] = b"NQRS0001";
 pub(crate) const PAGE_BYTES: usize = 4096;
@@ -35,11 +36,21 @@ impl Pager {
         let text = path.to_str().ok_or(Error::InvalidDatabasePath)?;
         let c_path = CString::new(text).map_err(|_| Error::InvalidDatabasePath)?;
         let mut handle = std::ptr::null_mut();
-        let status = unsafe { noesql_zig_page_open(ABI_VERSION, c_path.as_ptr(), &mut handle) };
-        if status != STATUS_OK {
-            return Err(Error::Provider(status));
+        let mut retries = 0;
+        loop {
+            let status = unsafe { noesql_zig_page_open(ABI_VERSION, c_path.as_ptr(), &mut handle) };
+            if status == STATUS_LOCKED && retries < 500 {
+                retries += 1;
+                // A bounded busy-wait lets independent CLI processes serialize
+                // rather than failing instantly during ordinary write contention.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            if status != STATUS_OK {
+                return Err(Error::Provider(status));
+            }
+            return NonNull::new(handle).map(Self).ok_or(Error::Provider(-1002));
         }
-        NonNull::new(handle).map(Self).ok_or(Error::Provider(-1002))
     }
 
     fn as_ptr(&self) -> *mut c_void {
@@ -90,15 +101,14 @@ impl Drop for Pager {
     }
 }
 
-pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
+fn save_with_pager(pager: &Pager, database: &Database) -> Result<(), Error> {
     let payload = codec::encode(database).map_err(|error| Error::Codec(error.to_string()))?;
     if payload.is_empty() || payload.len() > MAX_SNAPSHOT_BYTES {
         return Err(Error::OutputTooLarge(payload.len()));
     }
-    let pager = Pager::open(path)?;
     match pager.read_page(0)? {
         Some(page) if &page[..8] == SNAPSHOT_MAGIC.as_slice() => {
-            // Refuse to destroy an existing snapshot whose checksums fail.
+            // Never overwrite a corrupt logical snapshot.
             let valid = unsafe { noesql_zig_page_validate_reference_state(pager.as_ptr()) };
             if valid != STATUS_OK {
                 return Err(Error::Provider(valid));
@@ -106,7 +116,7 @@ pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
         }
         Some(_) => return Err(Error::Codec("page zero is not a NoeSQL snapshot manifest".into())),
         None => {
-            // Legacy unmarked raw-row/index stores must not be overwritten.
+            // No manifest is not synonymous with an empty physical store.
             for id in 1..=255u32 {
                 if pager.read_page(id)?.is_some() {
                     return Err(Error::Codec("unmarked nonempty store cannot become a snapshot".into()));
@@ -121,8 +131,12 @@ pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn load(path: &Path) -> Result<Database, Error> {
+pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
     let pager = Pager::open(path)?;
+    save_with_pager(&pager, database)
+}
+
+fn load_with_pager(pager: &Pager) -> Result<Database, Error> {
     let mut required = 0usize;
     let status = unsafe { noesql_zig_snapshot_read(pager.as_ptr(), std::ptr::null_mut(), 0, &mut required) };
     if status != STATUS_BUFFER_TOO_SMALL && !(status == STATUS_OK && required == 0) {
@@ -143,6 +157,205 @@ pub fn load(path: &Path) -> Result<Database, Error> {
     codec::decode(&payload).map_err(|error| Error::Codec(error.to_string()))
 }
 
+pub fn load(path: &Path) -> Result<Database, Error> {
+    let pager = Pager::open(path)?;
+    load_with_pager(&pager)
+}
+
+fn load_or_default_with_pager(pager: &Pager) -> Result<Database, Error> {
+    match load_with_pager(pager) {
+        Ok(database) => Ok(database),
+        Err(Error::Provider(STATUS_NOT_FOUND)) => {
+            // A missing manifest is a fresh database ONLY if all physical
+            // pages are absent; otherwise reject legacy/unmarked stores.
+            for id in 1..=255u32 {
+                if pager.read_page(id)?.is_some() {
+                    return Err(Error::Codec("unmarked nonempty store is not a fresh database".into()));
+                }
+            }
+            Ok(Database::default())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Migrate a validated v2 relational snapshot while holding its exclusive
+/// cross-process Zig lock for the entire copy and verification. The caller
+/// never receives a mutable handle to v2 storage.
+pub fn with_locked_snapshot<T>(
+    source: &Path,
+    action: impl FnOnce(&Database) -> Result<T, String>,
+) -> Result<T, String> {
+    let pager = Pager::open(source).map_err(|e| e.to_string())?;
+    let db = load_with_pager(&pager).map_err(|e| e.to_string())?;
+    action(&db)
+}
+
+// One Zig flock covers load -> query/mutation -> durable WAL commit.
+// Without this scope two CLI writers can silently lose each other's changes.
+/// Execute under the Zig pager's inter-process writer lock, checking the
+/// serialized response size BEFORE publishing the WAL transaction. A caller
+/// with an undersized output buffer never accidentally commits a write.
+/// A read-only program loads its durable, WAL-recovered snapshot under the
+/// existing short exclusive pager lock, then releases that lock before running
+/// the query. Separate processes can evaluate snapshots while writers commit.
+/// This does NOT keep historical versions on disk or provide a v3 MVCC pager.
+pub fn execute_locked_bounded(
+    path: &Path,
+    source: &str,
+    params: &Params,
+    max_output_bytes: usize,
+) -> Result<(ExecutionReport, String), String> {
+    use crate::reference::rows_json;
+    let statements = parse(source).map_err(|error| error.to_string())?;
+    let read_only = Database::statements_read_only(&statements);
+    if read_only {
+        // The pager is dropped by load_or_default before query evaluation.
+        let database = load_or_default(path).map_err(|error| error.to_string())?;
+        let report = database.query_parsed(&statements, params).map_err(|error| error.to_string())?;
+        let output = format!(
+            "{{\"affected\":{},\"rows\":{}}}",
+            report.affected, rows_json(&report.rows)
+        );
+        if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+            return Err(format!("response of {} bytes exceeds output budget of {} bytes (not committed)",
+                output.len(), max_output_bytes.min(crate::MAX_OUTPUT_BYTES)));
+        }
+        return Ok((report, output));
+    }
+
+    // Writers still serialize across processes. Never release the file lock
+    // between reading the base generation and fsyncing its successor.
+    let pager = Pager::open(path).map_err(|error| error.to_string())?;
+    let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
+    let before = codec::encode(&database).map_err(|error| error.to_string())?;
+    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
+    let output = format!(
+        "{{\"affected\":{},\"rows\":{}}}",
+        report.affected, rows_json(&report.rows)
+    );
+    if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "response of {} bytes exceeds output budget of {} bytes (not committed)",
+            output.len(), max_output_bytes.min(crate::MAX_OUTPUT_BYTES)
+        ));
+    }
+    let after = codec::encode(&database).map_err(|error| error.to_string())?;
+    if before != after {
+        save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
+    }
+    Ok((report, output))
+}
+
+/// Executes authorized NoeSQL programs against the real Zig-backed store,
+/// under the same durable per-database lock as unguarded administrative writes.
+/// The AccessControl must be supplied by a trusted host for EVERY call; this
+/// does not persist policies or authenticate principals between processes.
+pub fn execute_locked_authorized(
+    path: &Path,
+    source: &str,
+    params: &Params,
+    access: &crate::authorization::AccessControl,
+    max_output_bytes: usize,
+) -> Result<(ExecutionReport, String), String> {
+    use crate::reference::rows_json;
+    let statements = access.prepare(source, params).map_err(|error| error.to_string())?;
+    let read_only = Database::statements_read_only(&statements);
+    if read_only {
+        // The WAL-recovered snapshot is private to this process after load.
+        let database = load_or_default(path).map_err(|error| error.to_string())?;
+        let report = database.query_parsed(&statements, params).map_err(|error| error.to_string())?;
+        access.validate_result(&report).map_err(|error| error.to_string())?;
+        let output = format!("{{\"affected\":{},\"rows\":{}}}", report.affected, rows_json(&report.rows));
+        if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+            return Err("NOE429: authorized read result exceeds output-byte budget".into());
+        }
+        return Ok((report, output));
+    }
+
+    let pager = Pager::open(path).map_err(|error| error.to_string())?;
+    let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
+    let before = codec::encode(&database).map_err(|error| error.to_string())?;
+    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
+    access.validate_result(&report).map_err(|error| error.to_string())?;
+    let output = format!("{{\"affected\":{},\"rows\":{}}}", report.affected, rows_json(&report.rows));
+    if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+        return Err("NOE429: authorized write result exceeds output-byte budget (not committed)".into());
+    }
+    let after = codec::encode(&database).map_err(|error| error.to_string())?;
+    if before != after {
+        save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
+    }
+    Ok((report, output))
+}
+
+/// Existing CLI host path; the result budget is large enough to cover its
+/// canonical JSON framing, just as required for the native relational ABI.
+pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<ExecutionReport, String> {
+    execute_locked_bounded(path, source, params, crate::MAX_OUTPUT_BYTES)
+        .map(|(report, _)| report)
+}
+
+/// Produce a self-contained, verified backup while keeping the source
+/// pager locked. The destination must not already exist. A temporary
+/// database is checkpointed (WAL empty), then atomically published with
+/// hard_link, which refuses to overwrite any existing destination.
+pub fn backup(source: &Path, destination: &Path) -> Result<(), Error> {
+    validate_database_path(source)?;
+    validate_database_path(destination)?;
+    if destination.exists()
+        || std::fs::metadata(format!("{}.wal", destination.display())).is_ok()
+        || std::fs::metadata(format!("{}.lck", destination.display())).is_ok()
+    {
+        return Err(Error::Io("backup destination already exists".into()));
+    }
+
+    let source_pager = Pager::open(source)?;
+    let database = load_with_pager(&source_pager)?;
+    let expected = codec::encode(&database).map_err(|error| Error::Codec(error.to_string()))?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| Error::Io(error.to_string()))?
+        .as_nanos();
+    let scratch = std::path::PathBuf::from(format!(
+        "{}.backup-{}-{nonce}.noedb", destination.display(), std::process::id()
+    ));
+    // The scratch filename is deliberately in the destination directory;
+    // atomic publication with hard_link cannot cross a filesystem boundary.
+    let outcome = (|| -> Result<(), Error> {
+        let temp_pager = Pager::open(&scratch)?;
+        save_with_pager(&temp_pager, &database)?;
+        let status = unsafe { noesql_zig_page_checkpoint(temp_pager.as_ptr()) };
+        if status != STATUS_OK { return Err(Error::Provider(status)); }
+        drop(temp_pager);
+
+        let checked = load(&scratch)?;
+        let actual = codec::encode(&checked).map_err(|error| Error::Codec(error.to_string()))?;
+        if actual != expected {
+            return Err(Error::Codec("backup verification mismatch".into()));
+        }
+        // The source remains locked until the verified backup is published.
+        // hard_link is an atomic no-clobber operation on one filesystem.
+        std::fs::hard_link(&scratch, destination).map_err(|error| Error::Io(error.to_string()))?;
+        let parent = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|error| Error::Io(error.to_string()))?;
+        Ok(())
+    })();
+
+    for target in [
+        scratch.clone(),
+        std::path::PathBuf::from(format!("{}.wal", scratch.display())),
+        std::path::PathBuf::from(format!("{}.lck", scratch.display())),
+        std::path::PathBuf::from(format!("{}.checkpoint.tmp", scratch.display())),
+    ] {
+        let _ = std::fs::remove_file(target);
+    }
+    outcome
+}
+
 pub fn checkpoint(path: &Path) -> Result<(), Error> {
     let pager = Pager::open(path)?;
     let status = unsafe { noesql_zig_page_checkpoint(pager.as_ptr()) };
@@ -154,11 +367,8 @@ pub fn checkpoint(path: &Path) -> Result<(), Error> {
 }
 
 pub fn load_or_default(path: &Path) -> Result<Database, Error> {
-    match load(path) {
-        Ok(database) => Ok(database),
-        Err(Error::Provider(STATUS_NOT_FOUND)) => Ok(Database::default()),
-        Err(error) => Err(error),
-    }
+    let pager = Pager::open(path)?;
+    load_or_default_with_pager(&pager)
 }
 
 #[cfg(test)]
@@ -243,6 +453,28 @@ users add {name:"Brian",active:false}"#,
     }
 
     #[test]
+    fn raw_pages_without_snapshot_manifest_are_not_a_fresh_database() {
+        let path = temp_path("unmarked-raw-page");
+        let pager = Pager::open(&path).unwrap();
+        let mut raw_page = [0u8; PAGE_BYTES];
+        raw_page[0] = 0x7f;
+        pager.stage_page(7, &raw_page).unwrap();
+        pager.commit().unwrap();
+        drop(pager);
+
+        assert!(
+            matches!(load_or_default(&path), Err(Error::Codec(_))),
+            "unmarked physical pages must not be misread as an empty DB"
+        );
+        let empty = Database::default();
+        assert!(
+            save(&path, &empty).is_err(),
+            "the same unmarked pages must never be overwritten"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
     fn empty_zig_store_loads_as_new_database_only_via_load_or_default() {
         let path = temp_path("empty");
         assert!(load(&path).is_err());
@@ -250,4 +482,36 @@ users add {name:"Brian",active:false}"#,
         assert!(database.tables.is_empty());
         cleanup(&path);
     }
+    #[test]
+    fn authorized_durable_tenant_scope_survives_cold_reopen_and_denies_bypass() {
+        use crate::authorization::AccessControl;
+        let path = temp_path("acl-durable");
+        execute_locked(&path, "table tenant_rows { id:int key auto\n tenant:int required\n value:int required }\ntenant_rows add {tenant:1,value:10}\ntenant_rows add {tenant:2,value:20}",
+            &Params::new()).unwrap();
+        let mut rights = AccessControl::new();
+        rights.grant("tenant_rows", true, true);
+        rights.restrict_rows("tenant_rows", "tenant", Value::Int(1));
+        let rows = execute_locked_authorized(&path, "tenant_rows get id,tenant,value",
+            &Params::new(), &rights, 1024).unwrap().0.rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("value"), Some(&Value::Int(10)));
+        assert_eq!(execute_locked_authorized(&path,
+            "tenant_rows where tenant == 2 set value = 99", &Params::new(),
+            &rights, 1024).unwrap().0.affected, 0);
+        assert!(execute_locked_authorized(&path,
+            "tenant_rows add {tenant:2,value:123}", &Params::new(), &rights, 1024).is_err());
+        assert!(execute_locked_authorized(&path,
+            "tenant_rows add {tenant:1,value:50}", &Params::new(), &rights, 3).is_err());
+        assert_eq!(execute_locked_authorized(&path,
+            "tenant_rows add {tenant:1,value:30}", &Params::new(), &rights, 1024).unwrap().0.affected, 1);
+        // Unrestricted administrative cold reopen sees all 3 rows, including
+        // the other tenant's unchanged value; rejected writes did not persist.
+        let mut db = load(&path).unwrap();
+        let all = db.execute("tenant_rows get tenant,value sort id", &Params::new()).unwrap().rows;
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[1].get("value"), Some(&Value::Int(20)));
+        assert_eq!(all[2].get("value"), Some(&Value::Int(30)));
+        cleanup(&path);
+    }
+
 }

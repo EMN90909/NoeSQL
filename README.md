@@ -199,6 +199,52 @@ build.zig        top-level native build/test orchestration
 Makefile         native developer entrypoints and stack guards
 ```
 
+## Concurrency, stress tests, and measured performance
+
+The native Zig pager currently **serializes access through one exclusive file
+lock**, including reads. The Rust CLI holds this lock across the complete
+load / execution / durable commit cycle, preventing lost updates between
+independent CLI writer processes. Busy file locks are retried for a bounded
+period; a busy timeout is a failure, not evidence that a transaction committed.
+
+The Rust runtime avoids cloning an entire database for read-only programs
+and the CLI skips redundant snapshot encoding when no statement can write.
+The NoeSQL parser moves tokens rather than cloning each token string.
+These changes reduce allocation overhead but **do not** replace the existing
+full-snapshot copy-on-write model for mutating queries, nor do they implement
+reader/writer lock separation or MVCC.
+
+The WAL now checkpoints automatically before a commit that would exceed
+a **16 MiB replay threshold**, retaining the 64 MiB hard maximum. This
+prevents sustained ordinary writes from exhausting the journal solely from
+accumulated committed transactions. The pager also avoids syncing the
+**parent directory on routine reopen** when no file entry was created.
+Existing WAL and checkpoint durability fsyncs are unchanged.
+Crash recovery still validates the versioned checkpoint and WAL;
+auto-checkpoint failure aborts the pending transaction before its WAL append.
+
+Reproduce the durability and concurrency regression suite:
+
+```sh
+make stress
+# Single Rust parser / read-path microbenchmark, not a SQL-server benchmark:
+make benchmark-parser-reads
+```
+
+The integration stress test exercises 8 independent writer processes,
+96 committed rows, WAL recovery and cold reopening. The Zig tests cover
+automatic checkpoint rollover, 190 successive multi-page transactions,
+and checkpoint fault injection before a newly staged WAL commit.
+The microbenchmark reports parser throughput and read execution time on the
+**machine that executes it**; no unexecuted speedups or comparisons to SQLite
+or PostgreSQL should be inferred from code inspection alone.
+
+Production-scale concurrency remains out of scope until the storage format
+supports independent read snapshots and write-ahead transactions without
+global exclusive read locking. Run longer multi-process soak, kill/restart,
+filesystem fault-injection, memory-limit, and comparative latency suites
+before any production readiness claim.
+
 ## Store format and safety boundaries
 
 The current `NQDB0002` header has a 32-byte active-page bitmap: only **256 physical pages (0..255)** are representable. This branch enforces the actual format limit rather than permitting writes that overflow the header. The bounded snapshot interface supports at most 255 data pages plus the page-zero manifest.

@@ -23,6 +23,7 @@ impl Writer {
     fn u8(&mut self, value: u8) { self.bytes.push(value); }
     fn u32(&mut self, value: u32) { self.bytes.extend_from_slice(&value.to_le_bytes()); }
     fn i64(&mut self, value: i64) { self.bytes.extend_from_slice(&value.to_le_bytes()); }
+    fn i128(&mut self, value: i128) { self.bytes.extend_from_slice(&value.to_le_bytes()); }
     fn count(&mut self, value: usize) -> Result<(), CodecError> {
         if value > u32::MAX as usize { return Err(CodecError("snapshot item count exceeds u32".into())); }
         self.u32(value as u32);
@@ -67,6 +68,9 @@ impl<'a> Reader<'a> {
     fn i64(&mut self) -> Result<i64, CodecError> {
         Ok(i64::from_le_bytes(self.take(8)?.try_into().map_err(|_| CodecError("bad i64".into()))?))
     }
+    fn i128(&mut self) -> Result<i128, CodecError> {
+        Ok(i128::from_le_bytes(self.take(16)?.try_into().map_err(|_| CodecError("bad i128".into()))?))
+    }
     fn count(&mut self) -> Result<usize, CodecError> {
         let value = self.u32()? as usize;
         if value > MAX_ITEMS { return Err(CodecError("snapshot item count exceeds limit".into())); }
@@ -107,6 +111,7 @@ fn encode_value(writer: &mut Writer, value: &Value) -> Result<(), CodecError> {
         Value::Bool(true) => writer.u8(2),
         Value::Int(value) => { writer.u8(3); writer.i64(*value); }
         Value::Text(value) => { writer.u8(4); writer.string(value)?; }
+        Value::Decimal(value) => { writer.u8(5); writer.i128(value.scaled()); }
     }
     Ok(())
 }
@@ -118,6 +123,8 @@ fn decode_value(reader: &mut Reader<'_>) -> Result<Value, CodecError> {
         2 => Ok(Value::Bool(true)),
         3 => Ok(Value::Int(reader.i64()?)),
         4 => Ok(Value::Text(reader.string()?)),
+        5 => Ok(Value::Decimal(crate::decimal::Decimal::from_scaled(reader.i128()?)
+            .ok_or_else(|| CodecError("decimal exceeds precision limit".into()))?)),
         _ => Err(CodecError("invalid value tag".into())),
     }
 }
@@ -164,6 +171,12 @@ fn kind_tag(kind: ValueType) -> u8 {
         ValueType::Bool => 2,
         ValueType::Text => 3,
         ValueType::Ref => 4,
+        ValueType::Date => 5,
+        ValueType::DateTime => 6,
+        ValueType::Uuid => 7,
+        ValueType::Json => 8,
+        ValueType::Binary => 9,
+        ValueType::Decimal => 10,
     }
 }
 fn decode_kind(tag: u8) -> Result<ValueType, CodecError> {
@@ -172,6 +185,12 @@ fn decode_kind(tag: u8) -> Result<ValueType, CodecError> {
         2 => Ok(ValueType::Bool),
         3 => Ok(ValueType::Text),
         4 => Ok(ValueType::Ref),
+        5 => Ok(ValueType::Date),
+        6 => Ok(ValueType::DateTime),
+        7 => Ok(ValueType::Uuid),
+        8 => Ok(ValueType::Json),
+        9 => Ok(ValueType::Binary),
+        10 => Ok(ValueType::Decimal),
         _ => Err(CodecError("invalid field type tag".into())),
     }
 }
@@ -394,7 +413,25 @@ pub fn decode(bytes: &[u8]) -> Result<Database, CodecError> {
 
         let row_count = reader.count()?;
         let mut rows = Vec::with_capacity(row_count);
-        for _ in 0..row_count { rows.push(decode_row(&mut reader)?); }
+        for _ in 0..row_count {
+            let row = decode_row(&mut reader)?;
+            // Whole-page SHA checksums alone do not verify that the decoded
+            // logical row obeys its column definitions. Fail closed on
+            // unknown columns, invalid typed data and required null values.
+            if row.keys().any(|name| !names.contains(name)) {
+                return Err(CodecError("row has unknown fields".into()));
+            }
+            for field in &fields {
+                let value = row.get(&field.name).unwrap_or(&Value::Null);
+                if (field.required || field.key) && *value == Value::Null {
+                    return Err(CodecError("required field is null".into()));
+                }
+                if !field.kind.accepts(value) {
+                    return Err(CodecError("stored row violates field type".into()));
+                }
+            }
+            rows.push(row);
+        }
 
         if tables.insert(table_name, Table { fields, rows, next_auto }).is_some() {
             return Err(CodecError("duplicate table".into()));
@@ -500,6 +537,25 @@ users add {name:"Brian",active:false}"#, &Params::new()).unwrap();
             decoded.execute("users get id sort id", &Params::new()).unwrap().rows[2].get("id"),
             Some(&Value::Int(3))
         );
+    }
+
+    #[test]
+    fn logically_invalid_typed_rows_are_rejected_after_checksum_valid_decode() {
+        let mut database = Database::default();
+        database.execute(
+            "table events { id:int key auto\n stamp:date required }\nevents add {stamp:\"2026-10-26\"}",
+            &Params::new(),
+        ).unwrap();
+        database.tables.get_mut("events").unwrap().rows[0]
+            .insert("stamp".into(), Value::Text("2026-02-30".into()));
+        let encoded = encode(&database).unwrap();
+        let err = decode(&encoded).unwrap_err();
+        assert!(err.0.contains("field type"), "{err}");
+
+        database.tables.get_mut("events").unwrap().rows[0]
+            .insert("stamp".into(), Value::Null);
+        let encoded = encode(&database).unwrap();
+        assert!(decode(&encoded).unwrap_err().0.contains("required"));
     }
 
     #[test]

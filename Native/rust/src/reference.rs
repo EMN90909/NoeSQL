@@ -21,7 +21,7 @@ impl std::fmt::Display for ReferenceError {
 impl std::error::Error for ReferenceError {}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TokenKind { Ident, Int, Str, Op, Sep, Eof }
+enum TokenKind { Ident, Int, Decimal, Str, Op, Sep, Eof }
 #[derive(Clone, Debug)]
 struct Token { kind: TokenKind, text: String, line: usize, column: usize }
 
@@ -34,9 +34,16 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
         return Err(ReferenceError { code: "NOE005", line: 1, column: 1, message: "source exceeds 1 MiB limit".into() });
     }
     let bytes = source.as_bytes();
-    let mut out = Vec::new();
+    // Reserve a typical query-sized token buffer, not an unbounded buffer
+    // based on attacker-controlled source length.
+    let mut out = Vec::with_capacity(64);
     let (mut i, mut line, mut column, mut depth) = (0usize, 1usize, 1usize, 0usize);
     while i < bytes.len() {
+        // Check incrementally: never accumulate a million tiny tokens before
+        // discovering that the program exceeded the public compiler limit.
+        if out.len() > 100_000 {
+            return Err(ReferenceError { code: "NOE006", line, column, message: "too many tokens".into() });
+        }
         let (at_line, at_column) = (line, column);
         let ch = bytes[i];
         macro_rules! adv {
@@ -76,7 +83,13 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
         if ch.is_ascii_digit() {
             let start = i;
             while i < bytes.len() && bytes[i].is_ascii_digit() { adv!(1); }
-            out.push(Token { kind: TokenKind::Int, text: source[start..i].into(), line: at_line, column: at_column });
+            let decimal = i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1].is_ascii_digit();
+            if decimal {
+                adv!(1);
+                while i < bytes.len() && bytes[i].is_ascii_digit() { adv!(1); }
+            }
+            out.push(Token { kind: if decimal { TokenKind::Decimal } else { TokenKind::Int },
+                text: source[start..i].into(), line: at_line, column: at_column });
             continue;
         }
         if ch == b'"' {
@@ -216,7 +229,16 @@ impl Parser {
     fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0 } }
     fn current(&self) -> &Token { &self.tokens[self.pos] }
     fn is(&self, value: &str) -> bool { self.current().text == value }
-    fn take(&mut self) -> Token { let t = self.tokens[self.pos].clone(); self.pos += 1; t }
+    fn take(&mut self) -> Token {
+        let index = self.pos;
+        self.pos += 1;
+        // Parsing owns the token stream. Move its text into the AST instead of
+        // allocating another String for every identifier, literal and symbol.
+        std::mem::replace(
+            &mut self.tokens[index],
+            Token { kind: TokenKind::Eof, text: String::new(), line: 0, column: 0 },
+        )
+    }
     fn eat(&mut self, value: &str) -> bool { if self.is(value) { self.take(); true } else { false } }
     fn need(&mut self, value: &str) -> Result<(), ReferenceError> {
         if self.eat(value) { Ok(()) } else { Err(failure("NOE010", self.current(), format!("expected {value}, found {}", self.current().text))) }
@@ -242,6 +264,9 @@ impl Parser {
             "null" => Expr::Literal(Value::Null),
             _ if first.kind == TokenKind::Str => Expr::Literal(Value::Text(first.text)),
             _ if first.kind == TokenKind::Int => Expr::Literal(Value::Int(first.text.parse::<i64>().map_err(|_| failure("NOE014", &first, "integer out of range"))?)),
+            _ if first.kind == TokenKind::Decimal => Expr::Literal(Value::Decimal(
+                crate::decimal::Decimal::parse(&first.text)
+                    .ok_or_else(|| failure("NOE014", &first, "decimal precision exceeds 38 digits / six fractional places"))?)),
             _ if first.kind == TokenKind::Ident => {
                 let mut name = first.text;
                 while self.eat(".") { name.push('.'); name.push_str(&self.id()?); }
@@ -426,6 +451,10 @@ fn eval(expr: &Expr, row: &Row, params: &Params) -> Result<Value, ReferenceError
         Expr::Param(name) => params.get(name).cloned().ok_or_else(|| ReferenceError { code: "NOE121", line: 1, column: 1, message: format!("unknown parameter ${name}") }),
         Expr::Unary(op, arg) => match (op.as_str(), eval(arg, row, params)?) {
             ("!", Value::Bool(value)) => Ok(Value::Bool(!value)),
+            ("-", Value::Decimal(value)) => value.checked_neg()
+                .map(Value::Decimal)
+                .ok_or_else(|| ReferenceError { code: "NOE124", line: 1, column: 1,
+                    message: "decimal arithmetic overflow".into() }),
             ("-", Value::Int(value)) => value
                 .checked_neg()
                 .map(Value::Int)
@@ -443,6 +472,13 @@ fn eval(expr: &Expr, row: &Row, params: &Params) -> Result<Value, ReferenceError
             match op.as_str() {
                 "&&" | "||" => match (left, right) { (Value::Bool(a), Value::Bool(b)) => Ok(Value::Bool(if op == "&&" { a && b } else { a || b })), _ => type_error("boolean operator requires bool") },
                 "+" | "-" | "*" | "/" => match (left, right) {
+                    (Value::Decimal(a), Value::Decimal(b)) => {
+                        let value = match op.as_str() {
+                            "+" => a.checked_add(b), "-" => a.checked_sub(b),
+                            "*" => a.checked_mul(b), "/" => a.checked_div(b), _ => None,
+                        }.ok_or_else(|| db_failure("NOE124", "decimal overflow, divide by zero or intermediate precision limit"))?;
+                        Ok(Value::Decimal(value))
+                    },
                     (Value::Int(a), Value::Int(b)) => {
                         let value = match op.as_str() { "+" => a.checked_add(b), "-" => a.checked_sub(b), "*" => a.checked_mul(b), "/" if b != 0 => a.checked_div(b), _ => None }
                             .ok_or_else(|| ReferenceError { code: "NOE124", line: 1, column: 1, message: "integer arithmetic failed".into() })?;
@@ -466,12 +502,13 @@ fn predicate(filter: Option<&Expr>, row: &Row, params: &Params) -> Result<bool, 
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ExprType { Null, Int, Bool, Text }
+enum ExprType { Null, Int, Decimal, Bool, Text }
 
 fn value_expr_type(value: &Value) -> ExprType {
     match value {
         Value::Null => ExprType::Null,
         Value::Int(_) => ExprType::Int,
+        Value::Decimal(_) => ExprType::Decimal,
         Value::Bool(_) => ExprType::Bool,
         Value::Text(_) => ExprType::Text,
     }
@@ -480,8 +517,10 @@ fn value_expr_type(value: &Value) -> ExprType {
 fn field_expr_type(kind: ValueType) -> ExprType {
     match kind {
         ValueType::Int | ValueType::Ref => ExprType::Int,
+        ValueType::Decimal => ExprType::Decimal,
         ValueType::Bool => ExprType::Bool,
-        ValueType::Text => ExprType::Text,
+        ValueType::Text | ValueType::Date | ValueType::DateTime | ValueType::Uuid |
+        ValueType::Json | ValueType::Binary => ExprType::Text,
     }
 }
 
@@ -501,6 +540,7 @@ fn infer_expr_type(
             match (op.as_str(), kind) {
                 ("!", ExprType::Bool) => Ok(ExprType::Bool),
                 ("-", ExprType::Int) => Ok(ExprType::Int),
+                ("-", ExprType::Decimal) => Ok(ExprType::Decimal),
                 _ => db_error("NOE122", "invalid unary operand"),
             }
         }
@@ -509,6 +549,7 @@ fn infer_expr_type(
             let right = infer_expr_type(right, columns, params)?;
             match op.as_str() {
                 "+" | "-" | "*" | "/" if left == ExprType::Int && right == ExprType::Int => Ok(ExprType::Int),
+                "+" | "-" | "*" | "/" if left == ExprType::Decimal && right == ExprType::Decimal => Ok(ExprType::Decimal),
                 "&&" | "||" if left == ExprType::Bool && right == ExprType::Bool => Ok(ExprType::Bool),
                 "==" | "!=" | "<" | "<=" | ">" | ">=" if left == right && left != ExprType::Null => Ok(ExprType::Bool),
                 _ => db_error("NOE123", format!("incompatible {left:?} {op} {right:?}")),
@@ -532,11 +573,78 @@ fn merge(left_name: &str, left: &Row, right_name: &str, right: Option<&Row>) -> 
 impl Database {
     pub fn execute(&mut self, source: &str, params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let statements = parse(source)?;
+        self.execute_parsed(&statements, params)
+    }
+
+    /// All-select programs cannot mutate state: avoid copying the complete
+    /// database and preserve the identity of its existing row allocations.
+    pub fn statements_read_only(statements: &[Statement]) -> bool {
+        statements.iter().all(|statement| matches!(statement, Statement::Get(_)))
+    }
+
+    /// Execute an already parsed NoeSQL program. Used by the durable host
+    /// to parse outside the storage lock and avoid parsing a second time.
+    pub fn execute_parsed(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
+        if Self::statements_read_only(statements) {
+            return self.query_parsed(statements, params);
+        }
+        // A write program is still atomic: work on a copy until all
+        // statements have succeeded, including the late-failure case.
         let mut working = self.clone();
-        let report = working.execute_many(&statements, params)?;
+        let report = working.execute_many(statements, params)?;
         *self = working;
         Ok(report)
     }
+    /// Execute SELECT statements against an immutable database snapshot.
+    /// This is used by the in-process MVCC reader path and never clones rows.
+    pub fn query_parsed(&self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
+        if !Self::statements_read_only(statements) {
+            return db_error("NOE241", "read-only snapshot cannot execute writes");
+        }
+        let mut report = ExecutionReport::default();
+        for statement in statements {
+            if let Statement::Get(select) = statement {
+                let current = self.select(select, params)?;
+                report.affected += current.affected;
+                if !current.rows.is_empty() { report.rows = current.rows; }
+            }
+        }
+        Ok(report)
+    }
+
+    /// Describe the plan the current engine will actually use. The index
+    /// catalog is currently metadata, not an executable B+tree access path.
+    /// EXPLAIN must never imply that a secondary index was used.
+    pub fn explain(&self, source: &str, params: &Params) -> Result<String, ReferenceError> {
+        let statements = parse(source)?;
+        let [Statement::Get(select)] = statements.as_slice() else {
+            return db_error("NOE240", "EXPLAIN requires exactly one read-only get query");
+        };
+        self.validate_select(select, params)?;
+        let left = self.tables.get(&select.table)
+            .ok_or_else(|| db_failure("NOE100", format!("unknown table {}", select.table)))?;
+        let right = select.join.as_ref().and_then(|join| self.tables.get(&join.table));
+        let plan = choose_relational_plan(select, left, right);
+        let join = match &plan.join {
+            JoinPlan::None => "none".to_string(),
+            JoinPlan::Nested => "nested-loop".to_string(),
+            JoinPlan::Hash { left_key, right_key } => format!("hash({left_key}={right_key})"),
+        };
+        let sort = select.sort.as_deref().unwrap_or("none");
+        Ok(format!(
+            "access=full_scan table={} rows={} join={} right_rows={} push_where={} grouped={} sort={} skip={} take={}",
+            select.table,
+            plan.left_rows,
+            join,
+            plan.right_rows,
+            plan.push_where,
+            !select.group.is_empty(),
+            sort,
+            select.skip,
+            select.take.map(|n| n.to_string()).unwrap_or_else(|| "all".into()),
+        ))
+    }
+
     fn execute_many(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let mut report = ExecutionReport::default();
         for statement in statements { let current = self.execute_one(statement, params)?; report.affected += current.affected; if !current.rows.is_empty() { report.rows = current.rows; } }
@@ -587,7 +695,9 @@ impl Database {
                     if table.fields.iter().any(|f| f.name == field.name) || !added.insert(field.name.clone()) {
                         return db_error("NOE241", format!("duplicate migration field {}", field.name));
                     }
-                    if !matches!(field.kind, ValueType::Int | ValueType::Text | ValueType::Bool)
+                    if !matches!(field.kind, ValueType::Int | ValueType::Text | ValueType::Bool |
+                        ValueType::Date | ValueType::DateTime | ValueType::Uuid |
+                        ValueType::Json | ValueType::Binary | ValueType::Decimal)
                         || field.key || field.auto || field.unique || field.reference.is_some() {
                         return db_error("NOE242", "alter add supports only scalar non-key, non-unique fields");
                     }
@@ -797,8 +907,10 @@ impl Database {
                             let field = argument.as_ref().ok_or_else(|| db_failure("NOE030", "sum requires a column"))?;
                             let kind = columns.get(field).copied()
                                 .ok_or_else(|| db_failure("NOE120", format!("unknown aggregate column {field}")))?;
-                            if kind != ExprType::Int { return db_error("NOE236", "sum requires int"); }
-                            ExprType::Int
+                            if !matches!(kind, ExprType::Int | ExprType::Decimal) {
+                                return db_error("NOE236", "sum requires int or decimal");
+                            }
+                            kind
                         }
                         "min" | "max" => {
                             let field = argument.as_ref().ok_or_else(|| db_failure("NOE030", format!("{function} requires a column")))?;
@@ -917,9 +1029,24 @@ impl Database {
         let values: Vec<Value> = rows.iter().filter_map(|row| lookup(row, field).cloned()).filter(|v| *v != Value::Null).collect();
         let value = match function.as_str() {
             "sum" => {
-                let mut total = 0i64;
-                for value in values { total = total.checked_add(value.as_i64().ok_or_else(|| db_failure("NOE231", "sum requires int"))?).ok_or_else(|| db_failure("NOE232", "aggregate overflow"))?; }
-                Value::Int(total)
+                let mut total_int = 0i64;
+                let mut total_decimal = crate::decimal::Decimal::from_scaled(0).expect("zero is valid");
+                let mut decimal = false;
+                for value in values {
+                    match value {
+                        Value::Int(n) if !decimal => {
+                            total_int = total_int.checked_add(n).ok_or_else(|| db_failure("NOE232", "aggregate overflow"))?;
+                        },
+                        Value::Decimal(n) => {
+                            if total_int != 0 { return db_error("NOE231", "mixed numeric aggregate"); }
+                            decimal = true;
+                            total_decimal = total_decimal.checked_add(n)
+                                .ok_or_else(|| db_failure("NOE232", "decimal aggregate overflow"))?;
+                        },
+                        _ => return db_error("NOE231", "sum requires int or decimal"),
+                    }
+                }
+                if decimal { Value::Decimal(total_decimal) } else { Value::Int(total_int) }
             }
             "min" | "max" => {
                 let mut iter = values.into_iter(); let mut best = iter.next().unwrap_or(Value::Null);
@@ -947,10 +1074,17 @@ impl Database {
         let aggregated = !select.group.is_empty() || select.projections.iter().any(|p| matches!(p, Projection::Aggregate { .. }));
         let mut rows = Vec::new();
         if aggregated {
-            let mut groups: BTreeMap<String, Vec<Row>> = BTreeMap::new();
-            if select.group.is_empty() { groups.insert(String::new(), source); }
+            // Typed composite keys avoid lossy display/serialization delimiters,
+            // and preserve NULL, bool, integer and text identity exactly.
+            let mut groups: BTreeMap<Vec<Value>, Vec<Row>> = BTreeMap::new();
+            if select.group.is_empty() { groups.insert(Vec::new(), source); }
             else {
-                for row in source { let key = select.group.iter().map(|name| format!("{:?}", lookup(&row, name).unwrap_or(&Value::Null))).collect::<Vec<_>>().join("|"); groups.entry(key).or_default().push(row); }
+                for row in source {
+                    let key: Vec<Value> = select.group.iter()
+                        .map(|name| lookup(&row, name).cloned().unwrap_or(Value::Null))
+                        .collect();
+                    groups.entry(key).or_default().push(row);
+                }
             }
             for group in groups.values() { if let Some(row) = self.project_group(select, group, params)? { rows.push(row); } }
         } else {
@@ -968,7 +1102,9 @@ impl Database {
         }
         if let Some(sort) = &select.sort { rows.sort_by(|a,b| lookup(a, sort).unwrap_or(&Value::Null).compare(lookup(b, sort).unwrap_or(&Value::Null)).unwrap_or(Ordering::Equal)); }
         let start = select.skip.min(rows.len()); let end = select.take.map(|n| start.saturating_add(n).min(rows.len())).unwrap_or(rows.len());
-        Ok(ExecutionReport { affected: 0, rows: rows[start..end].to_vec() })
+        // Consume the query buffer instead of cloning every projected row a
+        // second time when applying SKIP/TAKE to the result.
+        Ok(ExecutionReport { affected: 0, rows: rows.into_iter().skip(start).take(end - start).collect() })
     }
     fn update(&mut self, name: &str, filter: &Expr, values: &[(String, Expr)], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let table = self.tables.get(name).ok_or_else(|| db_failure("NOE100", format!("unknown table {name}")))?;
@@ -1121,4 +1257,54 @@ tickets add {team_id:2,effort:2}"#, &params()).unwrap();
         let mut bound = Params::new(); bound.insert("min".into(), Value::Int(4));
         assert_eq!(db.execute("tickets get id,effort where effort >= $min", &bound).unwrap().rows.len(), 1);
     }
+    #[test]
+    fn group_uses_exact_typed_composite_keys_with_embedded_delimiters() {
+        let mut db = Database::default();
+        db.execute(r#"table metrics { id:int key auto
+ label:text required
+ region:text required
+ amount:int required }
+metrics add {label:"west|east",region:"alpha",amount:3}
+metrics add {label:"west",region:"east|alpha",amount:5}
+metrics add {label:"west|east",region:"alpha",amount:7}
+metrics add {label:"west",region:"east|alpha",amount:11}"#, &params()).unwrap();
+        let result = db.execute("metrics get label,region,count(*) as items,sum(amount) as total group label,region sort label",
+            &params()).unwrap();
+        assert_eq!(result.rows.len(), 2);
+        let mut totals = result.rows.iter().map(|row| (
+            row.get("label").cloned().unwrap(),
+            row.get("region").cloned().unwrap(),
+            row.get("total").cloned().unwrap(),
+        )).collect::<Vec<_>>();
+        totals.sort();
+        assert_eq!(totals, vec![
+            (Value::Text("west".into()), Value::Text("east|alpha".into()), Value::Int(16)),
+            (Value::Text("west|east".into()), Value::Text("alpha".into()), Value::Int(10)),
+        ]);
+    }
+
+    #[test]
+    fn decimal_type_exact_arithmetic_grouping_and_codec() {
+        use crate::decimal::Decimal;
+        let mut db = Database::default();
+        db.execute(r#"table ledger { id:int key auto
+ category:text required
+ amount:decimal required }
+ledger add {category:"a",amount:0.1}
+ledger add {category:"a",amount:0.2}
+ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
+        let mut sums = db.execute("ledger get category,sum(amount) as total group category sort category",
+            &params()).unwrap().rows;
+        assert_eq!(sums.len(), 2);
+        assert_eq!(sums.remove(0).get("total"), Some(&Value::Decimal(Decimal::parse("0.3").unwrap())));
+        let check = db.execute("ledger get amount where amount >= 0.2", &params()).unwrap().rows;
+        assert_eq!(check.len(), 1);
+        let mut loaded = crate::codec::decode(&crate::codec::encode(&db).unwrap()).unwrap();
+        assert_eq!(loaded.execute("ledger get amount where amount == 0.1", &params()).unwrap().rows.len(), 1);
+        assert!(db.execute("ledger add {category:\"wrong\",amount:1.0000001}", &params()).is_err());
+        assert!(db.execute("ledger where id == 1 set amount = 1.0 / 0.0", &params()).is_err());
+        let out = crate::reference::rows_json(&db.execute("ledger get amount take 1", &params()).unwrap().rows);
+        assert!(out.contains("\"0.100000\""), "{out}");
+    }
+
 }

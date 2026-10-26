@@ -14,6 +14,8 @@ pub const STATUS_FAILURE: i32 = -2;
 pub const STATUS_BUFFER_TOO_SMALL: i32 = -3;
 pub const STATUS_DUPLICATE: i32 = -4;
 pub const STATUS_INDEX_FULL: i32 = -5;
+// Retryable storage contention: distinct from corruption, IO and invalid formats.
+pub const STATUS_LOCKED: i32 = -6;
 
 pub export fn noesql_zig_page_open(version: u32, name: ?[*:0]const u8, out: ?*?*anyopaque) i32 {
     const dest = out orelse return STATUS_INVALID;
@@ -22,7 +24,10 @@ pub export fn noesql_zig_page_open(version: u32, name: ?[*:0]const u8, out: ?*?*
     const path = name orelse return STATUS_INVALID;
     const value = std.mem.span(path);
     if (value.len == 0 or value.len > 4000) return STATUS_INVALID;
-    const pager = storage.Pager.open(std.heap.page_allocator, value) catch return STATUS_FAILURE;
+    const pager = storage.Pager.open(std.heap.page_allocator, value) catch |err| return switch (err) {
+        error.Locked => STATUS_LOCKED,
+        else => STATUS_FAILURE,
+    };
     dest.* = @ptrCast(pager);
     return STATUS_OK;
 }
@@ -262,10 +267,18 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
     hasher.final(&digest);
     @memcpy(manifest[20..52], &digest);
 
-    pager.stage(0, &manifest) catch {
-        pager.rollback();
-        return STATUS_FAILURE;
-    };
+    var dirty = false;
+    // The v2 snapshot manifest stores a whole-payload digest, so stage page
+    // zero only if its content really changed. All dirty payload pages and
+    // the manifest still share ONE atomic WAL transaction.
+    const old_manifest = pager.read(0);
+    if (old_manifest == null or !std.mem.eql(u8, old_manifest.?, &manifest)) {
+        pager.stage(0, &manifest) catch {
+            pager.rollback();
+            return STATUS_FAILURE;
+        };
+        dirty = true;
+    }
 
     var offset: usize = 0;
     var page_index: usize = 0;
@@ -274,27 +287,38 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
         const remaining = size - offset;
         const used = @min(remaining, storage.PAGE_BYTES);
         @memcpy(page[0..used], source_ptr[offset .. offset + used]);
-        pager.stage(@intCast(page_index + 1), &page) catch {
-            pager.rollback();
-            return STATUS_FAILURE;
-        };
-        offset += used;
-    }
-
-    // A shorter snapshot must remove old sensitive payload bytes in the
-    // *same* WAL transaction as the new manifest. The raw pager has no
-    // page-free primitive yet, so stage canonical zero pages for the tail.
-    // Maximum mutation count remains bounded by 256 physical pages.
-    if (previous_count > count) {
-        for (count + 1..previous_count + 1) |page_id| {
-            const zero = [_]u8{0} ** storage.PAGE_BYTES;
-            pager.stage(@intCast(page_id), &zero) catch {
+        const id: u32 = @intCast(page_index + 1);
+        const prior = pager.read(id);
+        if (prior == null or !std.mem.eql(u8, prior.?, &page)) {
+            pager.stage(id, &page) catch {
                 pager.rollback();
                 return STATUS_FAILURE;
             };
+            dirty = true;
+        }
+        offset += used;
+    }
+
+    // v2 cannot deallocate physical pages. Scrub now-obsolete payload pages
+    // atomically when a snapshot shrinks, but avoid writing already-zero
+    // pages. The v3 allocator implements a separate free-space prototype.
+    if (previous_count > count) {
+        for (count + 1..previous_count + 1) |page_id| {
+            const zero = [_]u8{0} ** storage.PAGE_BYTES;
+            const id: u32 = @intCast(page_id);
+            const prior = pager.read(id);
+            if (prior != null and !std.mem.eql(u8, prior.?, &zero)) {
+                pager.stage(id, &zero) catch {
+                    pager.rollback();
+                    return STATUS_FAILURE;
+                };
+                dirty = true;
+            }
         }
     }
 
+    // Identical content must not add generations or consume WAL space.
+    if (!dirty) return STATUS_OK;
     pager.commit() catch {
         pager.rollback();
         return STATUS_FAILURE;
@@ -628,4 +652,62 @@ test "shortening a snapshot scrubs stale physical pages atomically" {
     try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, &readback, readback.len, &written));
     try std.testing.expectEqual(small.len, written);
     try std.testing.expect(std.mem.eql(u8, small, readback[0..written]));
+}
+
+test "snapshot WAL journals dirty pages only and skips unchanged rewrites" {
+    const allocator = std.testing.allocator;
+    const suffix = std.crypto.random.int(u64);
+    const path = try std.fmt.allocPrint(allocator, "/tmp/noesql-dirty-pages-{x}.noedb", .{suffix});
+    defer allocator.free(path);
+    var path_buf: [4096]u8 = undefined;
+    var wal_buf: [4096]u8 = undefined;
+    var lock_buf: [4096]u8 = undefined;
+    const data = try std.fmt.bufPrintZ(&path_buf, "{s}", .{path});
+    const journal = try std.fmt.bufPrintZ(&wal_buf, "{s}.wal", .{path});
+    const mutex = try std.fmt.bufPrintZ(&lock_buf, "{s}.lck", .{path});
+    const c_api = struct { extern "c" fn unlink([*:0]const u8) c_int; };
+    defer {
+        _ = c_api.unlink(data.ptr);
+        _ = c_api.unlink(journal.ptr);
+        _ = c_api.unlink(mutex.ptr);
+    }
+
+    var handle: ?*anyopaque = null;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    const source = try allocator.alloc(u8, 3 * storage.PAGE_BYTES);
+    defer allocator.free(source);
+    @memset(source, 0);
+    source[0] = 8;
+    source[storage.PAGE_BYTES] = 17;
+    source[2 * storage.PAGE_BYTES] = 25;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, source.ptr, source.len));
+    try std.testing.expectEqual(@as(u64, 1), noesql_zig_page_generation(handle));
+
+    const original_size = (try std.fs.cwd().statFile(journal)).size;
+    source[storage.PAGE_BYTES + 23] = 19; // exactly one data page changes
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, source.ptr, source.len));
+    const delta = (try std.fs.cwd().statFile(journal)).size - original_size;
+    // WAL frame = page ID (4) + payload (4096), plus transaction header/trailer.
+    const expected_delta: u64 = 24 + 2 * (4 + storage.PAGE_BYTES) + 40;
+    try std.testing.expectEqual(expected_delta, delta);
+    try std.testing.expectEqual(@as(u64, 2), noesql_zig_page_generation(handle));
+
+    // Replaying identical payload must not create a WAL transaction.
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_write(handle, source.ptr, source.len));
+    try std.testing.expectEqual(@as(u64, 2), noesql_zig_page_generation(handle));
+    try std.testing.expectEqual(
+        original_size + expected_delta,
+        (try std.fs.cwd().statFile(journal)).size,
+    );
+    noesql_zig_page_close(handle);
+    handle = null;
+
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_page_open(ABI_VERSION, data.ptr, &handle));
+    defer noesql_zig_page_close(handle);
+    const copy = try allocator.alloc(u8, source.len);
+    defer allocator.free(copy);
+    var written: usize = 0;
+    try std.testing.expectEqual(STATUS_OK, noesql_zig_snapshot_read(handle, copy.ptr, copy.len, &written));
+    try std.testing.expectEqual(source.len, written);
+    try std.testing.expect(std.mem.eql(u8, source, copy));
 }

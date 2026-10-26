@@ -37,6 +37,9 @@ pub const PAGE_BYTES: usize = 4096;
 pub const MAX_PAGES: usize = 256;
 pub const MAX_TX_PAGES: usize = 256;
 pub const MAX_WAL_BYTES: usize = 64 * 1024 * 1024;
+// Repeated full-snapshot commits would otherwise fill WAL and cause
+// every new connection to replay up to 64 MiB of old transactions.
+pub const AUTO_CHECKPOINT_WAL_BYTES: usize = 16 * 1024 * 1024;
 const FRAME: usize = 4 + PAGE_BYTES;
 const TX_HEADER: usize = 24;
 const TX_TRAILER: usize = 40;
@@ -122,6 +125,19 @@ fn openFile(name: [:0]const u8, create: bool) Error!c_int {
     return fd;
 }
 
+const OpenedFile = struct { fd: c_int, created: bool };
+fn openFileTracked(name: [:0]const u8) Error!OpenedFile {
+    const flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
+    // The usual open path must not fsync the parent directory on each
+    // read-only query. Exclusively create first so we can distinguish a
+    // newly created directory entry from an existing durable one.
+    const fresh = c.open(name.ptr, flags | O_CREAT | O_EXCL, 0o600);
+    if (fresh >= 0) return .{ .fd = fresh, .created = true };
+    const existing = c.open(name.ptr, flags, 0);
+    if (existing < 0) return error.Io;
+    return .{ .fd = existing, .created = false };
+}
+
 pub const Snapshot = struct {
     allocator: std.mem.Allocator,
     generation: u64,
@@ -159,12 +175,15 @@ pub const Pager = struct {
         const db_name = try pathZ(path, "", &a);
         const wal_name = try pathZ(path, ".wal", &b);
         const lock_name = try pathZ(path, ".lck", &l);
-        const lock = try openFile(lock_name, true);
+        const lock_file = try openFileTracked(lock_name);
+        const lock = lock_file.fd;
         errdefer _ = c.close(lock);
         if (c.flock(lock, LOCK_EX | LOCK_NB) != 0) return error.Locked;
-        const db = try openFile(db_name, true);
+        const db_file = try openFileTracked(db_name);
+        const db = db_file.fd;
         errdefer _ = c.close(db);
-        const wal = try openFile(wal_name, true);
+        const wal_file = try openFileTracked(wal_name);
+        const wal = wal_file.fd;
         errdefer _ = c.close(wal);
         const pager = allocator.create(Pager) catch return error.OutOfMemory;
         errdefer allocator.destroy(pager);
@@ -176,7 +195,11 @@ pub const Pager = struct {
         pager.* = .{ .allocator = allocator, .db = db, .wal = wal, .lock = lock, .pages = pages, .path = own_path };
         try pager.loadSnapshot();
         try pager.recover();
-        try syncParent(path); // records first-time creation of data, WAL and lock
+        if (lock_file.created or db_file.created or wal_file.created) {
+            // fsync the directory only for newly created filenames. The
+            // existing WAL and checkpoint fsync ordering remains unchanged.
+            try syncParent(path);
+        }
         return pager;
     }
     pub fn close(self: *Pager) void {
@@ -220,8 +243,20 @@ pub const Pager = struct {
         if (self.pending_count == 0) return error.EmptyTransaction;
         const count = self.pending_count;
         const length = TX_HEADER + count * FRAME + TX_TRAILER;
-        const end = try size(self.wal);
-        if (end > MAX_WAL_BYTES - length or self.generation == std.math.maxInt(u64)) return error.WalLimit;
+        var end = try size(self.wal);
+        if (length > MAX_WAL_BYTES or self.generation == std.math.maxInt(u64)) return error.WalLimit;
+        if (end > AUTO_CHECKPOINT_WAL_BYTES or length > AUTO_CHECKPOINT_WAL_BYTES - end) {
+            // Checkpoint only previously committed pages. Staged edits cannot
+            // be included because they have not yet entered the durable WAL.
+            // Restore the pending count even when checkpoint fails so no
+            // transaction's mutation buffer is silently reclassified.
+            self.pending_count = 0;
+            const result = self.checkpoint();
+            self.pending_count = count;
+            try result;
+            end = 0;
+        }
+        if (end > MAX_WAL_BYTES - length) return error.WalLimit;
         const frame = self.allocator.alloc(u8, length) catch return error.OutOfMemory;
         defer self.allocator.free(frame);
         @memset(frame, 0);
@@ -417,6 +452,86 @@ fn testPath(allocator: std.mem.Allocator, leaf: []const u8) ![]u8 {
     const pid = c.getpid();
     return std.fmt.allocPrint(allocator, "/tmp/noesql-zig-v2-{d}-{s}.nqdb", .{pid, leaf});
 }
+test "failed automatic checkpoint does not append the new transaction" {
+    const a = std.testing.allocator;
+    const path = try testPath(a, "auto-checkpoint-fault");
+    defer a.free(path);
+    var dbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var lbuf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &dbuf);
+    const wal = try pathZ(path, ".wal", &wbuf);
+    const lock = try pathZ(path, ".lck", &lbuf);
+    defer { _ = c.unlink(data.ptr); _ = c.unlink(wal.ptr); _ = c.unlink(lock.ptr); }
+
+    const pager = try Pager.open(a, path);
+    const tx_size = TX_HEADER + 40 * FRAME + TX_TRAILER;
+    var cycles: u32 = 0;
+    // Fill only with committed frames. The next commit must trigger
+    // a checkpoint BEFORE writing its WAL record.
+    while ((try size(pager.wal)) <= AUTO_CHECKPOINT_WAL_BYTES - tx_size) {
+        cycles += 1;
+        for (1..41) |id| {
+            var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+            u32put(page[0..4], cycles);
+            try pager.stage(@intCast(id), &page);
+        }
+        try pager.commit();
+    }
+    pager.injectTestFault(.before_checkpoint_rename);
+    for (1..41) |id| {
+        var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+        u32put(page[0..4], cycles + 1);
+        try pager.stage(@intCast(id), &page);
+    }
+    try std.testing.expectError(error.FaultInjected, pager.commit());
+    pager.close();
+    const reopened = try Pager.open(a, path);
+    defer reopened.close();
+    try std.testing.expectEqual(@as(u64, cycles), reopened.generation);
+    try std.testing.expectEqual(cycles, u32get(reopened.read(1).?[0..4]));
+}
+
+test "automatic WAL checkpoint bounds replay size and preserves committed generations" {
+    const a = std.testing.allocator;
+    const path = try testPath(a, "auto-checkpoint");
+    defer a.free(path);
+    var dbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var lbuf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &dbuf);
+    const wal = try pathZ(path, ".wal", &wbuf);
+    const lock = try pathZ(path, ".lck", &lbuf);
+    defer { _ = c.unlink(data.ptr); _ = c.unlink(wal.ptr); _ = c.unlink(lock.ptr); }
+
+    const pager = try Pager.open(a, path);
+    // Each transaction writes around 200 KiB. This deliberately crosses
+    // the automatic checkpoint watermark several times while still writing
+    // valid pages and remaining well inside the documented 256-page format.
+    const transactions: usize = 190;
+    for (0..transactions) |generation| {
+        for (1..51) |page_id| {
+            var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+            u32put(page[0..4], @intCast(generation + 1));
+            u32put(page[4..8], @intCast(page_id));
+            try pager.stage(@intCast(page_id), &page);
+        }
+        try pager.commit();
+        try std.testing.expect((try size(pager.wal)) <= AUTO_CHECKPOINT_WAL_BYTES + TX_HEADER + 50 * FRAME + TX_TRAILER);
+    }
+    try std.testing.expectEqual(@as(u64, @intCast(transactions)), pager.generation);
+    pager.close();
+
+    const reopened = try Pager.open(a, path);
+    defer reopened.close();
+    try std.testing.expectEqual(@as(u64, @intCast(transactions)), reopened.generation);
+    for (1..51) |page_id| {
+        const page = reopened.read(@intCast(page_id)).?;
+        try std.testing.expectEqual(@as(u32, @intCast(transactions)), u32get(page[0..4]));
+        try std.testing.expectEqual(@as(u32, @intCast(page_id)), u32get(page[4..8]));
+    }
+}
+
 test "durable page commit, reopening, rollback, and snapshot isolation" {
     const a = std.testing.allocator;
     const path = try testPath(a, "read");

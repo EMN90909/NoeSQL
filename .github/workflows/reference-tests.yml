@@ -4,8 +4,12 @@ on:
   push:
     branches: [main, refactor/no-cpp-noqeri-rust-zig]
   pull_request:
-    branches: [main]
+    branches: [main, fix/stress-concurrent-cli-20261026, feat/noesql-release-qualification-20261026]
   workflow_dispatch:
+  workflow_call:
+    secrets:
+      NOQERI_READ_TOKEN:
+        required: false
 
 permissions:
   contents: read
@@ -60,11 +64,21 @@ jobs:
           NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
         run: cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager
 
+      - name: Native relational ABI, decimal and live SQLite integration tests
+        env:
+          NOESQL_ZIG_LIB_DIR: ${{ github.workspace }}/Native/zig/zig-out/lib
+        run: |
+          cargo test --locked --manifest-path Native/rust/Cargo.toml \
+            --all-targets --features zig-pager,sqlite-adapter
+
       - name: Checkout pinned Noqeri compiler source
         uses: actions/checkout@v4
         with:
           repository: EMN90909/Noqeri
           ref: 4842fa34dc06afe39b4ba216b52c8ec7bb576984
+          # Default GITHUB_TOKEN cannot necessarily read another private repo.
+          # The optional read-only secret must be configured when needed.
+          token: ${{ secrets.NOQERI_READ_TOKEN || github.token }}
           path: .ci-noqeri
           persist-credentials: false
 
