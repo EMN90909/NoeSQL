@@ -1,5 +1,5 @@
 use noesql_runtime::codec;
-use noesql_runtime::reference::{lex, Database, Params};
+use noesql_runtime::reference::{lex, parse, Database, Params};
 use noesql_runtime::value::Value;
 
 fn params() -> Params { Params::new() }
@@ -384,4 +384,47 @@ fn unary_negation_of_i64_min_returns_error_without_panicking_or_modifying_rows()
     let rows = db.execute("nums get id,value sort id", &params()).unwrap().rows;
     assert_eq!(rows.len(), 1, "failed overflow must roll back the whole statement");
     assert_eq!(rows[0].get("value"), Some(&Value::Int(5)));
+}
+
+#[test]
+fn readonly_programs_reuse_database_allocations_and_parser_ast() {
+    let mut db = Database::default();
+    db.execute(
+        "table entries {\n id:int key auto\n value:int required\n}",
+        &Params::new(),
+    ).unwrap();
+    for value in 0..100 {
+        db.execute(&format!("entries add {{value:{value}}}"), &Params::new()).unwrap();
+    }
+
+    let rows_before = db.tables["entries"].rows.as_ptr();
+    let version_before = db.version;
+    let source = "entries get id,value where value >= 97 sort id";
+    let program = parse(source).unwrap();
+    assert!(Database::statements_read_only(&program));
+    for _ in 0..40 {
+        let result = db.execute_parsed(&program, &Params::new()).unwrap();
+        assert_eq!(result.rows.len(), 3);
+        assert_eq!(db.tables["entries"].rows.as_ptr(), rows_before,
+            "SELECT must not clone or replace the backing database rows");
+    }
+    assert_eq!(db.version, version_before);
+
+    let first = db.execute(source, &Params::new()).unwrap().rows;
+    let parsed = db.execute_parsed(&program, &Params::new()).unwrap().rows;
+    assert_eq!(first, parsed, "parsed and source-based execution must agree");
+
+    let writes = parse("entries add {value:100}").unwrap();
+    assert!(!Database::statements_read_only(&writes));
+    let failed = parse("entries get missing").unwrap();
+    assert!(db.execute_parsed(&failed, &Params::new()).is_err());
+    assert_eq!(db.tables["entries"].rows.as_ptr(), rows_before);
+    assert_eq!(db.tables["entries"].rows.len(), 100);
+}
+
+#[test]
+fn many_token_source_fails_at_compiler_limit() {
+    let oversized_token_count = ";".repeat(100_002);
+    let error = parse(&oversized_token_count).unwrap_err();
+    assert_eq!(error.code, "NOE006");
 }
