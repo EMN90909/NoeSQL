@@ -1,0 +1,152 @@
+//! Portable SQL logical export of the embedded relational subset.
+//! Intentionally not a live SQLite/PostgreSQL driver, CDC stream, or
+//! SQL import parser. Requires an empty target database and review of
+//! unsupported references, defaults, indexes, named queries and policies.
+use crate::reference::Database;
+use crate::value::{Value, ValueType};
+use std::fmt;
+
+#[derive(Clone, Copy, Debug)]
+pub enum Dialect { Sqlite, Postgres }
+
+#[derive(Debug)]
+pub struct InteropError(pub String);
+impl fmt::Display for InteropError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result { f.write_str(&self.0) }
+}
+impl std::error::Error for InteropError {}
+
+fn identifier(name: &str) -> Result<String, InteropError> {
+    if name.is_empty() || name.len() > 255 || name.as_bytes().contains(&0) {
+        return Err(InteropError("invalid SQL identifier".into()));
+    }
+    Ok(format!("\"{}\"", name.replace('"', "\"\"")))
+}
+fn sql_type(kind: ValueType, dialect: Dialect) -> &'static str {
+    match (kind, dialect) {
+        (ValueType::Int | ValueType::Ref, Dialect::Sqlite) => "INTEGER",
+        (ValueType::Int | ValueType::Ref, Dialect::Postgres) => "BIGINT",
+        (ValueType::Bool, Dialect::Sqlite) => "INTEGER",
+        (ValueType::Bool, Dialect::Postgres) => "BOOLEAN",
+        (ValueType::Text | ValueType::Json | ValueType::Binary | ValueType::Date |
+         ValueType::DateTime | ValueType::Uuid, Dialect::Sqlite) => "TEXT",
+        (ValueType::Text, Dialect::Postgres) => "TEXT",
+        (ValueType::Json, Dialect::Postgres) => "JSONB",
+        (ValueType::Binary, Dialect::Postgres) => "BYTEA",
+        (ValueType::Date, Dialect::Postgres) => "DATE",
+        (ValueType::DateTime, Dialect::Postgres) => "TIMESTAMPTZ",
+        (ValueType::Uuid, Dialect::Postgres) => "UUID",
+    }
+}
+fn quote(value: &str) -> Result<String, InteropError> {
+    if value.chars().any(|ch| ch == '\0' || (ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))) {
+        return Err(InteropError("text contains nonportable SQL control characters".into()));
+    }
+    Ok(format!("'{}'", value.replace('\'', "''")))
+}
+fn sql_value(value: &Value, kind: ValueType, dialect: Dialect) -> Result<String, InteropError> {
+    if !kind.accepts(value) {
+        return Err(InteropError("stored value violates declared schema type".into()));
+    }
+    match value {
+        Value::Null => Ok("NULL".into()),
+        Value::Bool(bool) => Ok(match dialect {
+            Dialect::Sqlite => if *bool { "1" } else { "0" },
+            Dialect::Postgres => if *bool { "TRUE" } else { "FALSE" },
+        }.into()),
+        Value::Int(n) => Ok(n.to_string()),
+        Value::Text(s) if matches!((kind, dialect), (ValueType::Binary, Dialect::Postgres)) =>
+            Ok(format!("decode({}, 'hex')", quote(&s[2..])?)),
+        Value::Text(s) => quote(s),
+    }
+}
+
+/// Export schema plus explicitly supplied row values to either dialect.
+/// Catalog indexes, foreign keys, stored query definitions and permissions are
+/// intentionally rejected rather than silently dropped.
+pub fn export_sql(database: &Database, dialect: Dialect) -> Result<String, InteropError> {
+    if !database.indexes.is_empty() || !database.queries.is_empty() ||
+        database.tables.values().any(|table| table.fields.iter().any(|field|
+            field.reference.is_some() || field.default.is_some()))
+    {
+        return Err(InteropError(
+            "portable SQL export requires explicit migration for indexes, references, defaults and stored queries".into(),
+        ));
+    }
+    let mut sql = String::from("-- NoeSQL logical export. Run ONLY on a fresh, empty target database.\nBEGIN;\n");
+    for (name, table) in &database.tables {
+        let table_name = identifier(name)?;
+        sql.push_str("CREATE TABLE ");
+        sql.push_str(&table_name);
+        sql.push_str(" (\n");
+        for (index, field) in table.fields.iter().enumerate() {
+            if index != 0 { sql.push_str(",\n"); }
+            sql.push_str("  ");
+            sql.push_str(&identifier(&field.name)?);
+            sql.push(' ');
+            sql.push_str(sql_type(field.kind, dialect));
+            if field.required || field.key { sql.push_str(" NOT NULL"); }
+            if field.key { sql.push_str(" PRIMARY KEY"); }
+            else if field.unique { sql.push_str(" UNIQUE"); }
+        }
+        sql.push_str("\n);\n");
+        for row in &table.rows {
+            sql.push_str("INSERT INTO ");
+            sql.push_str(&table_name);
+            sql.push_str(" (");
+            for (i, field) in table.fields.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                sql.push_str(&identifier(&field.name)?);
+            }
+            sql.push_str(") VALUES (");
+            for (i, field) in table.fields.iter().enumerate() {
+                if i > 0 { sql.push_str(", "); }
+                let val = row.get(&field.name).unwrap_or(&Value::Null);
+                sql.push_str(&sql_value(val, field.kind, dialect)?);
+            }
+            sql.push_str(");\n");
+            if sql.len() > 16 * 1024 * 1024 {
+                return Err(InteropError("SQL export exceeds 16 MiB limit".into()));
+            }
+        }
+    }
+    sql.push_str("COMMIT;\n");
+    Ok(sql)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::reference::Params;
+
+    #[test]
+    fn sql_dialects_quote_untrusted_strings_and_preserve_values() {
+        let mut db = Database::default();
+        db.execute(
+            r#"table notes {
+ id:int key auto
+ name:text required
+ enabled:bool required
+}
+notes add {name:"O'Brian",enabled:true}"#,
+            &Params::new(),
+        ).unwrap();
+        let sqlite = export_sql(&db, Dialect::Sqlite).unwrap();
+        assert!(sqlite.contains("O''Brian"));
+        assert!(sqlite.contains("VALUES (1, 'O''Brian', 1)"));
+        let postgres = export_sql(&db, Dialect::Postgres).unwrap();
+        assert!(postgres.contains("BIGINT NOT NULL PRIMARY KEY"));
+        assert!(postgres.contains("VALUES (1, 'O''Brian', TRUE)"));
+    }
+
+    #[test]
+    fn exporter_rejects_catalog_features_it_cannot_translate_safely() {
+        let mut db = Database::default();
+        db.execute(
+            "table a { id:int key auto }\nindex idx on a(id)",
+            &Params::new(),
+        ).unwrap();
+        assert!(export_sql(&db, Dialect::Sqlite).is_err());
+        assert!(quote("bad\u{0000}name").is_err());
+    }
+}
