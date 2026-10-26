@@ -639,6 +639,20 @@ impl Database {
         statements.iter().all(|statement| matches!(statement, Statement::Get(_)))
     }
 
+    /// Execute against a caller-owned private database that is discarded on
+    /// any error. Avoids a second full row clone inside a durable write.
+    /// NEVER call on public/shared state: partial mutation on failure is
+    /// intentional and the caller must withhold publication.
+    pub(crate) fn execute_isolated_parsed(
+        &mut self, statements: &[Statement], params: &Params
+    ) -> Result<ExecutionReport, ReferenceError> {
+        if Self::statements_read_only(statements) {
+            self.query_parsed(statements, params)
+        } else {
+            self.execute_many(statements, params)
+        }
+    }
+
     /// Execute an already parsed NoeSQL program. Used by the durable host
     /// to parse outside the storage lock and avoid parsing a second time.
     pub fn execute_parsed(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
