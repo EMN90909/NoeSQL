@@ -217,7 +217,9 @@ fn walk_tree(directory: &Path, hash: &[u8; 32], depth: usize,
                 let at = 64+i*16;
                 let key = i64_at(&image, at);
                 let position = u64_at(&image, at+8);
-                if i > 0 && output.last().is_some_and(|prior| *prior > (key, position)) {
+                // Also compare across adjacent leaves, not just inside one
+                // page: a malformed parent must never reorder query results.
+                if output.last().is_some_and(|prior| *prior > (key, position)) {
                     return Err("B+ leaf entries out of order".into());
                 }
                 lo = lo.min(key); hi = hi.max(key);
@@ -231,11 +233,12 @@ fn walk_tree(directory: &Path, hash: &[u8; 32], depth: usize,
         2 => {
             if count == 0 || count > BRANCH_FANOUT { return Err("invalid branch size".into()); }
             let mut lo = i64::MAX; let mut hi = i64::MIN;
+            let mut previous_max: Option<i64> = None;
             for i in 0..count {
                 let at = 64+i*48;
                 let lower = i64_at(&image, at);
                 let upper = i64_at(&image, at+8);
-                if lower > upper || (i > 0 && lo > lower) {
+                if lower > upper || previous_max.is_some_and(|prev| lower < prev) {
                     return Err("non-monotone branch separators".into());
                 }
                 let mut child = [0; 32]; child.copy_from_slice(&image[at+16..at+48]);
@@ -244,6 +247,7 @@ fn walk_tree(directory: &Path, hash: &[u8; 32], depth: usize,
                     return Err("B+ branch separator does not match child".into());
                 }
                 lo = lo.min(lower); hi = upper;
+                previous_max = Some(upper);
             }
             if image[64+count*48..].iter().any(|b| *b != 0) {
                 return Err("noncanonical branch padding".into());
@@ -305,7 +309,8 @@ pub fn load_index_manifest(versions: &Path, db: &Database, padded: &[u8]) -> Res
 }
 pub fn safe_index_blob_name(name: &str) -> bool {
     name.len() == 68 && name.ends_with(".bpi") &&
-        name[..64].bytes().all(|byte| byte.is_ascii_hexdigit())
+        name.get(..64).is_some_and(|hash|
+            hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 #[cfg(test)]
 mod tests {
