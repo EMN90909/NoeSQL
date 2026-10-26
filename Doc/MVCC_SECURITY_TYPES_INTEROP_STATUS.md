@@ -104,7 +104,7 @@ An untrusted SQL service must not expose the bare native entry point.
 
 **Qualification required:** `make test`, `make stress`, `make test-sqlite`,
 native/Stage-2 Noqeri AOT tests, durability fault injection, multi-process
-reader/writer soak, and SQLite differential/precision tests. Tests have
+reader/writer soak, and SQLite differential/precision tests including independent value-by-value comparison. Tests have
 **not executed** because the GitHub Actions runner has failed without job
 steps and the working environment lacks Rust/Zig compilers. Keep all release
 gates unmet until evidence exists.
