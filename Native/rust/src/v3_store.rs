@@ -15,7 +15,7 @@ use crate::v3_bplus_disk;
 use crate::hash256::{sha256, Sha256};
 use crate::reference::{parse, Database, ExecutionReport, Params, Statement};
 use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
+use std::io::{Read, Write, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -169,6 +169,15 @@ fn read_head(path: &Path) -> V3Result<Head> {
     decode_head(&buffer)
 }
 fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Head> {
+    write_generation_delta(path, generation, db, None, &[])
+}
+fn write_generation_delta(
+    path: &Path,
+    generation: u64,
+    db: &Database,
+    previous: Option<&[u8]>,
+    statements: &[Statement],
+) -> V3Result<Head> {
     let payload = codec::encode(db).map_err(|e| invalid(e.to_string()))?;
     if payload.is_empty() || payload.len() > MAX_PAYLOAD {
         return Err(invalid("v3 snapshot exceeds 65,536 pages"));
@@ -176,8 +185,9 @@ fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Hea
     let pages = payload.len().div_ceil(PAGE_SIZE);
     // Write/sync dirty content-addressed B+ pages before publishing the
     // generation. The full index manifest is part of the generation digest.
-    let index_manifest = v3_bplus_disk::write_index_manifest(&versions(path), db)
-        .map_err(invalid)?;
+    let index_manifest = v3_bplus_disk::write_index_manifest_delta(
+        &versions(path), db, previous, statements
+    ).map_err(invalid)?;
     let index_pages = index_manifest.len().div_ceil(PAGE_SIZE);
     if pages.checked_add(index_pages).is_none_or(|count| count > MAX_PAGES) {
         return Err(invalid("combined data and index manifest exceed 65,536 pages"));
@@ -279,6 +289,34 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
     }
     Ok(db)
 }
+/// Fetch the authenticated previous index roots. read_generation has
+/// already verified the committed HEAD digest, all manifest pages, and
+/// content-addressed nodes before a write reaches this function.
+fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>>> {
+    let mut file = File::open(versions(path).join(&head.filename))?;
+    let mut header = [0u8; PAGE_HEADER];
+    file.read_exact(&mut header)?;
+    let pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
+    if pages == 0 { return Ok(None); } // pre-index NQDB0003 generation
+    if pages > MAX_PAGES || (head.pages as usize).saturating_add(pages) > MAX_PAGES {
+        return Err(invalid("committed index manifest exceeds v3 capacity"));
+    }
+    file.seek(SeekFrom::Start(PAGE_HEADER as u64 +
+        head.pages as u64 * FRAME_LEN as u64))?;
+    let mut manifest = Vec::with_capacity(pages * PAGE_SIZE);
+    for _ in 0..pages {
+        let mut page = [0u8; PAGE_SIZE];
+        let mut checksum = [0u8; 32];
+        file.read_exact(&mut page)?;
+        file.read_exact(&mut checksum)?;
+        if sha256(&page) != checksum {
+            return Err(invalid("previous generation index manifest checksum mismatch"));
+        }
+        manifest.extend_from_slice(&page);
+    }
+    Ok(Some(manifest))
+}
+
 fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
     let tmp = PathBuf::from(format!("{}.publish-{}", path.display(), unique_nonce()?));
     let result = (|| {
@@ -431,7 +469,8 @@ fn execute_internal(
     if material_change_possible(&statements, report.affected) {
         let next = head.generation.checked_add(1)
             .ok_or_else(|| invalid("generation counter exhausted"))?;
-        let published = write_generation(path, next, &db)?;
+        let prior = committed_index_manifest(path, &head)?;
+        let published = write_generation_delta(path, next, &db, prior.as_deref(), &statements)?;
         if fault == FaultPoint::BeforePublish {
             return Err(V3Error::Conflict("injected crash after generation fsync".into()));
         }
@@ -696,6 +735,26 @@ mod tests {
         assert_eq!(snapshot(&target).unwrap().generation, base);
         assert_eq!(snapshot(&target).unwrap().query("entries get owner", &Params::new())
             .unwrap().rows.len(), 3);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn nonindexed_update_reuses_persisted_bplus_pages_without_writing_nodes() {
+        let target = path("unindexed-delta");
+        let mut initial = Database::default();
+        initial.execute("table events { id:int key auto\n owner:int required\n score:int required }\nindex by_owner on events(owner)\nevents add {owner:10,score:1}",
+            &Params::new()).unwrap();
+        create_new(&target, &initial).unwrap();
+        let blobs = versions(&target).join("index-pages");
+        let old_count = fs::read_dir(&blobs).unwrap().count();
+        let generation = snapshot(&target).unwrap().generation;
+        execute(&target, "events where id == 1 set score = 99", &Params::new()).unwrap();
+        let cold = snapshot(&target).unwrap();
+        assert_eq!(cold.generation, generation+1);
+        assert_eq!(fs::read_dir(&blobs).unwrap().count(), old_count,
+            "nonindexed field edit unexpectedly published dirty B+ pages");
+        assert_eq!(cold.query("events get id,score where owner == 10", &Params::new())
+            .unwrap().rows[0].get("score"), Some(&Value::Int(99)));
         cleanup(&target);
     }
 
