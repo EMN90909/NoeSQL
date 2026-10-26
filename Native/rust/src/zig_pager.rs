@@ -290,6 +290,28 @@ users add {name:"Brian",active:false}"#,
     }
 
     #[test]
+    fn raw_pages_without_snapshot_manifest_are_not_a_fresh_database() {
+        let path = temp_path("unmarked-raw-page");
+        let pager = Pager::open(&path).unwrap();
+        let mut raw_page = [0u8; PAGE_BYTES];
+        raw_page[0] = 0x7f;
+        pager.stage_page(7, &raw_page).unwrap();
+        pager.commit().unwrap();
+        drop(pager);
+
+        assert!(
+            matches!(load_or_default(&path), Err(Error::Codec(_))),
+            "unmarked physical pages must not be misread as an empty DB"
+        );
+        let empty = Database::default();
+        assert!(
+            save(&path, &empty).is_err(),
+            "the same unmarked pages must never be overwritten"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
     fn empty_zig_store_loads_as_new_database_only_via_load_or_default() {
         let path = temp_path("empty");
         assert!(load(&path).is_err());
