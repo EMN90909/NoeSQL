@@ -179,6 +179,18 @@ fn load_or_default_with_pager(pager: &Pager) -> Result<Database, Error> {
     }
 }
 
+/// Migrate a validated v2 relational snapshot while holding its exclusive
+/// cross-process Zig lock for the entire copy and verification. The caller
+/// never receives a mutable handle to v2 storage.
+pub fn with_locked_snapshot<T>(
+    source: &Path,
+    action: impl FnOnce(&Database) -> Result<T, String>,
+) -> Result<T, String> {
+    let pager = Pager::open(source).map_err(|e| e.to_string())?;
+    let db = load_with_pager(&pager).map_err(|e| e.to_string())?;
+    action(&db)
+}
+
 // One Zig flock covers load -> query/mutation -> durable WAL commit.
 // Without this scope two CLI writers can silently lose each other's changes.
 /// Execute under the Zig pager's inter-process writer lock, checking the
