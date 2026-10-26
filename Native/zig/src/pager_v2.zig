@@ -125,6 +125,19 @@ fn openFile(name: [:0]const u8, create: bool) Error!c_int {
     return fd;
 }
 
+const OpenedFile = struct { fd: c_int, created: bool };
+fn openFileTracked(name: [:0]const u8) Error!OpenedFile {
+    const flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW;
+    // The usual open path must not fsync the parent directory on each
+    // read-only query. Exclusively create first so we can distinguish a
+    // newly created directory entry from an existing durable one.
+    const fresh = c.open(name.ptr, flags | O_CREAT | O_EXCL, 0o600);
+    if (fresh >= 0) return .{ .fd = fresh, .created = true };
+    const existing = c.open(name.ptr, flags, 0);
+    if (existing < 0) return error.Io;
+    return .{ .fd = existing, .created = false };
+}
+
 pub const Snapshot = struct {
     allocator: std.mem.Allocator,
     generation: u64,
@@ -162,12 +175,15 @@ pub const Pager = struct {
         const db_name = try pathZ(path, "", &a);
         const wal_name = try pathZ(path, ".wal", &b);
         const lock_name = try pathZ(path, ".lck", &l);
-        const lock = try openFile(lock_name, true);
+        const lock_file = try openFileTracked(lock_name);
+        const lock = lock_file.fd;
         errdefer _ = c.close(lock);
         if (c.flock(lock, LOCK_EX | LOCK_NB) != 0) return error.Locked;
-        const db = try openFile(db_name, true);
+        const db_file = try openFileTracked(db_name);
+        const db = db_file.fd;
         errdefer _ = c.close(db);
-        const wal = try openFile(wal_name, true);
+        const wal_file = try openFileTracked(wal_name);
+        const wal = wal_file.fd;
         errdefer _ = c.close(wal);
         const pager = allocator.create(Pager) catch return error.OutOfMemory;
         errdefer allocator.destroy(pager);
@@ -179,7 +195,11 @@ pub const Pager = struct {
         pager.* = .{ .allocator = allocator, .db = db, .wal = wal, .lock = lock, .pages = pages, .path = own_path };
         try pager.loadSnapshot();
         try pager.recover();
-        try syncParent(path); // records first-time creation of data, WAL and lock
+        if (lock_file.created or db_file.created or wal_file.created) {
+            // fsync the directory only for newly created filenames. The
+            // existing WAL and checkpoint fsync ordering remains unchanged.
+            try syncParent(path);
+        }
         return pager;
     }
     pub fn close(self: *Pager) void {
