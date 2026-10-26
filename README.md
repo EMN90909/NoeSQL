@@ -217,9 +217,11 @@ reader/writer lock separation or MVCC.
 The WAL now checkpoints automatically before a commit that would exceed
 a **16 MiB replay threshold**, retaining the 64 MiB hard maximum. This
 prevents sustained ordinary writes from exhausting the journal solely from
-accumulated committed transactions. Crash recovery still validates the
-versioned checkpoint and WAL; auto-checkpoint failure aborts the pending
-transaction before its WAL append.
+accumulated committed transactions. The pager also avoids syncing the
+**parent directory on routine reopen** when no file entry was created.
+Existing WAL and checkpoint durability fsyncs are unchanged.
+Crash recovery still validates the versioned checkpoint and WAL;
+auto-checkpoint failure aborts the pending transaction before its WAL append.
 
 Reproduce the durability and concurrency regression suite:
 
@@ -230,8 +232,9 @@ make benchmark-parser-reads
 ```
 
 The integration stress test exercises 8 independent writer processes,
-96 committed rows, WAL recovery and cold reopening. The Zig test covers
-automatic checkpoint rollover and 190 successive multi-page transactions.
+96 committed rows, WAL recovery and cold reopening. The Zig tests cover
+automatic checkpoint rollover, 190 successive multi-page transactions,
+and checkpoint fault injection before a newly staged WAL commit.
 The microbenchmark reports parser throughput and read execution time on the
 **machine that executes it**; no unexecuted speedups or comparisons to SQLite
 or PostgreSQL should be inferred from code inspection alone.
