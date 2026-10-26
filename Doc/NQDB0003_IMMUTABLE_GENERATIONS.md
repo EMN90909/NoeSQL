@@ -11,7 +11,7 @@ not passed build, crash, concurrency or power-failure qualification.
 
 ```sh
 noesql v3-create /private/data/fresh.noedb schema.noe
-noesql v3-check /private/data/fresh.noedb
+noesql v3-check /private/data/fresh.noedb\n# Only for a crash during initial creation BEFORE a published HEAD exists:\nnoesql v3-discard-unpublished /private/data/unfinished.noedb
 noesql v3-exec /private/data/fresh.noedb 'users add {name:"Amina"}'
 noesql v3-query /private/data/fresh.noedb 'users get id,name sort id'
 
@@ -61,11 +61,11 @@ allocated B+tree/record pages). It is not a per-row incremental engine.
 5. Migration obtains the legacy Zig exclusive lock, reads and validates v2
    under that lock, creates the fresh v3 target and compares canonical
    relational payload bytes with source while the v2 lock remains held.
-   The original v2 source stays in place as the rollback copy.
+   The original v2 source stays in place as the rollback copy.\n   A retry with an existing v3 target succeeds only when the target is\n   fully valid and its relational bytes match the still-locked v2 source.
 6. A crash before HEAD publication may leave an unreferenced generation
    file/directory. Do not automatically adopt, prune or reuse unreferenced
    generations. The target is only committed after a valid HEAD exists.
-   Orphan cleanup and safe version pruning are not implemented yet.
+   An explicit `v3-discard-unpublished` recovery command removes only\n   unpublished orphan generation files after refusing unexpected entries;\n   it never removes data from a valid published HEAD. Version pruning of\n   committed historical generations remains unimplemented.
 
 SHA-256 is a corruption checksum, not cryptographic authentication against
 malicious file modification. There is no stored credential, tenant policy, or
