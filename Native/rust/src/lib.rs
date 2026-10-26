@@ -1,5 +1,6 @@
 pub mod codec;
 pub mod planner;
+pub mod mvcc;
 pub mod reference;
 pub mod value;
 #[cfg(feature = "zig-pager")]
