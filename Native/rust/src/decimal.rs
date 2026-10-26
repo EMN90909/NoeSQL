@@ -7,7 +7,7 @@
 //! i128 overflow is reported rather than silently changing the result.
 use std::fmt;
 pub const SCALE: i128 = 1_000_000;
-pub const MAX_UNITS: i128 = 99_999_999_999_999_999_999_999_999_999_999_999_999_999;
+pub const MAX_UNITS: i128 = 99_999_999_999_999_999_999_999_999_999_999_999_999;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Decimal(i128);
