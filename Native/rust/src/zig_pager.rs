@@ -229,7 +229,7 @@ pub fn execute_locked_bounded(
     let pager = Pager::open(path).map_err(|error| error.to_string())?;
     let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
     let before = codec::encode(&database).map_err(|error| error.to_string())?;
-    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
+    let report = database.execute_isolated_parsed(&statements, params).map_err(|error| error.to_string())?;
     let output = format!(
         "{{\"affected\":{},\"rows\":{}}}",
         report.affected, rows_json(&report.rows)
@@ -276,7 +276,7 @@ pub fn execute_locked_authorized(
     let pager = Pager::open(path).map_err(|error| error.to_string())?;
     let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
     let before = codec::encode(&database).map_err(|error| error.to_string())?;
-    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
+    let report = database.execute_isolated_parsed(&statements, params).map_err(|error| error.to_string())?;
     access.validate_result(&report).map_err(|error| error.to_string())?;
     let output = format!("{{\"affected\":{},\"rows\":{}}}", report.affected, rows_json(&report.rows));
     if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
