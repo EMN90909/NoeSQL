@@ -46,7 +46,19 @@ fn parse_binding(kind: u32, bytes: &[u8]) -> Option<Value> {
             let s = std::str::from_utf8(bytes).ok()?;
             s.parse::<i64>().ok().map(Value::Int)
         },
-        3 | 5 | 6 | 7 | 8 | 9 => std::str::from_utf8(bytes).ok().map(|s| Value::Text(s.into())),
+        3 => std::str::from_utf8(bytes).ok().map(|s| Value::Text(s.into())),
+        5..=9 => {
+            let text = std::str::from_utf8(bytes).ok()?;
+            let valid = match kind {
+                5 => crate::extended_types::valid_date(text),
+                6 => crate::extended_types::valid_datetime(text),
+                7 => crate::extended_types::valid_uuid(text),
+                8 => crate::extended_types::valid_json(text),
+                9 => crate::extended_types::valid_binary_hex(text),
+                _ => false,
+            };
+            if valid { Some(Value::Text(text.into())) } else { None }
+        },
         4 => Decimal::parse(std::str::from_utf8(bytes).ok()?).map(Value::Decimal),
         _ => None,
     }
@@ -149,6 +161,12 @@ mod tests {
         assert_eq!(parse_binding(4, b"1.250000"), Some(Value::Decimal(Decimal::parse("1.25").unwrap())));
         assert_eq!(parse_binding(4, b"1.2500001"), None);
         assert_eq!(parse_binding(9, b"0x123abc"), Some(Value::Text("0x123abc".into())));
+        assert_eq!(parse_binding(5, b"2026-02-30"), None);
+        assert_eq!(parse_binding(6, b"2026-10-26T10:20:00.000Z"),
+            Some(Value::Text("2026-10-26T10:20:00.000Z".into())));
+        assert_eq!(parse_binding(7, b"NOT-A-UUID"), None);
+        assert_eq!(parse_binding(8, b"{not:json}"), None);
+        assert_eq!(parse_binding(9, b"0xdeadbee"), None);
     }
     #[test]
     fn small_response_buffer_does_not_commit_mutation() {
