@@ -136,7 +136,7 @@ impl Sqlite {
                 let equal = match value {
                     Value::Null => kind == 5, // SQLITE_NULL
                     Value::Bool(b) => kind == 1 &&
-                        unsafe { sqlite3_column_int64(statement.0.as_ptr(), column) } == if *b { 1 } else { 0 },
+                        unsafe { sqlite3_column_int64(statement.0.as_ptr(), column) } == (if *b { 1 } else { 0 }),
                     Value::Int(n) => kind == 1 &&
                         unsafe { sqlite3_column_int64(statement.0.as_ptr(), column) } == *n,
                     Value::Text(expected) => kind == 3 &&
