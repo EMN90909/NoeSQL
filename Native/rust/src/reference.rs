@@ -702,8 +702,24 @@ impl Database {
             JoinPlan::Hash { left_key, right_key } => format!("hash({left_key}={right_key})"),
         };
         let sort = select.sort.as_deref().unwrap_or("none");
+        let indexed = |field: &str| {
+            left.fields.iter().any(|f| f.name == field
+                && matches!(f.kind, ValueType::Int | ValueType::Ref)
+                && (f.key || f.unique))
+            || self.indexes.values().any(|def| def.table == select.table
+                && def.columns.len() == 1 && def.columns[0] == field
+                && left.fields.iter().any(|f| f.name == field
+                    && matches!(f.kind, ValueType::Int | ValueType::Ref)))
+        };
+        let access = if select.join.is_none() {
+            select.filter.as_ref().and_then(|filter|
+                indexed_condition(filter, &select.table, params, &indexed))
+                .map(|(field, _)| format!("memory_bplus({field})"))
+                .unwrap_or_else(|| "full_scan".into())
+        } else { "full_scan".into() };
         Ok(format!(
-            "access=full_scan table={} rows={} join={} right_rows={} push_where={} grouped={} sort={} skip={} take={}",
+            "access={} table={} rows={} join={} right_rows={} push_where={} grouped={} sort={} skip={} take={}",
+            access,
             select.table,
             plan.left_rows,
             join,
@@ -1426,6 +1442,18 @@ ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
         // Unsupported OR never performs unsafe one-sided index pushdown.
         assert_eq!(db.execute("readings get id where owner == 3 || owner == 2", &params())
             .unwrap().rows.len(), 183);
+    }
+
+    #[test]
+    fn explain_reports_index_only_when_same_access_path_is_eligible() {
+        let mut db = Database::default();
+        db.execute("table log { id:int key auto\\n category:int required }\\nindex by_category on log(category)", &params()).unwrap();
+        let pk = db.explain("log get id where id == 7", &params()).unwrap();
+        assert!(pk.contains("access=memory_bplus(id)"), "{pk}");
+        let secondary = db.explain("log get id where category == 4", &params()).unwrap();
+        assert!(secondary.contains("access=memory_bplus(category)"), "{secondary}");
+        let full = db.explain("log get id where category >= 4", &params()).unwrap();
+        assert!(full.contains("access=full_scan"), "{full}");
     }
 
 }
