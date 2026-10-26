@@ -524,6 +524,14 @@ pub fn safe_index_blob_name(name: &str) -> bool {
         name.get(..64).is_some_and(|hash|
             hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
+pub fn safe_unpublished_index_temp_name(name: &str) -> bool {
+    name.strip_prefix(".bpi-").and_then(|value| value.strip_suffix(".tmp"))
+        .is_some_and(|parts| {
+            let sections: Vec<_> = parts.split('-').collect();
+            sections.len() == 3 && sections.iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit()))
+        })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
