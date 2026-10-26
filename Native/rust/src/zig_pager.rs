@@ -207,6 +207,66 @@ pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<Exec
     Ok(report)
 }
 
+/// Produce a self-contained, verified backup while keeping the source
+/// pager locked. The destination must not already exist. A temporary
+/// database is checkpointed (WAL empty), then atomically published with
+/// hard_link, which refuses to overwrite any existing destination.
+pub fn backup(source: &Path, destination: &Path) -> Result<(), Error> {
+    validate_database_path(source)?;
+    validate_database_path(destination)?;
+    if destination.exists()
+        || std::fs::metadata(format!("{}.wal", destination.display())).is_ok()
+        || std::fs::metadata(format!("{}.lck", destination.display())).is_ok()
+    {
+        return Err(Error::Io("backup destination already exists".into()));
+    }
+
+    let source_pager = Pager::open(source)?;
+    let database = load_with_pager(&source_pager)?;
+    let expected = codec::encode(&database).map_err(|error| Error::Codec(error.to_string()))?;
+
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| Error::Io(error.to_string()))?
+        .as_nanos();
+    let scratch = std::path::PathBuf::from(format!(
+        "{}.backup-{}-{nonce}.noedb", destination.display(), std::process::id()
+    ));
+    // The scratch filename is deliberately in the destination directory;
+    // atomic publication with hard_link cannot cross a filesystem boundary.
+    let outcome = (|| -> Result<(), Error> {
+        let temp_pager = Pager::open(&scratch)?;
+        save_with_pager(&temp_pager, &database)?;
+        let status = unsafe { noesql_zig_page_checkpoint(temp_pager.as_ptr()) };
+        if status != STATUS_OK { return Err(Error::Provider(status)); }
+        drop(temp_pager);
+
+        let checked = load(&scratch)?;
+        let actual = codec::encode(&checked).map_err(|error| Error::Codec(error.to_string()))?;
+        if actual != expected {
+            return Err(Error::Codec("backup verification mismatch".into()));
+        }
+        // The source remains locked until the verified backup is published.
+        // hard_link is an atomic no-clobber operation on one filesystem.
+        std::fs::hard_link(&scratch, destination).map_err(|error| Error::Io(error.to_string()))?;
+        let parent = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::File::open(parent)
+            .and_then(|dir| dir.sync_all())
+            .map_err(|error| Error::Io(error.to_string()))?;
+        Ok(())
+    })();
+
+    for target in [
+        scratch.clone(),
+        std::path::PathBuf::from(format!("{}.wal", scratch.display())),
+        std::path::PathBuf::from(format!("{}.lck", scratch.display())),
+        std::path::PathBuf::from(format!("{}.checkpoint.tmp", scratch.display())),
+    ] {
+        let _ = std::fs::remove_file(target);
+    }
+    outcome
+}
+
 pub fn checkpoint(path: &Path) -> Result<(), Error> {
     let pager = Pager::open(path)?;
     let status = unsafe { noesql_zig_page_checkpoint(pager.as_ptr()) };
