@@ -201,7 +201,7 @@ mod tests {
     fn row_policies_restrict_reads_writes_and_nested_transactions() {
         let mut database = Database::default();
         database.execute(
-            "table events { id:int key auto\\n owner:int required\\n value:int required }\\nevents add {owner:1,value:10}\\nevents add {owner:2,value:20}",
+            "table events { id:int key auto\n owner:int required\n value:int required }\nevents add {owner:1,value:10}\nevents add {owner:2,value:20}",
             &Params::new(),
         ).unwrap();
         let mut rights = AccessControl::new();
