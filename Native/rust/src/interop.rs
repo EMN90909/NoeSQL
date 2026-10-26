@@ -50,9 +50,9 @@ fn sql_value(value: &Value, kind: ValueType, dialect: Dialect) -> Result<String,
     }
     match value {
         Value::Null => Ok("NULL".into()),
-        Value::Bool(bool) => Ok(match dialect {
-            Dialect::Sqlite => if *bool { "1" } else { "0" },
-            Dialect::Postgres => if *bool { "TRUE" } else { "FALSE" },
+        Value::Bool(flag) => Ok(match dialect {
+            Dialect::Sqlite => if *flag { "1" } else { "0" },
+            Dialect::Postgres => if *flag { "TRUE" } else { "FALSE" },
         }.into()),
         Value::Int(n) => Ok(n.to_string()),
         Value::Text(s) if matches!((kind, dialect), (ValueType::Binary, Dialect::Postgres)) =>
