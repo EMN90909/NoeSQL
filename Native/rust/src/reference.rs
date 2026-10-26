@@ -430,6 +430,15 @@ impl Clone for Table {
     }
 }
 impl Table {
+    /// Installed from a generation-bound, SHA-verified 4 KiB B+ page tree.
+    /// Direct modification of public Table.rows outside database APIs
+    /// invalidates this invariant; trusted callers must rebuild the table.
+    pub(crate) fn install_index(&self, field: &str, index: BPlusIndex) -> Result<(), String> {
+        let cache = self.seek_cache.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut guard = cache.lock().map_err(|_| "index cache poisoned")?;
+        guard.insert(field.to_string(), Arc::new(index));
+        Ok(())
+    }
     fn indexed_row_positions(&self, field: &str, key: i64) -> Option<Vec<usize>> {
         let cache = self.seek_cache.get_or_init(|| Mutex::new(BTreeMap::new()));
         let mut guard = cache.lock().ok()?; // poisoned caches fail back to full scan
