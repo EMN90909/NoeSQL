@@ -87,8 +87,11 @@ toolchain downloads. Do not mark the v3 default deployment production-ready,
 merge the storage changes into `main`, publish release artifacts, or drop v2
 backups before these checks run.
 
-v3 still has fully materialized generation writes, no incremental native B+
-page WAL, no persisted secondary index structures, no safe generation garbage
-collector, no live atomic v2-to-v3 application cutover, and no verified
-production security/linearizability gates. The v3 CLI default on this **draft
-branch** does not change the main-branch production release.
+v3 still has fully materialized relational generation writes, no
+standalone incremental B+ page WAL, no persisted text/composite/range index
+access path, no safe generation garbage collector, no live atomic v2-to-v3
+application cutover, and no verified production security/linearizability
+gates. Integer equality indexes now have persistent COW pages, but their
+mutated trees are still reconstructed from the affected table in memory.
+The v3 CLI default on this **draft branch** does not change the main-branch
+production release.
