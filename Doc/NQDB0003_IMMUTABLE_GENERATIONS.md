@@ -128,26 +128,36 @@ HEAD digest and describes the integer index roots, indexed-row counts,
 table and column names. Zero means an older v3 generation with no index
 manifest; it remains readable.
 
-Each node is exactly 4,096 bytes and has magic `NQBI0001`, an internal
-or leaf type, count and canonical zero padding. Leaf entries store signed
-64-bit keys with row ordinal positions; branch entries store key bounds
-and 256-bit child content hashes. Content-addressed immutable node files
+Legacy index nodes use `NQBI0001`: leaf entries contain signed
+64-bit indexed keys and row ordinals. New nodes use `NQBI0002`:
+leaf entries contain ordered (indexed value, **stable integer primary key**)
+pairs, and branches contain each child's full pair bounds and SHA-256 hash.
+Both formats use exactly 4,096 bytes and canonical zero padding.
+The `NQIM0002` manifest marks stable-ID index roots and upgrades old
+`NQIM0001` roots on the next committed writer transaction. Content-addressed immutable node files
 live under `<database>.versions/index-pages/`. The same page blob is
 reused across generations if its contents do not change. Before HEAD is
 atomically published, all new node files and their containing directory
 are fsynced, followed by the generation file and directory.
 
-On cold reopen all manifest frames, node hashes, separators, row positions
-and indexed data are checked. Corrupt or missing nodes fail the read.
-Incremental write analysis retains prior authenticated roots for indexes
-that a transaction's AST could not have changed; otherwise it rebuilds
-that index in memory but writes only changed physical nodes. Existing
-uncommitted node blobs after failed HEAD publication are harmless orphans
-until an administrator performs a safe cleanup. Old committed pages must
-not be removed without version reachability accounting.
+On cold reopen all manifest frames, node hashes, separators, stable
+primary-key references, index occupancy and relational data are checked.
+Corrupt or missing nodes fail the read. Each index entry addition/deletion
+now updates only the affected B+ path using immutable copy-on-write,
+redistributing or merging siblings on underflow and splitting nodes on
+overflow. Unchanged subtrees and entire unaffected indexes retain their
+previous content hashes. The engine discovers changed entries by scanning
+affected table rows; this step is not yet logarithmic.
+
+New index nodes are atomically linked into their canonical SHA-256 paths
+only after the complete temporary file has been fsynced. Uncommitted
+generation pages and incomplete temporary files can remain after a crash;
+administrative cleanup handles only unpublished databases. Do not remove
+old committed pages without reachability-aware reclamation.
 
 **Unresolved:** page reclamation, allocator transaction logging,
-incremental in-memory tree insert/split/delete algorithms, persistent
-range/text/composite indexes, standalone disk index WAL, crash/power-fail
-qualification and benchmarking. Keep the PR draft and the production
+an executor-side mutation journal that avoids O(n) changed-row discovery,
+persistent range/text/composite indexes, standalone disk index WAL,
+full relational incremental data-page writes, crash/power-fail
+qualification and benchmarks. Keep the PR draft and the production
 release gate closed until native CI actually runs and succeeds.
