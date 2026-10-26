@@ -20,26 +20,44 @@ cross-process replication between v2 and v3 is implied.
 
 ## Targeted speed improvements
 
-1. Private v3 commit execution no longer clones the complete relational
-   Database a second time or encodes a redundant before/after snapshot.
-   Failed scripts are discarded without publication. Idempotent zero-row
-   UPDATE and DELETE statements do not create another immutable generation.
-2. Zig-backed private writes similarly avoid an extra transaction-wide copy.
-3. Explicit single-column integer indexes, unique integer columns and
-   integer primary keys can use a **lazily built, immutable, bounded-fanout
-   in-memory B+ lookup tree** when the WHERE predicate is AND-conjoined
-   equality to an integer literal or typed parameter. Index candidates are
-   rechecked through the full query predicate before projection. The query
-   result preserves original row insertion order unless explicitly sorted.
-4. The B+ tree's leaf and branch capacities are 240 entries, sized for a
-   prospective 4 KiB disk encoding. This is **not** an implemented or persisted
-   4 KiB B+ disk-page format. Cold snapshot loads still deserialize all
-   relational tables; writes still rewrite the complete generation.
-   Index caches live only as long as an in-memory database/snapshot and
-   are invalidated on writes through the database APIs. Do not directly
-   mutate exposed trusted `Table.rows` after the cache has been populated.
-5. `EXPLAIN` emits `access=memory_bplus(field)` only for a supported
-   path and `access=full_scan` otherwise.
+1. Private v3 commit execution avoids the second relational Database clone
+   and redundant before/after snapshot serializations. Failed scripts remain
+   private; no-op zero-row UPDATE/DELETE does not publish another generation.
+2. Explicit single-column integer indexes, key/unique int columns and
+   declared secondary indexes use bounded-fanout B+ equality lookup. Full
+   query predicates are rechecked, and unsupported expressions scan safely.
+3. **NEW: persistent 4 KiB B+ node pages.** Index leaves and branches are
+   canonical fixed-size pages with SHA-256 content-addressed filenames in
+   `<db>.versions/index-pages/`. A checksummed index manifest is embedded
+   as trailing page frames in each NQDB0003 generation snapshot; the
+   generation HEAD digest covers those frames. Per-page SHA-256 and row-value
+   validation are performed on cold reopen. Corrupt committed indexes fail
+   closed rather than silently rebuilding.
+4. **NEW: incremental physical page updates.** Copy-on-write writes only
+   content-changed immutable node blobs, reusing unchanged leaves/branches
+   across generations. Transaction AST analysis also retains entire
+   authenticated previous roots when an index's column and row ordinals
+   cannot have changed (for example, an update of a non-indexed field).
+   Newly generated page blobs are fsynced **before** publishing the new
+   generation HEAD.
+5. Indexes are loaded and checked during NQDB0003 cold reopening and
+   installed in the relational query cache. This avoids rebuilding trees
+   solely by scanning all rows, although verifying relational agreement
+   still visits indexed table rows.
+6. The original v3 page-header extension byte range (28–32) was reserved
+   and zero. Zero continues to mean a pre-index generation with no
+   persistent index manifest. Nonzero specifies the number of extra
+   index-manifest frames appended after relational data. Older v3
+   generations remain readable.
+
+**Remaining limits:** Modified trees are still rebuilt from affected
+tables' current rows in memory: the update algorithm is not an O(log n)
+in-place B+ insertion/deletion engine. The relational snapshot is still
+fully serialized into new generation data pages on every committed write.
+Secondary indexes support integer equality, not persistent generic text,
+composite, range or covering-index scans. There is no garbage collection
+for historical index page blobs. These are material performance and storage
+limitations that must not be mistaken for a full production pager.
 
 ## Required test matrix before a main-branch rollout
 
