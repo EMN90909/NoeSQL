@@ -223,7 +223,16 @@ impl Parser {
     fn new(tokens: Vec<Token>) -> Self { Self { tokens, pos: 0 } }
     fn current(&self) -> &Token { &self.tokens[self.pos] }
     fn is(&self, value: &str) -> bool { self.current().text == value }
-    fn take(&mut self) -> Token { let t = self.tokens[self.pos].clone(); self.pos += 1; t }
+    fn take(&mut self) -> Token {
+        let index = self.pos;
+        self.pos += 1;
+        // Parsing owns the token stream. Move its text into the AST instead of
+        // allocating another String for every identifier, literal and symbol.
+        std::mem::replace(
+            &mut self.tokens[index],
+            Token { kind: TokenKind::Eof, text: String::new(), line: 0, column: 0 },
+        )
+    }
     fn eat(&mut self, value: &str) -> bool { if self.is(value) { self.take(); true } else { false } }
     fn need(&mut self, value: &str) -> Result<(), ReferenceError> {
         if self.eat(value) { Ok(()) } else { Err(failure("NOE010", self.current(), format!("expected {value}, found {}", self.current().text))) }
