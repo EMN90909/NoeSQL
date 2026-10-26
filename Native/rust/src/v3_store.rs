@@ -629,7 +629,7 @@ mod tests {
     #[test]
     fn default_auto_create_is_v3_only_and_refuses_unknown_existing_format() {
         let target = path("default");
-        let report = execute_or_create(&target, "table messages { id:int key auto\\n title:text required }\\nmessages add {title:\\"first\\"}", &Params::new()).unwrap();
+        let report = execute_or_create(&target, "table messages { id:int key auto\n title:text required }\nmessages add {title:\"first\"}", &Params::new()).unwrap();
         assert_eq!(report.affected, 1);
         assert_eq!(snapshot(&target).unwrap().query("messages get title", &Params::new()).unwrap().rows.len(), 1);
         let old = path("not-v3");
