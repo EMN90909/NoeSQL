@@ -117,3 +117,37 @@ source-level test cases as successful durability or linearizability evidence.
   based only on static review.
 
 See \`Doc/ENGINE_V3_RELEASE_GATES.md\` and issue #21.
+
+## Persistent B+ index-page format extension (experimental)
+
+NQDB0003 continues to publish immutable checksum-bound generation files.
+Newly written generations use reserved generation-header bytes 28..32 for
+the count of **additional 4 KiB manifest frames** appended after the
+relational data frames. Each manifest is bound to the generation's SHA-256
+HEAD digest and describes the integer index roots, indexed-row counts,
+table and column names. Zero means an older v3 generation with no index
+manifest; it remains readable.
+
+Each node is exactly 4,096 bytes and has magic `NQBI0001`, an internal
+or leaf type, count and canonical zero padding. Leaf entries store signed
+64-bit keys with row ordinal positions; branch entries store key bounds
+and 256-bit child content hashes. Content-addressed immutable node files
+live under `<database>.versions/index-pages/`. The same page blob is
+reused across generations if its contents do not change. Before HEAD is
+atomically published, all new node files and their containing directory
+are fsynced, followed by the generation file and directory.
+
+On cold reopen all manifest frames, node hashes, separators, row positions
+and indexed data are checked. Corrupt or missing nodes fail the read.
+Incremental write analysis retains prior authenticated roots for indexes
+that a transaction's AST could not have changed; otherwise it rebuilds
+that index in memory but writes only changed physical nodes. Existing
+uncommitted node blobs after failed HEAD publication are harmless orphans
+until an administrator performs a safe cleanup. Old committed pages must
+not be removed without version reachability accounting.
+
+**Unresolved:** page reclamation, allocator transaction logging,
+incremental in-memory tree insert/split/delete algorithms, persistent
+range/text/composite indexes, standalone disk index WAL, crash/power-fail
+qualification and benchmarking. Keep the PR draft and the production
+release gate closed until native CI actually runs and succeeds.
