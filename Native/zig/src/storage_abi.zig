@@ -267,10 +267,18 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
     hasher.final(&digest);
     @memcpy(manifest[20..52], &digest);
 
-    pager.stage(0, &manifest) catch {
-        pager.rollback();
-        return STATUS_FAILURE;
-    };
+    var dirty = false;
+    // The v2 snapshot manifest stores a whole-payload digest, so stage page
+    // zero only if its content really changed. All dirty payload pages and
+    // the manifest still share ONE atomic WAL transaction.
+    const old_manifest = pager.read(0);
+    if (old_manifest == null or !std.mem.eql(u8, old_manifest.?, &manifest)) {
+        pager.stage(0, &manifest) catch {
+            pager.rollback();
+            return STATUS_FAILURE;
+        };
+        dirty = true;
+    }
 
     var offset: usize = 0;
     var page_index: usize = 0;
@@ -279,27 +287,38 @@ pub export fn noesql_zig_snapshot_write(handle: ?*anyopaque, input: ?[*]const u8
         const remaining = size - offset;
         const used = @min(remaining, storage.PAGE_BYTES);
         @memcpy(page[0..used], source_ptr[offset .. offset + used]);
-        pager.stage(@intCast(page_index + 1), &page) catch {
-            pager.rollback();
-            return STATUS_FAILURE;
-        };
-        offset += used;
-    }
-
-    // A shorter snapshot must remove old sensitive payload bytes in the
-    // *same* WAL transaction as the new manifest. The raw pager has no
-    // page-free primitive yet, so stage canonical zero pages for the tail.
-    // Maximum mutation count remains bounded by 256 physical pages.
-    if (previous_count > count) {
-        for (count + 1..previous_count + 1) |page_id| {
-            const zero = [_]u8{0} ** storage.PAGE_BYTES;
-            pager.stage(@intCast(page_id), &zero) catch {
+        const id: u32 = @intCast(page_index + 1);
+        const prior = pager.read(id);
+        if (prior == null or !std.mem.eql(u8, prior.?, &page)) {
+            pager.stage(id, &page) catch {
                 pager.rollback();
                 return STATUS_FAILURE;
             };
+            dirty = true;
+        }
+        offset += used;
+    }
+
+    // v2 cannot deallocate physical pages. Scrub now-obsolete payload pages
+    // atomically when a snapshot shrinks, but avoid writing already-zero
+    // pages. The v3 allocator implements a separate free-space prototype.
+    if (previous_count > count) {
+        for (count + 1..previous_count + 1) |page_id| {
+            const zero = [_]u8{0} ** storage.PAGE_BYTES;
+            const id: u32 = @intCast(page_id);
+            const prior = pager.read(id);
+            if (prior != null and !std.mem.eql(u8, prior.?, &zero)) {
+                pager.stage(id, &zero) catch {
+                    pager.rollback();
+                    return STATUS_FAILURE;
+                };
+                dirty = true;
+            }
         }
     }
 
+    // Identical content must not add generations or consume WAL space.
+    if (!dirty) return STATUS_OK;
     pager.commit() catch {
         pager.rollback();
         return STATUS_FAILURE;
