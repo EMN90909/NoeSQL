@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -73,6 +73,35 @@ fn main() {
             }
             #[cfg(not(feature = "zig-pager"))]
             fail("EXPLAIN requires the zig-pager feature");
+        }
+        Some("export-sql") => {
+            let database = args.next().unwrap_or_else(|| usage());
+            let flavor = args.next().unwrap_or_else(|| usage());
+            let destination = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            #[cfg(feature = "zig-pager")]
+            {
+                use noesql_runtime::interop::{export_sql, Dialect};
+                use std::io::Write;
+                let dialect = match flavor.as_str() {
+                    "sqlite" => Dialect::Sqlite,
+                    "postgres" => Dialect::Postgres,
+                    _ => usage(),
+                };
+                let db = noesql_runtime::zig_pager::load(Path::new(&database))
+                    .unwrap_or_else(|error| fail(error));
+                let sql = export_sql(&db, dialect).unwrap_or_else(|error| fail(error));
+                let mut output = std::fs::OpenOptions::new()
+                    .write(true).create_new(true).open(&destination)
+                    .unwrap_or_else(|error| fail(error));
+                if let Err(error) = output.write_all(sql.as_bytes()).and_then(|_| output.sync_all()) {
+                    let _ = std::fs::remove_file(&destination);
+                    fail(error);
+                }
+                println!("SQL export written: {destination}");
+            }
+            #[cfg(not(feature = "zig-pager"))]
+            fail("SQL export requires the zig-pager feature");
         }
         Some("schema-check") => {
             let database = args.next().unwrap_or_else(|| usage());
