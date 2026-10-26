@@ -1033,10 +1033,17 @@ impl Database {
         let aggregated = !select.group.is_empty() || select.projections.iter().any(|p| matches!(p, Projection::Aggregate { .. }));
         let mut rows = Vec::new();
         if aggregated {
-            let mut groups: BTreeMap<String, Vec<Row>> = BTreeMap::new();
-            if select.group.is_empty() { groups.insert(String::new(), source); }
+            // Typed composite keys avoid lossy display/serialization delimiters,
+            // and preserve NULL, bool, integer and text identity exactly.
+            let mut groups: BTreeMap<Vec<Value>, Vec<Row>> = BTreeMap::new();
+            if select.group.is_empty() { groups.insert(Vec::new(), source); }
             else {
-                for row in source { let key = select.group.iter().map(|name| format!("{:?}", lookup(&row, name).unwrap_or(&Value::Null))).collect::<Vec<_>>().join("|"); groups.entry(key).or_default().push(row); }
+                for row in source {
+                    let key: Vec<Value> = select.group.iter()
+                        .map(|name| lookup(&row, name).cloned().unwrap_or(Value::Null))
+                        .collect();
+                    groups.entry(key).or_default().push(row);
+                }
             }
             for group in groups.values() { if let Some(row) = self.project_group(select, group, params)? { rows.push(row); } }
         } else {
@@ -1209,4 +1216,30 @@ tickets add {team_id:2,effort:2}"#, &params()).unwrap();
         let mut bound = Params::new(); bound.insert("min".into(), Value::Int(4));
         assert_eq!(db.execute("tickets get id,effort where effort >= $min", &bound).unwrap().rows.len(), 1);
     }
+    #[test]
+    fn group_uses_exact_typed_composite_keys_with_embedded_delimiters() {
+        let mut db = Database::default();
+        db.execute(r#"table metrics { id:int key auto
+ label:text required
+ region:text required
+ amount:int required }
+metrics add {label:"west|east",region:"alpha",amount:3}
+metrics add {label:"west",region:"east|alpha",amount:5}
+metrics add {label:"west|east",region:"alpha",amount:7}
+metrics add {label:"west",region:"east|alpha",amount:11}"#, &params()).unwrap();
+        let result = db.execute("metrics get label,region,count(*) as items,sum(amount) as total group label,region sort label",
+            &params()).unwrap();
+        assert_eq!(result.rows.len(), 2);
+        let mut totals = result.rows.iter().map(|row| (
+            row.get("label").cloned().unwrap(),
+            row.get("region").cloned().unwrap(),
+            row.get("total").cloned().unwrap(),
+        )).collect::<Vec<_>>();
+        totals.sort();
+        assert_eq!(totals, vec![
+            (Value::Text("west".into()), Value::Text("east|alpha".into()), Value::Int(16)),
+            (Value::Text("west|east".into()), Value::Text("alpha".into()), Value::Int(10)),
+        ]);
+    }
+
 }

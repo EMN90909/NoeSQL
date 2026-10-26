@@ -55,3 +55,13 @@ NOESQL_ZIG_LIB_DIR="$PWD/Native/zig/zig-out/lib" \
 ```
 
 No version number or production-readiness label should be advanced until those commands and all cross-runtime qualification tests execute successfully.
+
+## Additional hardening (2026-10-26)
+
+- Authorized in-process MVCC façade (`AuthorizedMvccStore`) applies grants and tenant row filters to both immutable snapshots and optimistic transactions. Result-budget errors discard staged writes. This is *not* durable or cross-process security; the underlying unrestricted MVCC store remains an administrative API.
+- Embedded authorized read-only queries now use the immutable reference execution path without copying the full database. No limit on intermediate JOIN/group materialization is claimed.
+- `AuthorizedSession::into_database` is now crate-private to avoid handing unrestricted state back to callers holding only a restricted façade. The lower-level `Database` API remains intentionally unrestricted for trusted administrators.
+- Relational GROUP BY now keys on typed tuples instead of formatted strings. SQLite logical export adds boolean-domain checks, and PostgreSQL export pins standard-conforming string behavior inside the import transaction.
+- Added focused regression tests for tenant-scoped MVCC reads/writes, write rejection after result-budget errors, typed composite GROUP BY keys, and SQL export safeguards. **None of these have been executed in this environment** (Rust/Zig toolchains unavailable); they require CI execution before merging.
+
+**Still not complete:** persistent MVCC, live v3 pager/migration, native Noqeri relational execution, full authN/durable RLS, exact decimals, and online SQLite/Postgres interoperability remain open acceptance gates. Do not remove the draft status or declare this release production-ready.

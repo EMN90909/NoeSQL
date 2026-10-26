@@ -74,6 +74,11 @@ pub fn export_sql(database: &Database, dialect: Dialect) -> Result<String, Inter
         ));
     }
     let mut sql = String::from("-- NoeSQL logical export. Run ONLY on a fresh, empty target database.\nBEGIN;\n");
+    if matches!(dialect, Dialect::Postgres) {
+        // Quoted text assumes standard-conforming backslashes; pin this inside
+        // our transaction rather than depending on the target session default.
+        sql.push_str("SET LOCAL standard_conforming_strings = on;\n");
+    }
     for (name, table) in &database.tables {
         let table_name = identifier(name)?;
         sql.push_str("CREATE TABLE ");
@@ -88,6 +93,13 @@ pub fn export_sql(database: &Database, dialect: Dialect) -> Result<String, Inter
             if field.required || field.key { sql.push_str(" NOT NULL"); }
             if field.key { sql.push_str(" PRIMARY KEY"); }
             else if field.unique { sql.push_str(" UNIQUE"); }
+            if matches!((field.kind, dialect), (ValueType::Bool, Dialect::Sqlite)) {
+                // SQLite INTEGER alone accepts arbitrary numbers. Preserve the
+                // canonical boolean domain for future writes to exported tables.
+                sql.push_str(" CHECK (");
+                sql.push_str(&identifier(&field.name)?);
+                sql.push_str(" IN (0, 1))");
+            }
         }
         sql.push_str("\n);\n");
         for row in &table.rows {
@@ -149,4 +161,18 @@ notes add {name:"O'Brian",enabled:true}"#,
         assert!(export_sql(&db, Dialect::Sqlite).is_err());
         assert!(quote("bad\u{0000}name").is_err());
     }
+    #[test]
+    fn sqlite_boolean_domain_and_postgres_literal_escaping_are_explicit() {
+        let mut db = Database::default();
+        db.execute(r#"table flags { id:int key auto
+ ok:bool required
+ note:text required }
+flags add {ok:true,note:"back\\slash ' quoted"}"#, &Params::new()).unwrap();
+        let sqlite = export_sql(&db, Dialect::Sqlite).unwrap();
+        assert!(sqlite.contains("\"ok\" INTEGER NOT NULL CHECK (\"ok\" IN (0, 1))"));
+        let pg = export_sql(&db, Dialect::Postgres).unwrap();
+        assert!(pg.contains("SET LOCAL standard_conforming_strings = on;"));
+        assert!(pg.contains("back\\slash '' quoted"));
+    }
+
 }

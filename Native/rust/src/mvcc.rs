@@ -124,6 +124,98 @@ impl Transaction {
     }
 }
 
+
+/* A principal-facing façade deliberately never exposes the unrestricted
+   Transaction or Database. Snapshot permissions are evaluated on a frozen
+   generation; writes are published only after both query and output budgets
+   succeed. Like MvccStore, this is process-local, NOT durable RLS/MVCC. */
+use crate::authorization::{AccessControl, AccessError};
+
+#[derive(Debug)]
+pub enum AuthorizedMvccError {
+    Access(AccessError),
+    Mvcc(MvccError),
+}
+impl std::fmt::Display for AuthorizedMvccError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { Self::Access(e) => e.fmt(f), Self::Mvcc(e) => e.fmt(f) }
+    }
+}
+impl std::error::Error for AuthorizedMvccError {}
+impl From<AccessError> for AuthorizedMvccError {
+    fn from(e: AccessError) -> Self { Self::Access(e) }
+}
+impl From<MvccError> for AuthorizedMvccError {
+    fn from(e: MvccError) -> Self { Self::Mvcc(e) }
+}
+impl From<ReferenceError> for AuthorizedMvccError {
+    fn from(e: ReferenceError) -> Self { Self::Mvcc(MvccError::Sql(e)) }
+}
+
+#[derive(Clone)]
+pub struct AuthorizedMvccStore {
+    store: MvccStore,
+    access: AccessControl,
+}
+pub struct AuthorizedReadSnapshot {
+    snapshot: ReadSnapshot,
+    access: AccessControl,
+}
+pub struct AuthorizedTransaction {
+    inner: Transaction,
+    access: AccessControl,
+}
+
+impl AuthorizedMvccStore {
+    pub fn new(store: MvccStore, access: AccessControl) -> Self { Self { store, access } }
+    pub fn snapshot(&self) -> Result<AuthorizedReadSnapshot, AuthorizedMvccError> {
+        Ok(AuthorizedReadSnapshot { snapshot: self.store.snapshot()?, access: self.access.clone() })
+    }
+    pub fn begin(&self) -> Result<AuthorizedTransaction, AuthorizedMvccError> {
+        Ok(AuthorizedTransaction { inner: self.store.begin()?, access: self.access.clone() })
+    }
+}
+impl AuthorizedReadSnapshot {
+    pub fn generation(&self) -> u64 { self.snapshot.generation() }
+    pub fn query(&self, source: &str, params: &Params) -> Result<ExecutionReport, AuthorizedMvccError> {
+        let statements = self.access.prepare(source, params)?;
+        if !Database::statements_read_only(&statements) {
+            return Err(AccessError::Denied("snapshot is read-only".into()).into());
+        }
+        let result = self.snapshot.database.query_parsed(&statements, params)?;
+        self.access.validate_result(&result)?;
+        Ok(result)
+    }
+}
+impl AuthorizedTransaction {
+    pub fn base_generation(&self) -> u64 { self.inner.base_generation() }
+    pub fn execute(&mut self, source: &str, params: &Params) -> Result<ExecutionReport, AuthorizedMvccError> {
+        let statements = self.access.prepare(source, params)?;
+        if Database::statements_read_only(&statements) {
+            let database = match &self.inner.pending {
+                Some(pending) => pending,
+                None => self.inner.base.database.as_ref(),
+            };
+            let result = database.query_parsed(&statements, params)?;
+            self.access.validate_result(&result)?;
+            return Ok(result);
+        }
+        // Stage the complete program separately. In particular, a result
+        // budget failure cannot leave partial writes pending for a later commit.
+        let mut working = match &self.inner.pending {
+            Some(pending) => pending.clone(),
+            None => (*self.inner.base.database).clone(),
+        };
+        let result = working.execute_parsed(&statements, params)?;
+        self.access.validate_result(&result)?;
+        self.inner.pending = Some(working);
+        self.inner.modified = true;
+        Ok(result)
+    }
+    pub fn rollback(self) { self.inner.rollback(); }
+    pub fn commit(self) -> Result<u64, AuthorizedMvccError> { Ok(self.inner.commit()?) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,4 +302,36 @@ mod tests {
         assert_eq!(store.snapshot().unwrap()
             .query("records get id", &Params::new()).unwrap().rows.len(), 1);
     }
+    #[test]
+    fn protected_mvcc_snapshots_cannot_cross_tenants_or_commit_denied_results() {
+        let mut acl = AccessControl::new();
+        acl.grant("records", true, true);
+        acl.restrict_rows("records", "owner", Value::Int(1));
+        let secure = AuthorizedMvccStore::new(MvccStore::new(seed()), acl);
+        let old = secure.snapshot().unwrap();
+        let mut tx = secure.begin().unwrap();
+        assert!(tx.execute("records add {owner:2}", &Params::new()).is_err());
+        tx.execute("records add {owner:1}", &Params::new()).unwrap();
+        assert_eq!(tx.commit().unwrap(), 1);
+        assert_eq!(old.query("records get owner", &Params::new()).unwrap().rows.len(), 1);
+        assert_eq!(secure.snapshot().unwrap()
+            .query("records get owner", &Params::new()).unwrap().rows.len(), 2);
+        assert!(old.query("records add {owner:1}", &Params::new()).is_err());
+    }
+
+    #[test]
+    fn protected_mvcc_output_budget_failure_cannot_later_be_committed() {
+        let mut acl = AccessControl::new();
+        acl.grant("records", true, true);
+        acl.max_returned_rows = 0;
+        let secure = AuthorizedMvccStore::new(MvccStore::new(seed()), acl);
+        let mut tx = secure.begin().unwrap();
+        assert!(matches!(tx.execute("atomic { records add {owner:5}; records get owner }",
+            &Params::new()), Err(AuthorizedMvccError::Access(AccessError::Budget(_)))));
+        assert_eq!(tx.commit().unwrap(), 0);
+        // Restore reads with a separately configured view of the same store.
+        assert_eq!(secure.store.snapshot().unwrap()
+            .query("records get owner", &Params::new()).unwrap().rows.len(), 1);
+    }
+
 }

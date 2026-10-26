@@ -153,25 +153,41 @@ impl AccessControl {
         }
     }
 
+    /// Authorize and scope a complete program before any statement can run.
+    /// Also shared by the protected MVCC facade; it must never run the
+    /// unspecialized AST returned by `parse` for a restricted principal.
+    pub(crate) fn prepare(&self, source: &str, params: &Params) -> Result<Vec<Statement>, AccessError> {
+        if source.len() > self.max_source_bytes {
+            return Err(AccessError::Budget("statement exceeds source-byte budget".into()));
+        }
+        let mut statements = parse(source)?;
+        for statement in &statements { self.check(statement)?; }
+        for statement in &mut statements { self.scope_statement(statement, params)?; }
+        Ok(statements)
+    }
+
+    pub(crate) fn validate_result(&self, result: &ExecutionReport) -> Result<(), AccessError> {
+        if result.rows.len() > self.max_returned_rows {
+            Err(AccessError::Budget("result exceeds row budget".into()))
+        } else { Ok(()) }
+    }
+
     pub fn execute(
         &self,
         database: &mut Database,
         source: &str,
         params: &Params,
     ) -> Result<ExecutionReport, AccessError> {
-        if source.len() > self.max_source_bytes {
-            return Err(AccessError::Budget("statement exceeds source-byte budget".into()));
+        let statements = self.prepare(source, params)?;
+        if Database::statements_read_only(&statements) {
+            // Bounded, authorized reads do not need to clone the database.
+            let result = database.query_parsed(&statements, params)?;
+            self.validate_result(&result)?;
+            return Ok(result);
         }
-        let mut statements = parse(source)?;
-        for statement in &statements { self.check(statement)?; }
-        // Policy rewrites are performed only after authorization, and before
-        // cloning/publishing database state. Joins with RLS fail closed.
-        for statement in &mut statements { self.scope_statement(statement, params)?; }
         let mut working = database.clone();
         let result = working.execute_parsed(&statements, params)?;
-        if result.rows.len() > self.max_returned_rows {
-            return Err(AccessError::Budget("result exceeds row budget".into()));
-        }
+        self.validate_result(&result)?;
         *database = working;
         Ok(result)
     }
@@ -189,8 +205,9 @@ impl AuthorizedSession {
         self.access.execute(&mut self.database, source, params)
     }
     pub fn version(&self) -> u32 { self.database.version }
-    /// Explicit administrative escape hatch, consumes this session.
-    pub fn into_database(self) -> Database { self.database }
+    // Intentionally crate-private: exporting an unrestricted Database from
+    // a principal-facing session would trivially bypass every table grant.
+    pub(crate) fn into_database(self) -> Database { self.database }
 }
 
 #[cfg(test)]
@@ -267,4 +284,23 @@ mod tests {
         assert!(acl.execute(&mut db, "a add {}", &Params::new()).is_ok());
         assert_eq!(db.execute("a get id", &Params::new()).unwrap().rows.len(), 2);
     }
+    #[test]
+    fn bounded_restricted_read_is_side_effect_free_and_denial_is_atomic() {
+        let mut db = Database::default();
+        db.execute("table messages { id:int key auto\n owner:int required }\nmessages add {owner:1}",
+            &Params::new()).unwrap();
+        let mut acl = AccessControl::new();
+        acl.grant("messages", true, true);
+        acl.restrict_rows("messages", "owner", Value::Int(1));
+        assert_eq!(acl.execute(&mut db, "messages get id,owner", &Params::new())
+            .unwrap().rows.len(), 1);
+        acl.max_returned_rows = 0;
+        assert!(matches!(acl.execute(&mut db, "messages get id", &Params::new()),
+            Err(AccessError::Budget(_))));
+        assert!(matches!(acl.execute(&mut db,
+            "atomic { messages add {owner:1}; messages get id }", &Params::new()),
+            Err(AccessError::Budget(_))));
+        assert_eq!(db.execute("messages get id", &Params::new()).unwrap().rows.len(), 1);
+    }
+
 }
