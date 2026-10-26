@@ -497,7 +497,8 @@ fn field_expr_type(kind: ValueType) -> ExprType {
     match kind {
         ValueType::Int | ValueType::Ref => ExprType::Int,
         ValueType::Bool => ExprType::Bool,
-        ValueType::Text => ExprType::Text,
+        ValueType::Text | ValueType::Date | ValueType::DateTime | ValueType::Uuid |
+        ValueType::Json | ValueType::Binary => ExprType::Text,
     }
 }
 
@@ -670,7 +671,9 @@ impl Database {
                     if table.fields.iter().any(|f| f.name == field.name) || !added.insert(field.name.clone()) {
                         return db_error("NOE241", format!("duplicate migration field {}", field.name));
                     }
-                    if !matches!(field.kind, ValueType::Int | ValueType::Text | ValueType::Bool)
+                    if !matches!(field.kind, ValueType::Int | ValueType::Text | ValueType::Bool |
+                        ValueType::Date | ValueType::DateTime | ValueType::Uuid |
+                        ValueType::Json | ValueType::Binary)
                         || field.key || field.auto || field.unique || field.reference.is_some() {
                         return db_error("NOE242", "alter add supports only scalar non-key, non-unique fields");
                     }
