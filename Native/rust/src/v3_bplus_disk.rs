@@ -13,6 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub const PAGE_BYTES: usize = 4096;
 const LEAF_FANOUT: usize = 240;
@@ -60,29 +62,54 @@ pub(crate) fn prepare_dir(versions: &Path) -> Result<PathBuf> {
     }
     Ok(dir)
 }
+static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+/// Publish via a fully fsynced *temporary* blob and an atomic hardlink.
+/// An interrupted write can leave only a recognizable temporary orphan,
+/// never a partial page under the canonical SHA-256 blob filename.
 pub(crate) fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result<[u8; 32]> {
     let hash = sha256(image);
     let path = blob_path(directory, &hash);
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(mut f) => {
-            f.write_all(image).map_err(err)?;
-            f.sync_all().map_err(err)?;
-            sync_dir(directory)?;
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            // A prior generation owns this blob. Never overwrite shared pages.
-            let mut f = File::open(&path).map_err(err)?;
-            if f.metadata().map_err(err)?.len() != PAGE_BYTES as u64 {
-                return Err("existing index page has wrong length".into());
-            }
-            let mut old = [0; PAGE_BYTES];
-            f.read_exact(&mut old).map_err(err)?;
-            if old != *image { return Err("existing index page hash collision or corruption".into()); }
-        },
-        Err(e) => return Err(err(e)),
+    let verify_existing = || -> Result<()> {
+        let mut file = File::open(&path).map_err(err)?;
+        if file.metadata().map_err(err)?.len() != PAGE_BYTES as u64 {
+            return Err("existing index page has wrong length".into());
+        }
+        let mut found = [0; PAGE_BYTES];
+        file.read_exact(&mut found).map_err(err)?;
+        if &found != image {
+            return Err("existing index page hash collision or corruption".into());
+        }
+        Ok(())
+    };
+    if path.exists() {
+        verify_existing()?;
+        return Ok(hash);
     }
+    let n = SystemTime::now().duration_since(UNIX_EPOCH).map_err(err)?.as_nanos();
+    let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = directory.join(format!(".bpi-{}-{n}-{sequence}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut writer = OpenOptions::new().write(true).create_new(true)
+            .open(&temporary).map_err(err)?;
+        writer.write_all(image).map_err(err)?;
+        writer.sync_all().map_err(err)?;
+        drop(writer);
+        match fs::hard_link(&temporary, &path) {
+            Ok(()) => {
+                sync_dir(directory)?;
+                Ok(())
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                verify_existing()
+            },
+            Err(e) => Err(err(e)),
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    result?;
     Ok(hash)
 }
+
 pub(crate) fn read_blob(directory: &Path, hash: &[u8; 32]) -> Result<[u8; PAGE_BYTES]> {
     let path = blob_path(directory, hash);
     let mut f = File::open(path).map_err(err)?;
