@@ -164,6 +164,11 @@ fn kind_tag(kind: ValueType) -> u8 {
         ValueType::Bool => 2,
         ValueType::Text => 3,
         ValueType::Ref => 4,
+        ValueType::Date => 5,
+        ValueType::DateTime => 6,
+        ValueType::Uuid => 7,
+        ValueType::Json => 8,
+        ValueType::Binary => 9,
     }
 }
 fn decode_kind(tag: u8) -> Result<ValueType, CodecError> {
@@ -172,6 +177,11 @@ fn decode_kind(tag: u8) -> Result<ValueType, CodecError> {
         2 => Ok(ValueType::Bool),
         3 => Ok(ValueType::Text),
         4 => Ok(ValueType::Ref),
+        5 => Ok(ValueType::Date),
+        6 => Ok(ValueType::DateTime),
+        7 => Ok(ValueType::Uuid),
+        8 => Ok(ValueType::Json),
+        9 => Ok(ValueType::Binary),
         _ => Err(CodecError("invalid field type tag".into())),
     }
 }
