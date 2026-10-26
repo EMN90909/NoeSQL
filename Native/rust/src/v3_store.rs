@@ -120,7 +120,7 @@ fn decode_head(bytes: &[u8]) -> V3Result<Head> {
        u32::from_le_bytes(bytes[12..16].try_into().unwrap()) as usize != PAGE_SIZE {
         return Err(invalid("unsupported NQDB0003 head version or page size"));
     }
-    if sha256(&bytes[..136]) != bytes[136..168] {
+    if sha256(&bytes[..136]).as_slice() != &bytes[136..168] {
         return Err(invalid("head checksum mismatch"));
     }
     let generation = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
@@ -215,7 +215,7 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
        u64::from_le_bytes(header[8..16].try_into().unwrap()) != head.generation ||
        u64::from_le_bytes(header[16..24].try_into().unwrap()) != head.bytes ||
        u32::from_le_bytes(header[24..28].try_into().unwrap()) != head.pages ||
-       header[28..32] != [0;4] {
+       header[28..32].iter().any(|byte| *byte != 0) {
         return Err(invalid("generation header mismatch"));
     }
     let mut outer = Sha256::default();
@@ -235,7 +235,7 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
         }
         payload.extend_from_slice(&block[..n]);
     }
-    if outer.finalize() != head.digest || sha256(&payload) != header[32..64] {
+    if outer.finalize() != head.digest || sha256(&payload).as_slice() != &header[32..64] {
         return Err(invalid("generation payload checksum mismatch"));
     }
     codec::decode(&payload).map_err(|e| invalid(format!("relational snapshot rejected: {e}")))
