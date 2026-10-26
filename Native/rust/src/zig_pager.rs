@@ -1,5 +1,5 @@
 use crate::codec;
-use crate::reference::Database;
+use crate::reference::{Database, ExecutionReport, Params};
 use crate::{validate_database_path, Error};
 use core::ffi::{c_char, c_void};
 use std::ffi::CString;
@@ -10,6 +10,7 @@ const ABI_VERSION: u32 = 2;
 const STATUS_OK: i32 = 0;
 const STATUS_NOT_FOUND: i32 = 1;
 const STATUS_BUFFER_TOO_SMALL: i32 = -3;
+const STATUS_LOCKED: i32 = -6;
 const MAX_SNAPSHOT_BYTES: usize = 255 * PAGE_BYTES;
 const SNAPSHOT_MAGIC: &[u8; 8] = b"NQRS0001";
 pub(crate) const PAGE_BYTES: usize = 4096;
@@ -35,11 +36,21 @@ impl Pager {
         let text = path.to_str().ok_or(Error::InvalidDatabasePath)?;
         let c_path = CString::new(text).map_err(|_| Error::InvalidDatabasePath)?;
         let mut handle = std::ptr::null_mut();
-        let status = unsafe { noesql_zig_page_open(ABI_VERSION, c_path.as_ptr(), &mut handle) };
-        if status != STATUS_OK {
-            return Err(Error::Provider(status));
+        let mut retries = 0;
+        loop {
+            let status = unsafe { noesql_zig_page_open(ABI_VERSION, c_path.as_ptr(), &mut handle) };
+            if status == STATUS_LOCKED && retries < 500 {
+                retries += 1;
+                // A bounded busy-wait lets independent CLI processes serialize
+                // rather than failing instantly during ordinary write contention.
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                continue;
+            }
+            if status != STATUS_OK {
+                return Err(Error::Provider(status));
+            }
+            return NonNull::new(handle).map(Self).ok_or(Error::Provider(-1002));
         }
-        NonNull::new(handle).map(Self).ok_or(Error::Provider(-1002))
     }
 
     fn as_ptr(&self) -> *mut c_void {
@@ -90,15 +101,14 @@ impl Drop for Pager {
     }
 }
 
-pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
+fn save_with_pager(pager: &Pager, database: &Database) -> Result<(), Error> {
     let payload = codec::encode(database).map_err(|error| Error::Codec(error.to_string()))?;
     if payload.is_empty() || payload.len() > MAX_SNAPSHOT_BYTES {
         return Err(Error::OutputTooLarge(payload.len()));
     }
-    let pager = Pager::open(path)?;
     match pager.read_page(0)? {
         Some(page) if &page[..8] == SNAPSHOT_MAGIC.as_slice() => {
-            // Refuse to destroy an existing snapshot whose checksums fail.
+            // Never overwrite a corrupt logical snapshot.
             let valid = unsafe { noesql_zig_page_validate_reference_state(pager.as_ptr()) };
             if valid != STATUS_OK {
                 return Err(Error::Provider(valid));
@@ -106,7 +116,7 @@ pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
         }
         Some(_) => return Err(Error::Codec("page zero is not a NoeSQL snapshot manifest".into())),
         None => {
-            // Legacy unmarked raw-row/index stores must not be overwritten.
+            // No manifest is not synonymous with an empty physical store.
             for id in 1..=255u32 {
                 if pager.read_page(id)?.is_some() {
                     return Err(Error::Codec("unmarked nonempty store cannot become a snapshot".into()));
@@ -121,8 +131,12 @@ pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn load(path: &Path) -> Result<Database, Error> {
+pub fn save(path: &Path, database: &Database) -> Result<(), Error> {
     let pager = Pager::open(path)?;
+    save_with_pager(&pager, database)
+}
+
+fn load_with_pager(pager: &Pager) -> Result<Database, Error> {
     let mut required = 0usize;
     let status = unsafe { noesql_zig_snapshot_read(pager.as_ptr(), std::ptr::null_mut(), 0, &mut required) };
     if status != STATUS_BUFFER_TOO_SMALL && !(status == STATUS_OK && required == 0) {
@@ -143,6 +157,42 @@ pub fn load(path: &Path) -> Result<Database, Error> {
     codec::decode(&payload).map_err(|error| Error::Codec(error.to_string()))
 }
 
+pub fn load(path: &Path) -> Result<Database, Error> {
+    let pager = Pager::open(path)?;
+    load_with_pager(&pager)
+}
+
+fn load_or_default_with_pager(pager: &Pager) -> Result<Database, Error> {
+    match load_with_pager(pager) {
+        Ok(database) => Ok(database),
+        Err(Error::Provider(STATUS_NOT_FOUND)) => {
+            // A missing manifest is a fresh database ONLY if all physical
+            // pages are absent; otherwise reject legacy/unmarked stores.
+            for id in 1..=255u32 {
+                if pager.read_page(id)?.is_some() {
+                    return Err(Error::Codec("unmarked nonempty store is not a fresh database".into()));
+                }
+            }
+            Ok(Database::default())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+// One Zig flock covers load -> query/mutation -> durable WAL commit.
+// Without this scope two CLI writers can silently lose each other's changes.
+pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<ExecutionReport, String> {
+    let pager = Pager::open(path).map_err(|error| error.to_string())?;
+    let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
+    let before = codec::encode(&database).map_err(|error| error.to_string())?;
+    let report = database.execute(source, params).map_err(|error| error.to_string())?;
+    let after = codec::encode(&database).map_err(|error| error.to_string())?;
+    if before != after {
+        save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
+    }
+    Ok(report)
+}
+
 pub fn checkpoint(path: &Path) -> Result<(), Error> {
     let pager = Pager::open(path)?;
     let status = unsafe { noesql_zig_page_checkpoint(pager.as_ptr()) };
@@ -154,11 +204,8 @@ pub fn checkpoint(path: &Path) -> Result<(), Error> {
 }
 
 pub fn load_or_default(path: &Path) -> Result<Database, Error> {
-    match load(path) {
-        Ok(database) => Ok(database),
-        Err(Error::Provider(STATUS_NOT_FOUND)) => Ok(Database::default()),
-        Err(error) => Err(error),
-    }
+    let pager = Pager::open(path)?;
+    load_or_default_with_pager(&pager)
 }
 
 #[cfg(test)]
