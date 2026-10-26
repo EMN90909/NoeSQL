@@ -34,9 +34,16 @@ fn tokenize(source: &str) -> Result<Vec<Token>, ReferenceError> {
         return Err(ReferenceError { code: "NOE005", line: 1, column: 1, message: "source exceeds 1 MiB limit".into() });
     }
     let bytes = source.as_bytes();
-    let mut out = Vec::new();
+    // Reserve a typical query-sized token buffer, not an unbounded buffer
+    // based on attacker-controlled source length.
+    let mut out = Vec::with_capacity(64);
     let (mut i, mut line, mut column, mut depth) = (0usize, 1usize, 1usize, 0usize);
     while i < bytes.len() {
+        // Check incrementally: never accumulate a million tiny tokens before
+        // discovering that the program exceeded the public compiler limit.
+        if out.len() > 100_000 {
+            return Err(ReferenceError { code: "NOE006", line, column, message: "too many tokens".into() });
+        }
         let (at_line, at_column) = (line, column);
         let ch = bytes[i];
         macro_rules! adv {
@@ -532,8 +539,34 @@ fn merge(left_name: &str, left: &Row, right_name: &str, right: Option<&Row>) -> 
 impl Database {
     pub fn execute(&mut self, source: &str, params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let statements = parse(source)?;
+        self.execute_parsed(&statements, params)
+    }
+
+    /// All-select programs cannot mutate state: avoid copying the complete
+    /// database and preserve the identity of its existing row allocations.
+    pub fn statements_read_only(statements: &[Statement]) -> bool {
+        statements.iter().all(|statement| matches!(statement, Statement::Get(_)))
+    }
+
+    /// Execute an already parsed NoeSQL program. Used by the durable host
+    /// to parse outside the storage lock and avoid parsing a second time.
+    pub fn execute_parsed(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
+        if Self::statements_read_only(statements) {
+            // Keep the same last-nonempty-result semantics as execute_many.
+            let mut report = ExecutionReport::default();
+            for statement in statements {
+                if let Statement::Get(select) = statement {
+                    let current = self.select(select, params)?;
+                    report.affected += current.affected;
+                    if !current.rows.is_empty() { report.rows = current.rows; }
+                }
+            }
+            return Ok(report);
+        }
+        // A write program is still atomic: work on a copy until all
+        // statements have succeeded, including the late-failure case.
         let mut working = self.clone();
-        let report = working.execute_many(&statements, params)?;
+        let report = working.execute_many(statements, params)?;
         *self = working;
         Ok(report)
     }
