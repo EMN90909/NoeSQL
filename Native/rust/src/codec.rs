@@ -531,6 +531,25 @@ users add {name:"Brian",active:false}"#, &Params::new()).unwrap();
     }
 
     #[test]
+    fn logically_invalid_typed_rows_are_rejected_after_checksum_valid_decode() {
+        let mut database = Database::default();
+        database.execute(
+            "table events { id:int key auto\\n stamp:date required }\\nevents add {stamp:\\"2026-10-26\\"}",
+            &Params::new(),
+        ).unwrap();
+        database.tables.get_mut("events").unwrap().rows[0]
+            .insert("stamp".into(), Value::Text("2026-02-30".into()));
+        let encoded = encode(&database).unwrap();
+        let err = decode(&encoded).unwrap_err();
+        assert!(err.0.contains("field type"), "{err}");
+
+        database.tables.get_mut("events").unwrap().rows[0]
+            .insert("stamp".into(), Value::Null);
+        let encoded = encode(&database).unwrap();
+        assert!(decode(&encoded).unwrap_err().0.contains("required"));
+    }
+
+    #[test]
     fn corrupted_snapshot_is_rejected() {
         let mut payload = b"NQRP0001".to_vec();
         payload.extend_from_slice(&PAYLOAD_VERSION.to_le_bytes());
