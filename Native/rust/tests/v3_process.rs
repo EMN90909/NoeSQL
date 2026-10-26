@@ -92,10 +92,14 @@ fn copy_migration_preserves_v2_source_and_matches_v3_snapshot() {
         "migration changed the legacy v2 source");
     assert_eq!(v3_store::snapshot(&v3).unwrap()
         .query("clients get id,name sort id", &Params::new()).unwrap().rows.len(), 2);
-    assert!(Command::new(env!("CARGO_BIN_EXE_noesql"))
-        .args(["migrate-v3", v2.to_str().unwrap(), v3.to_str().unwrap()])
-        .output().unwrap().status.success() == false, "target overwrite was allowed");
+    // If the first migration committed but its response was lost, an
+    // identical destination verifies successfully without overwriting it.
+    cli(&["migrate-v3", v2.to_str().unwrap(), v3.to_str().unwrap()]);
     v3_store::execute(&v3, "clients add {name:\"Cara\"}", &Params::new()).unwrap();
+    // Existing, divergent v3 data must never be overwritten on retry.
+    assert!(!Command::new(env!("CARGO_BIN_EXE_noesql"))
+        .args(["migrate-v3", v2.to_str().unwrap(), v3.to_str().unwrap()])
+        .output().unwrap().status.success());
     assert_eq!(zig_pager::load(&v2).unwrap().tables["clients"].rows.len(), 2);
     assert_eq!(v3_store::snapshot(&v3).unwrap()
         .query("clients get id,name", &Params::new()).unwrap().rows.len(), 3);
