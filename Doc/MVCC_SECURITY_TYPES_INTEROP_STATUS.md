@@ -65,3 +65,51 @@ No version number or production-readiness label should be advanced until those c
 - Added focused regression tests for tenant-scoped MVCC reads/writes, write rejection after result-budget errors, typed composite GROUP BY keys, and SQL export safeguards. **None of these have been executed in this environment** (Rust/Zig toolchains unavailable); they require CI execution before merging.
 
 **Still not complete:** persistent MVCC, live v3 pager/migration, native Noqeri relational execution, full authN/durable RLS, exact decimals, and online SQLite/Postgres interoperability remain open acceptance gates. Do not remove the draft status or declare this release production-ready.
+
+## Subsequent experimental implementation additions
+
+**Exact decimal (Rust relational core):** `decimal` is a checked signed
+i128 fixed-scale quantity, six fractional places with 38 total decimal digits.
+The parser, typed operations, aggregation, JSON output (as a lossless string),
+snapshot codec and logical SQL exporter now recognize it. Multiplication and
+division use ties-to-even rounding, and operations with unsafe intermediate
+overflow return an error rather than an approximate value. SQLite export
+stores decimals as TEXT (storage precision only; SQLite numeric ordering and
+arithmetic are **not** guaranteed). PostgreSQL SQL export uses
+`NUMERIC(38,6)`. Mixed int/decimal arithmetic currently requires explicit
+matching types; decimal precision/scale are not yet schema-configurable.
+
+**Reader concurrency:** read-only queries in the Zig-backed host load a
+WAL-consistent snapshot under an exclusive pager lock and release the lock
+*before* relational evaluation. Other processes may commit while a reader
+evaluates that immutable snapshot. Snapshot acquisition is still serialized,
+and there are no disk-retained row versions or true live v3 MVCC.
+
+**Durable authorized query path:** `execute_locked_authorized` now applies
+the existing embedded grants and tenant scopes while operating under the
+durable Zig write lock. It checks ACL and output budgets before saving the
+WAL transaction; denied writes do not persist. A trusted caller must pass
+the `AccessControl` every time, and unguarded administrative APIs still
+exist. This is **not** persisted RLS, authentication, or complete cross-process
+authorization.
+
+**Native relational and SQLite interop:** `noesql_relational_exec_v1` is a
+trusted in-process C-compatible Rust entry point that accepts typed bindings
+(including decimal) and executes existing relational statements against Zig
+storage without a subprocess. It is **not** full native Noqeri NIR lowering.
+Optional `sqlite-adapter` and `export-sqlite` import a portable SQL subset to
+a fresh SQLite database, reject target overwrite, and verify row counts and
+`PRAGMA integrity_check`. PostgreSQL retains offline SQL export only.
+An untrusted SQL service must not expose the bare native entry point.
+
+**Qualification required:** `make test`, `make stress`, `make test-sqlite`,
+native/Stage-2 Noqeri AOT tests, durability fault injection, multi-process
+reader/writer soak, and SQLite differential/precision tests. Tests have
+**not executed** because the GitHub Actions runner has failed without job
+steps and the working environment lacks Rust/Zig compilers. Keep all release
+gates unmet until evidence exists.
+
+**Still not implemented:** the live NQDB0003 pager, v2→v3 crash-atomic
+migration, durable multi-process MVCC with version reclamation, whole-stack
+Noqeri NIR relational execution, persistent authN/RLS/audit and quota controls,
+configurable arbitrary numeric scales, and PostgreSQL live driver.
