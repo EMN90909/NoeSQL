@@ -23,7 +23,7 @@ fn cleanup(path: &Path) {
 }
 fn command(path: &Path, query: &str) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_noesql"))
-        .args(["query", path.to_str().unwrap(), query])
+        .args(["v2-query", path.to_str().unwrap(), query])
         .output().expect("cannot run native NoeSQL CLI");
     assert!(out.status.success(), "NoeSQL process error: {}",
         String::from_utf8_lossy(&out.stderr));
