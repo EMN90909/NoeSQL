@@ -156,7 +156,8 @@ fn encode_head(head: &Head) -> V3Result<[u8; HEAD_LEN]> {
     bytes[36..40].copy_from_slice(&(head.filename.len() as u32).to_le_bytes());
     bytes[40..40+head.filename.len()].copy_from_slice(head.filename.as_bytes());
     bytes[104..136].copy_from_slice(&head.digest);
-    bytes[136..168].copy_from_slice(&sha256(&bytes[..136]));
+    let checksum = sha256(&bytes[..136]);
+    bytes[136..168].copy_from_slice(&checksum);
     Ok(bytes)
 }
 fn read_head(path: &Path) -> V3Result<Head> {
