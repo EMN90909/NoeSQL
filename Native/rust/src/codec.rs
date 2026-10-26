@@ -433,7 +433,7 @@ pub fn decode(bytes: &[u8]) -> Result<Database, CodecError> {
             rows.push(row);
         }
 
-        if tables.insert(table_name, Table { fields, rows, next_auto }).is_some() {
+        if tables.insert(table_name, Table { fields, rows, next_auto, seek_cache: std::sync::OnceLock::new() }).is_some() {
             return Err(CodecError("duplicate table".into()));
         }
     }
