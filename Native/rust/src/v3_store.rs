@@ -412,6 +412,42 @@ pub fn execute(path: &Path, source: &str, params: &Params) -> V3Result<Execution
     execute_internal(path, source, params, FaultPoint::None)
 }
 
+
+impl Snapshot {
+    /// Trusted administrative inspection; do not give an unrestricted
+    /// Snapshot to untrusted tenants.
+    pub fn database(&self) -> &Database { &self.database }
+}
+
+/// Create a fresh NQDB0003 store on the first successful mutating program.
+/// Never auto-migrate an existing NQDB0002 file; an explicit migration target
+/// must be provided to the copy-and-verify CLI.
+pub fn execute_or_create(path: &Path, source: &str, params: &Params) -> V3Result<ExecutionReport> {
+    validate_path(path)?;
+    if path.exists() {
+        return execute(path, source, params);
+    }
+    if versions(path).exists() {
+        return Err(V3Error::Conflict(
+            "unpublished v3 generation directory exists; inspect or run v3-discard-unpublished".into()
+        ));
+    }
+    let statements = parse(source).map_err(|e| invalid(e.to_string()))?;
+    if Database::statements_read_only(&statements) {
+        return Err(invalid("database does not exist; create with a schema/write program"));
+    }
+    let mut initial = Database::default();
+    let report = initial.execute_parsed(&statements, params)
+        .map_err(|e| invalid(e.to_string()))?;
+    match create_new(path, &initial) {
+        Ok(()) => Ok(report),
+        // Concurrent creation may have won while this call validated the
+        // source. Never retry if the target is not a published valid v3 DB.
+        Err(V3Error::Conflict(_)) if path.exists() => execute(path, source, params),
+        Err(error) => Err(error),
+    }
+}
+
 /// Source v2 remains the rollback copy. Its Zig lock is held across validation
 /// and successful v3 target publication (the source is never modified).
 #[cfg(feature = "zig-pager")]
@@ -587,6 +623,20 @@ mod tests {
         assert_eq!(fresh.generation, next);
         assert_eq!(fresh.query("entries get owner", &Params::new()).unwrap().rows.len(), 2);
         assert_eq!(pinned.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
+    #[test]
+    fn default_auto_create_is_v3_only_and_refuses_unknown_existing_format() {
+        let target = path("default");
+        let report = execute_or_create(&target, "table messages { id:int key auto\\n title:text required }\\nmessages add {title:\\"first\\"}", &Params::new()).unwrap();
+        assert_eq!(report.affected, 1);
+        assert_eq!(snapshot(&target).unwrap().query("messages get title", &Params::new()).unwrap().rows.len(), 1);
+        let old = path("not-v3");
+        fs::write(&old, b"NQDB0002").unwrap();
+        assert!(execute_or_create(&old, "table messages { id:int key }", &Params::new()).is_err());
+        assert_eq!(fs::read(&old).unwrap(), b"NQDB0002");
+        cleanup(&old);
         cleanup(&target);
     }
 
