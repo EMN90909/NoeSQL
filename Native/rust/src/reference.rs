@@ -1,4 +1,6 @@
 use crate::value::{Value, ValueType};
+use crate::bplus_index::BPlusIndex;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::cmp::Ordering;
 use crate::planner::{choose_relational_plan, JoinPlan};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -412,7 +414,62 @@ impl Parser {
 pub fn parse(source: &str) -> Result<Vec<Statement>, ReferenceError> { Parser::new(tokenize(source)?).parse() }
 
 #[derive(Clone, Debug)]
-pub struct Table { pub fields: Vec<Field>, pub rows: Vec<Row>, pub(crate) next_auto: i64 }
+pub struct Table {
+    pub fields: Vec<Field>,
+    pub rows: Vec<Row>,
+    pub(crate) next_auto: i64,
+    // Cache is deliberately not cloned into a write transaction. The row
+    // vector is public for trusted runtime migrations, so callers modifying
+    // it directly must rebuild their Database before querying.
+    pub(crate) seek_cache: OnceLock<Mutex<BTreeMap<String, Arc<BPlusIndex>>>>,
+}
+impl Clone for Table {
+    fn clone(&self) -> Self {
+        Self { fields: self.fields.clone(), rows: self.rows.clone(),
+            next_auto: self.next_auto, seek_cache: OnceLock::new() }
+    }
+}
+impl Table {
+    fn indexed_row_positions(&self, field: &str, key: i64) -> Option<Vec<usize>> {
+        let cache = self.seek_cache.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut guard = cache.lock().ok()?; // poisoned caches fail back to full scan
+        let index = guard.entry(field.to_string()).or_insert_with(|| {
+            Arc::new(BPlusIndex::build(self.rows.iter().enumerate().filter_map(
+                |(position, row)| match row.get(field) {
+                    Some(Value::Int(value)) => Some((*value, position)),
+                    _ => None,
+                }
+            )))
+        });
+        Some(index.seek_equal(key))
+    }
+}
+
+fn indexed_condition(expr: &Expr, table: &str, params: &Params,
+    indexed: &impl Fn(&str) -> bool) -> Option<(String, i64)> {
+    if let Expr::Binary(op, left, right) = expr {
+        if op == "&&" {
+            return indexed_condition(left, table, params, indexed)
+                .or_else(|| indexed_condition(right, table, params, indexed));
+        }
+        if op == "==" {
+            for (column, value) in [(left.as_ref(), right.as_ref()), (right.as_ref(), left.as_ref())] {
+                if let Expr::Column(name) = column {
+                    let field = name.strip_prefix(&format!("{table}."))
+                        .or_else(|| if name.contains('.') { None } else { Some(name.as_str()) })?;
+                    if !indexed(field) { continue; }
+                    let number = match value {
+                        Expr::Literal(Value::Int(n)) => Some(*n),
+                        Expr::Param(param) => params.get(param).and_then(Value::as_i64),
+                        _ => None,
+                    };
+                    if let Some(number) = number { return Some((field.to_string(), number)); }
+                }
+            }
+        }
+    }
+    None
+}
 #[derive(Clone, Debug)]
 pub struct Database {
     pub name: Option<String>,
@@ -684,7 +741,7 @@ impl Database {
                     }
                 }
                 if keys != 1 || autos > 1 { return db_error("NOE108", "exactly one integer primary key required"); }
-                self.tables.insert(name.clone(), Table { fields: fields.clone(), rows: Vec::new(), next_auto: 1 });
+                self.tables.insert(name.clone(), Table { fields: fields.clone(), rows: Vec::new(), next_auto: 1, seek_cache: OnceLock::new() });
                 Ok(ExecutionReport::default())
             }
             Statement::AlterAdd(name, fields) => {
@@ -711,6 +768,7 @@ impl Database {
                         return db_error("NOE244", "required new column needs a nonnull default on nonempty table");
                     }
                     for row in &mut table.rows { row.insert(field.name.clone(), value.clone()); }
+                    table.seek_cache = OnceLock::new();
                     table.fields.push(field.clone());
                 }
                 self.version = self.version.checked_add(1).ok_or_else(|| db_failure("NOE245", "schema version exhausted"))?;
@@ -834,6 +892,7 @@ impl Database {
             .and_then(|field| row.get(&field.name))
             .and_then(Value::as_i64);
         let table = self.tables.get_mut(name).expect("table validated above");
+        table.seek_cache = OnceLock::new();
         table.rows.push(row);
         if consumed_auto {
             table.next_auto = next_auto.checked_add(1).ok_or_else(|| db_failure("NOE214", "auto integer exhausted"))?;
@@ -1011,7 +1070,29 @@ impl Database {
                 }
             }
         } else {
-            rows.extend(left.rows.iter().map(|row| qualified(&select.table, row)));
+            // Only AND-conjoined equality on an explicit integer index is
+            // eligible. The original WHERE filter is always evaluated below.
+            // This is an immutable in-memory B+ access path, built only once
+            // per long-lived snapshot and invalidated before every mutation.
+            let indexed = |field: &str| {
+                left.fields.iter().any(|f| f.name == field
+                    && matches!(f.kind, ValueType::Int | ValueType::Ref)
+                    && (f.key || f.unique))
+                || self.indexes.values().any(|definition| definition.table == select.table
+                    && definition.columns.len() == 1 && definition.columns[0] == field
+                    && left.fields.iter().any(|f| f.name == field
+                        && matches!(f.kind, ValueType::Int | ValueType::Ref)))
+            };
+            if let Some((field, value)) = select.filter.as_ref()
+                .and_then(|filter| indexed_condition(filter, &select.table, params, &indexed)) {
+                if let Some(positions) = left.indexed_row_positions(&field, value) {
+                    rows.extend(positions.iter().map(|&i| qualified(&select.table, &left.rows[i])));
+                } else {
+                    rows.extend(left.rows.iter().map(|row| qualified(&select.table, row)));
+                }
+            } else {
+                rows.extend(left.rows.iter().map(|row| qualified(&select.table, row)));
+            }
         }
 
         rows.into_iter()
@@ -1128,7 +1209,9 @@ impl Database {
                 candidate.insert(field.clone(), eval(expr, &context, params)?);
             }
             self.validate(name, &candidate, Some(index))?;
-            self.tables.get_mut(name).expect("table exists").rows[index] = candidate;
+            let table = self.tables.get_mut(name).expect("table exists");
+            table.seek_cache = OnceLock::new();
+            table.rows[index] = candidate;
             affected += 1;
         }
         Ok(ExecutionReport { affected, rows: Vec::new() })
@@ -1165,6 +1248,7 @@ impl Database {
         }
 
         let table = self.tables.get_mut(name).expect("table exists");
+        table.seek_cache = OnceLock::new();
         let before = table.rows.len();
         table.rows.retain(|row| !hit_keys.iter().any(|key_value| row.get(&key) == Some(key_value)));
         Ok(ExecutionReport { affected: before - table.rows.len(), rows: Vec::new() })
@@ -1305,6 +1389,29 @@ ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
         assert!(db.execute("ledger where id == 1 set amount = 1.0 / 0.0", &params()).is_err());
         let out = crate::reference::rows_json(&db.execute("ledger get amount take 1", &params()).unwrap().rows);
         assert!(out.contains("\"0.100000\""), "{out}");
+    }
+
+    #[test]
+    fn explicit_single_column_integer_index_matches_scan_after_updates() {
+        let mut db = Database::default();
+        db.execute("table readings { id:int key auto\\n owner:int required\\n level:int required }\\nindex owner_idx on readings(owner)", &params()).unwrap();
+        for i in 0..550 {
+            db.execute(&format!("readings add {{owner:{},level:{i}}}", i % 6), &params()).unwrap();
+        }
+        let mut p = params(); p.insert("who".into(), Value::Int(3));
+        let query = "readings get id,owner,level where owner == $who sort id";
+        let indexed = db.execute(query, &p).unwrap().rows;
+        assert_eq!(indexed.len(), 92);
+        assert!(db.tables["readings"].seek_cache.get().is_some());
+        db.execute("readings where id == 4 set owner = 2", &params()).unwrap();
+        assert!(db.tables["readings"].seek_cache.get().is_none());
+        assert_eq!(db.execute(query, &p).unwrap().rows.len(), 91);
+        db.execute("readings where id == 10 delete", &params()).unwrap();
+        assert_eq!(db.execute(query, &p).unwrap().rows.len(), 90);
+        assert!(db.execute("readings get id where id == 10", &params()).unwrap().rows.is_empty());
+        // Unsupported OR never performs unsafe one-sided index pushdown.
+        assert_eq!(db.execute("readings get id where owner == 3 || owner == 2", &params())
+            .unwrap().rows.len(), 183);
     }
 
 }
