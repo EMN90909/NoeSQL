@@ -6,7 +6,7 @@
 //! physical writes are incremental. No garbage collection is attempted.
 use crate::bplus_index::BPlusIndex;
 use crate::hash256::sha256;
-use crate::reference::Database;
+use crate::reference::{Database, Statement};
 use crate::value::{Value, ValueType};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -174,9 +174,67 @@ fn row_entries(db: &Database, table: &str, field: &str) -> Result<Vec<(i64, u64)
     result.sort_unstable();
     Ok(result)
 }
+/// Parse only generation-authenticated root references. This is used after
+/// read_generation has verified the committed manifest and every old tree.
+fn parse_roots(padded: &[u8]) -> Result<BTreeMap<(String, String), ([u8;32], u64)>> {
+    if padded.len() < 44 || &padded[..8] != MAP_MAGIC {
+        return Err("invalid previous B+ manifest header".into());
+    }
+    let count = u32_at(padded, 8) as usize;
+    let mut cursor = 12usize;
+    let mut result = BTreeMap::new();
+    for _ in 0..count {
+        if cursor + 44 > padded.len() { return Err("truncated previous B+ manifest".into()); }
+        let tn = u16_at(padded, cursor) as usize;
+        let cn = u16_at(padded, cursor+2) as usize;
+        let rows = u64_at(padded, cursor+4);
+        let mut root = [0; 32]; root.copy_from_slice(&padded[cursor+12..cursor+44]);
+        cursor += 44;
+        let end = cursor.checked_add(tn).and_then(|n| n.checked_add(cn))
+            .ok_or("previous B+ manifest name overflow")?;
+        if end + 32 > padded.len() { return Err("previous B+ manifest name truncated".into()); }
+        let table = std::str::from_utf8(&padded[cursor..cursor+tn]).map_err(err)?.to_string();
+        cursor += tn;
+        let column = std::str::from_utf8(&padded[cursor..cursor+cn]).map_err(err)?.to_string();
+        cursor += cn;
+        if result.insert((table, column), (root, rows)).is_some() {
+            return Err("duplicate previous B+ root".into());
+        }
+    }
+    if cursor + 32 > padded.len() ||
+        sha256(&padded[..cursor]).as_slice() != &padded[cursor..cursor+32] ||
+        padded[cursor+32..].iter().any(|b| *b != 0) {
+        return Err("previous B+ manifest digest mismatch".into());
+    }
+    Ok(result)
+}
+fn index_is_dirty(table: &str, column: &str, statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Add(name, _) | Statement::Delete(name, _) |
+        Statement::Table(name, _) if name == table => true,
+        Statement::Set(name, _, values) if name == table =>
+            values.iter().any(|(name, _)| name == column),
+        Statement::Atomic(nested) => index_is_dirty(table, column, nested),
+        _ => false,
+    })
+}
+
 /// Persist dirty 4 KiB B+ pages and return the generation-bound index manifest.
 /// Existing content-identical pages are verified and reused, never rewritten.
 pub fn write_index_manifest(versions: &Path, db: &Database) -> Result<Vec<u8>> {
+    write_index_manifest_delta(versions, db, None, &[])
+}
+/// Reuse authenticated previous index roots when the transaction's AST
+/// provably left that index's contents and row ordinals unchanged. Modified
+/// trees are rebuilt in memory, but only physically dirty immutable page
+/// blobs are written; unaffected trees do zero index I/O beyond their roots.
+pub fn write_index_manifest_delta(
+    versions: &Path,
+    db: &Database,
+    previous: Option<&[u8]>,
+    statements: &[Statement],
+) -> Result<Vec<u8>> {
+    let previous = previous.map(parse_roots).transpose()?.unwrap_or_default();
     let directory = prepare_dir(versions)?;
     let mut output = Vec::new();
     output.extend_from_slice(MAP_MAGIC);
@@ -187,11 +245,20 @@ pub fn write_index_manifest(versions: &Path, db: &Database) -> Result<Vec<u8>> {
         if table.len() > u16::MAX as usize || field.len() > u16::MAX as usize {
             return Err("index name too long".into());
         }
-        let entries = row_entries(db, &table, &field)?;
-        let root = persist_tree(&directory, &entries)?;
+        let (root, count) = if !index_is_dirty(&table, &field, statements) {
+            if let Some((root, count)) = previous.get(&(table.clone(), field.clone())) {
+                (*root, *count)
+            } else {
+                let entries = row_entries(db, &table, &field)?;
+                (persist_tree(&directory, &entries)?, entries.len() as u64)
+            }
+        } else {
+            let entries = row_entries(db, &table, &field)?;
+            (persist_tree(&directory, &entries)?, entries.len() as u64)
+        };
         output.extend_from_slice(&(table.len() as u16).to_le_bytes());
         output.extend_from_slice(&(field.len() as u16).to_le_bytes());
-        output.extend_from_slice(&(entries.len() as u64).to_le_bytes());
+        output.extend_from_slice(&count.to_le_bytes());
         output.extend_from_slice(&root);
         output.extend_from_slice(table.as_bytes());
         output.extend_from_slice(field.as_bytes());
@@ -316,6 +383,36 @@ pub fn safe_index_blob_name(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::reference::Params;
+    #[test]
+    fn unchanged_indexed_columns_reuse_entire_previous_root_without_page_writes() {
+        use crate::reference::parse;
+        let base = std::env::temp_dir().join(format!(
+            "noesql-bplus-delta-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir(&base).unwrap();
+        let mut db = Database::default();
+        db.execute("table logs { id:int key auto\n owner:int required\n score:int required }\nindex owner_idx on logs(owner)",
+            &Params::new()).unwrap();
+        for i in 0..600 {
+            db.execute(&format!("logs add {{owner:{},score:{i}}}", i%60), &Params::new()).unwrap();
+        }
+        let previous = write_index_manifest(&base, &db).unwrap();
+        let before = fs::read_dir(index_dir(&base)).unwrap().count();
+        let statements = parse("logs where id == 10 set score = 999").unwrap();
+        db.execute("logs where id == 10 set score = 999", &Params::new()).unwrap();
+        let reused = write_index_manifest_delta(&base, &db, Some(&previous), &statements).unwrap();
+        assert_eq!(previous, reused, "non-indexed update changed index roots");
+        assert_eq!(fs::read_dir(index_dir(&base)).unwrap().count(), before);
+        load_index_manifest(&base, &db, &reused).unwrap();
+        let changed = parse("logs add {owner:3,score:999}").unwrap();
+        db.execute("logs add {owner:3,score:999}", &Params::new()).unwrap();
+        let next = write_index_manifest_delta(&base, &db, Some(&reused), &changed).unwrap();
+        assert_ne!(reused, next);
+        assert!(fs::read_dir(index_dir(&base)).unwrap().count() > before);
+        load_index_manifest(&base, &db, &next).unwrap();
+        let _ = fs::remove_dir_all(base);
+    }
+
     #[test]
     fn unchanged_disk_index_pages_reused_and_cold_reader_installs_bplus() {
         let base = std::env::temp_dir().join(format!("noesql-index-test-{}", std::process::id()));
