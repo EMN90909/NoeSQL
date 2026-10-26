@@ -13,11 +13,21 @@ Updated: 2026-10-26. **Do not ship this branch as production-ready.** It is a st
 | P0 | Native relational Noqeri | Existing scalar Noqeri bridge; Rust implements full relational semantics | Verified native relational CRUD/joins/aggregates via Noqeri ABI and Zig WAL; not satisfied |
 | P1 | Index/query planning | CLI `explain` reports actual full-scan/hash/nested-loop choice without claiming fake index usage | On-disk B+tree, composite keys, stats, costed plans and index/WAL tests |
 | P1 | Security | Existing bounded parser/ABI; no multi-tenant authorization boundary | Auth, row policy, resource quotas, secret handling, audit, tenant escape tests |
-| P1 | Schema migrations | Existing alter-add and version metadata | Transactional migration ledger, hashes, repeat application, rollback/restore, compatibility |
+| P1 | Schema migrations | CLI `schema-check` validates a proposed `.noe` evolution against the loaded database in memory, without committing; no durable ledger yet | Transactional migration ledger, hashes, repeat application, rollback/restore, compatibility |
 | P1 | Backup/restore | **Initial:** source-locked, verified, checkpointed single-file no-clobber backup & fresh-target restore | Live multi-reader backups, fault injection/retention/restore on external machines |
 | P1 | Rich data types | Existing int/bool/text/ref only | Decimal rounding, timezone, JSON/binary validation, sort/index/encoding interop |
 | P2 | Developer experience | CLI `explain`, `backup`, `restore`; Rust parser tests/benchmarks | REPL, error spans, stable SDK, formatter, editor support |
 | P2 | Ecosystem integration | Existing Rust session ABI with experimental native scalar Noqeri bridge | Stable ABI, versioned bindings, optional SQLite/Postgres adapters and compatibility tests |
+
+### Initial CLI commands
+```sh
+noesql explain existing.noedb 'users get id,name sort id'
+noesql schema-check existing.noedb migration.noe
+noesql backup existing.noedb archived.noedb
+noesql restore archived.noedb newly-restored.noedb
+```
+
+`schema-check` is an in-memory dry run: it DOES NOT record or apply a migration. Backup holds the source database lock while copying, then atomically publishes a validated checkpointed file. It is not a fully non-blocking MVCC backup system. Destination paths must not exist, and file directories must be trusted/private.
 
 ### Important distinction: dirty-page WAL versus incremental relational storage
 
