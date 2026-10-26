@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -59,6 +59,33 @@ fn main() {
             let query: Vec<String> = args.collect();
             if query.is_empty() { usage(); }
             run_script(&database, &query.join(" "));
+        }
+        Some("explain") => {
+            let database = args.next().unwrap_or_else(|| usage());
+            let query: Vec<String> = args.collect();
+            if query.is_empty() { usage(); }
+            #[cfg(feature = "zig-pager")]
+            {
+                let database = noesql_runtime::zig_pager::load(Path::new(&database))
+                    .unwrap_or_else(|error| fail(error));
+                println!("{}", database.explain(&query.join(" "), &Params::new())
+                    .unwrap_or_else(|error| fail(error)));
+            }
+            #[cfg(not(feature = "zig-pager"))]
+            fail("EXPLAIN requires the zig-pager feature");
+        }
+        Some("backup") | Some("restore") => {
+            let from = args.next().unwrap_or_else(|| usage());
+            let to = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            #[cfg(feature = "zig-pager")]
+            {
+                noesql_runtime::zig_pager::backup(Path::new(&from), Path::new(&to))
+                    .unwrap_or_else(|error| fail(error));
+                println!("verified backup created: {to}");
+            }
+            #[cfg(not(feature = "zig-pager"))]
+            fail("backup and restore require the zig-pager feature");
         }
         _ => usage(),
     }
