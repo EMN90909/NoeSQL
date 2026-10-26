@@ -18,6 +18,8 @@ const LEAF_FANOUT: usize = 240;
 const BRANCH_FANOUT: usize = 80;
 const MAX_DEPTH: usize = 16;
 const NODE_MAGIC: &[u8; 8] = b"NQBI0001";
+pub(crate) const NODE_MAGIC_V2: &[u8; 8] = b"NQBI0002";
+pub(crate) const MAP_MAGIC_V2: &[u8; 8] = b"NQIM0002";
 const MAP_MAGIC: &[u8; 8] = b"NQIM0001";
 type Result<T> = std::result::Result<T, String>;
 fn err(e: impl std::fmt::Display) -> String { e.to_string() }
@@ -43,7 +45,7 @@ fn u64_at(page: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(page[at..at+8].try_into().expect("checked page"))
 }
 fn sync_dir(path: &Path) -> Result<()> { File::open(path).and_then(|dir| dir.sync_all()).map_err(err) }
-fn prepare_dir(versions: &Path) -> Result<PathBuf> {
+pub(crate) fn prepare_dir(versions: &Path) -> Result<PathBuf> {
     let dir = index_dir(versions);
     if !dir.exists() {
         match fs::create_dir(&dir) {
@@ -57,7 +59,7 @@ fn prepare_dir(versions: &Path) -> Result<PathBuf> {
     }
     Ok(dir)
 }
-fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result<[u8; 32]> {
+pub(crate) fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result<[u8; 32]> {
     let hash = sha256(image);
     let path = blob_path(directory, &hash);
     match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -80,7 +82,7 @@ fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result<[u8; 32]> 
     }
     Ok(hash)
 }
-fn read_blob(directory: &Path, hash: &[u8; 32]) -> Result<[u8; PAGE_BYTES]> {
+pub(crate) fn read_blob(directory: &Path, hash: &[u8; 32]) -> Result<[u8; PAGE_BYTES]> {
     let path = blob_path(directory, hash);
     let mut f = File::open(path).map_err(err)?;
     if f.metadata().map_err(err)?.len() != PAGE_BYTES as u64 {
@@ -88,7 +90,8 @@ fn read_blob(directory: &Path, hash: &[u8; 32]) -> Result<[u8; PAGE_BYTES]> {
     }
     let mut bytes = [0; PAGE_BYTES];
     f.read_exact(&mut bytes).map_err(err)?;
-    if sha256(&bytes) != *hash || &bytes[..8] != NODE_MAGIC {
+    if sha256(&bytes) != *hash ||
+       (&bytes[..8] != NODE_MAGIC && &bytes[..8] != NODE_MAGIC_V2) {
         return Err("index page checksum or magic mismatch".into());
     }
     Ok(bytes)
