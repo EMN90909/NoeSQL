@@ -61,7 +61,7 @@ impl Json<'_> {
     }
     fn one(&mut self, ch: u8) -> bool {
         self.ws();
-        if self.src.get(self.at) == Some(ch) { self.at += 1; true } else { false }
+        if self.src.get(self.at).copied() == Some(ch) { self.at += 1; true } else { false }
     }
     fn hex4(&mut self) -> Option<u16> {
         let bytes = self.src.get(self.at..self.at + 4)?;
@@ -80,12 +80,12 @@ impl Json<'_> {
     }
     fn string(&mut self) -> bool {
         if !self.one(b'"') { return false; }
-        while let Some(&c) = self.src.get(self.at) {
+        while let Some(c) = self.src.get(self.at).copied() {
             self.at += 1;
             match c {
                 b'"' => return true,
                 b'\\' => {
-                    let Some(&escaped) = self.src.get(self.at) else { return false };
+                    let Some(escaped) = self.src.get(self.at).copied() else { return false };
                     self.at += 1;
                     match escaped {
                         b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => {},
@@ -109,7 +109,7 @@ impl Json<'_> {
     }
     fn number(&mut self) -> bool {
         let start = self.at;
-        if self.src.get(self.at) == Some(b'-') { self.at += 1; }
+        if self.src.get(self.at).copied() == Some(b'-') { self.at += 1; }
         match self.src.get(self.at).copied() {
             Some(b'0') => self.at += 1,
             Some(b'1'..=b'9') => {
@@ -118,16 +118,16 @@ impl Json<'_> {
             },
             _ => return false,
         }
-        if self.src.get(self.at) == Some(b'.') {
+        if self.src.get(self.at).copied() == Some(b'.') {
             self.at += 1;
-            if !matches!(self.src.get(self.at), Some(b'0'..=b'9')) { return false; }
-            while matches!(self.src.get(self.at), Some(b'0'..=b'9')) { self.at += 1; }
+            if !matches!(self.src.get(self.at).copied(), Some(b'0'..=b'9')) { return false; }
+            while matches!(self.src.get(self.at).copied(), Some(b'0'..=b'9')) { self.at += 1; }
         }
-        if matches!(self.src.get(self.at), Some(b'e' | b'E')) {
+        if matches!(self.src.get(self.at).copied(), Some(b'e' | b'E')) {
             self.at += 1;
-            if matches!(self.src.get(self.at), Some(b'+' | b'-')) { self.at += 1; }
-            if !matches!(self.src.get(self.at), Some(b'0'..=b'9')) { return false; }
-            while matches!(self.src.get(self.at), Some(b'0'..=b'9')) { self.at += 1; }
+            if matches!(self.src.get(self.at).copied(), Some(b'+' | b'-')) { self.at += 1; }
+            if !matches!(self.src.get(self.at).copied(), Some(b'0'..=b'9')) { return false; }
+            while matches!(self.src.get(self.at).copied(), Some(b'0'..=b'9')) { self.at += 1; }
         }
         self.at > start
     }
@@ -140,7 +140,7 @@ impl Json<'_> {
     fn value(&mut self, depth: u8) -> bool {
         if depth > 32 { return false; }
         self.ws();
-        match self.src.get(self.at) {
+        match self.src.get(self.at).copied() {
             Some(b'"') => self.string(),
             Some(b'{') => {
                 self.at += 1;
