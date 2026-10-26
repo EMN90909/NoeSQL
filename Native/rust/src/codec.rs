@@ -404,7 +404,25 @@ pub fn decode(bytes: &[u8]) -> Result<Database, CodecError> {
 
         let row_count = reader.count()?;
         let mut rows = Vec::with_capacity(row_count);
-        for _ in 0..row_count { rows.push(decode_row(&mut reader)?); }
+        for _ in 0..row_count {
+            let row = decode_row(&mut reader)?;
+            // Whole-page SHA checksums alone do not verify that the decoded
+            // logical row obeys its column definitions. Fail closed on
+            // unknown columns, invalid typed data and required null values.
+            if row.keys().any(|name| !names.contains(name)) {
+                return Err(CodecError("row has unknown fields".into()));
+            }
+            for field in &fields {
+                let value = row.get(&field.name).unwrap_or(&Value::Null);
+                if (field.required || field.key) && *value == Value::Null {
+                    return Err(CodecError("required field is null".into()));
+                }
+                if !field.kind.accepts(value) {
+                    return Err(CodecError("stored row violates field type".into()));
+                }
+            }
+            rows.push(row);
+        }
 
         if tables.insert(table_name, Table { fields, rows, next_auto }).is_some() {
             return Err(CodecError("duplicate table".into()));
