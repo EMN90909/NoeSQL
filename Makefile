@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -38,6 +38,11 @@ stress: no-js no-c-family
 		echo "NoeSQL durability stress pass $iteration / 3"; \
 		$(MAKE) test-zig test-rust-zig; \
 	done
+
+# Isolated Rust compiler/parser and read execution microbenchmark.
+# This is NOT a substitute for a multi-client transactional load test.
+benchmark-parser-reads: no-js no-c-family
+	cargo run --release --locked --manifest-path Native/rust/Cargo.toml --bin benchmark_parser_reads
 
 native:
 	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
