@@ -23,7 +23,7 @@ pub fn valid_date(s: &str) -> bool {
 pub fn valid_datetime(s: &str) -> bool {
     let b = s.as_bytes();
     if b.len() != 24 || b[10] != b'T' || b[13] != b':' || b[16] != b':' ||
-        b[19] != b'.' || b[23] != b'Z' || !valid_date(&s[..10]) { return false; }
+        b[19] != b'.' || b[23] != b'Z' || !s.is_ascii() || !valid_date(&s[..10]) { return false; }
     if [11, 12, 14, 15, 17, 18, 20, 21, 22]
         .iter().any(|i| !b[*i].is_ascii_digit()) { return false; }
     let hh = (b[11] - b'0') * 10 + b[12] - b'0';
@@ -38,7 +38,7 @@ pub fn valid_uuid(s: &str) -> bool {
     for (i, c) in b.iter().enumerate() {
         if matches!(i, 8 | 13 | 18 | 23) {
             if *c != b'-' { return false; }
-        } else if !matches!(c, b'0'..=b'9' | b'a'..=b'f') {
+        } else if !matches!(*c, b'0'..=b'9' | b'a'..=b'f') {
             return false;
         }
     }
@@ -66,7 +66,7 @@ impl Json<'_> {
     fn hex4(&mut self) -> Option<u16> {
         let bytes = self.src.get(self.at..self.at + 4)?;
         let mut result = 0u16;
-        for ch in bytes {
+        for &ch in bytes {
             let n = match ch {
                 b'0'..=b'9' => u16::from(ch - b'0'),
                 b'a'..=b'f' => u16::from(ch - b'a' + 10),
@@ -92,7 +92,7 @@ impl Json<'_> {
                         b'u' => {
                             let Some(code) = self.hex4() else { return false };
                             if (0xD800..=0xDBFF).contains(&code) {
-                                if self.src.get(self.at..self.at + 2) != Some(b"\\u") { return false }
+                                if self.src.get(self.at..self.at + 2) != Some(&b"\\u"[..]) { return false }
                                 self.at += 2;
                                 let Some(low) = self.hex4() else { return false };
                                 if !(0xDC00..=0xDFFF).contains(&low) { return false }
@@ -110,11 +110,11 @@ impl Json<'_> {
     fn number(&mut self) -> bool {
         let start = self.at;
         if self.src.get(self.at) == Some(&b'-') { self.at += 1; }
-        match self.src.get(self.at) {
+        match self.src.get(self.at).copied() {
             Some(b'0') => self.at += 1,
             Some(b'1'..=b'9') => {
                 self.at += 1;
-                while matches!(self.src.get(self.at), Some(b'0'..=b'9')) { self.at += 1; }
+                while matches!(self.src.get(self.at).copied(), Some(b'0'..=b'9')) { self.at += 1; }
             },
             _ => return false,
         }
