@@ -1,5 +1,7 @@
 pub mod codec;
 pub mod decimal;
+mod hash256;
+pub mod v3_store;
 #[cfg(feature = "zig-pager")]
 pub mod relational_abi;
 pub mod planner;
