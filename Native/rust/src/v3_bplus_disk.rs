@@ -5,6 +5,7 @@
 //! Note: building a changed index remains O(n log n) in memory; only
 //! physical writes are incremental. No garbage collection is attempted.
 use crate::bplus_index::BPlusIndex;
+use crate::v3_bplus_cow::{self as cow, Pair};
 use crate::hash256::sha256;
 use crate::reference::{Database, Statement};
 use crate::value::{Value, ValueType};
@@ -177,12 +178,64 @@ fn row_entries(db: &Database, table: &str, field: &str) -> Result<Vec<(i64, u64)
     result.sort_unstable();
     Ok(result)
 }
-/// Parse only generation-authenticated root references. This is used after
-/// read_generation has verified the committed manifest and every old tree.
-fn parse_roots(padded: &[u8]) -> Result<BTreeMap<(String, String), ([u8;32], u64)>> {
-    if padded.len() < 44 || &padded[..8] != MAP_MAGIC {
+/// Keyed by (indexed value, stable PRIMARY KEY), never row-vector ordinal.
+/// Row deletion therefore changes only its own keys rather than renumbering
+/// every entry after the deleted position.
+fn stable_entries(db: &Database, table: &str, field: &str) -> Result<Vec<Pair>> {
+    let table = db.tables.get(table).ok_or("index table missing")?;
+    let primary = table.fields.iter().find(|field| field.key)
+        .ok_or("indexed table has no primary key")?;
+    let mut result = Vec::new();
+    for row in &table.rows {
+        let pk = match row.get(&primary.name) {
+            Some(Value::Int(id)) => *id,
+            _ => return Err("indexed row lacks integer primary key".into()),
+        };
+        if let Some(Value::Int(indexed)) = row.get(field) {
+            result.push((*indexed, pk));
+        }
+    }
+    result.sort_unstable();
+    if result.windows(2).any(|pairs| pairs[0] >= pairs[1]) {
+        return Err("duplicate stable B+ index entry".into());
+    }
+    Ok(result)
+}
+fn index_is_dirty(table: &str, column: &str, primary: &str, statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Add(name, _) | Statement::Delete(name, _) |
+        Statement::Table(name, _) if name == table => true,
+        Statement::Set(name, _, values) if name == table =>
+            values.iter().any(|(name, _)| name == column || name == primary),
+        Statement::Atomic(nested) => index_is_dirty(table, column, primary, nested),
+        _ => false,
+    })
+}
+pub type IndexCapture = BTreeMap<(String, String), Vec<Pair>>;
+/// Capture only the potentially changed index entries BEFORE a private
+/// relational mutation. This bounded migration journal avoids cloning the
+/// entire database. Delta discovery still visits affected table rows (O(n));
+/// individual disk B+ entry mutations are O(log n).
+pub fn capture_dirty_indexes(db: &Database, statements: &[Statement]) -> Result<IndexCapture> {
+    let mut out = BTreeMap::new();
+    for (table, field) in expected_indexes(db) {
+        let primary = db.tables[&table].fields.iter().find(|f| f.key)
+            .ok_or("indexed table has no primary key")?;
+        if index_is_dirty(&table, &field, &primary.name, statements) {
+            out.insert((table.clone(), field.clone()), stable_entries(db, &table, &field)?);
+        }
+    }
+    Ok(out)
+}
+/// Parse roots from a prior HEAD-authenticated, fully verified index manifest.
+/// Original ordinal index manifests are recognized but upgraded to stable ID
+/// trees once on their first subsequent mutation.
+fn parse_roots(padded: &[u8]) -> Result<(bool, BTreeMap<(String, String), ([u8;32], u64)>)> {
+    if padded.len() < 44 ||
+       (&padded[..8] != MAP_MAGIC && &padded[..8] != MAP_MAGIC_V2) {
         return Err("invalid previous B+ manifest header".into());
     }
+    let stable = &padded[..8] == MAP_MAGIC_V2;
     let count = u32_at(padded, 8) as usize;
     let mut cursor = 12usize;
     let mut result = BTreeMap::new();
@@ -195,7 +248,9 @@ fn parse_roots(padded: &[u8]) -> Result<BTreeMap<(String, String), ([u8;32], u64
         cursor += 44;
         let end = cursor.checked_add(tn).and_then(|n| n.checked_add(cn))
             .ok_or("previous B+ manifest name overflow")?;
-        if end + 32 > padded.len() { return Err("previous B+ manifest name truncated".into()); }
+        if end.checked_add(32).is_none_or(|n| n > padded.len()) {
+            return Err("previous B+ manifest name truncated".into());
+        }
         let table = std::str::from_utf8(&padded[cursor..cursor+tn]).map_err(err)?.to_string();
         cursor += tn;
         let column = std::str::from_utf8(&padded[cursor..cursor+cn]).map_err(err)?.to_string();
@@ -209,38 +264,44 @@ fn parse_roots(padded: &[u8]) -> Result<BTreeMap<(String, String), ([u8;32], u64
         padded[cursor+32..].iter().any(|b| *b != 0) {
         return Err("previous B+ manifest digest mismatch".into());
     }
-    Ok(result)
+    Ok((stable, result))
 }
-fn index_is_dirty(table: &str, column: &str, statements: &[Statement]) -> bool {
-    statements.iter().any(|statement| match statement {
-        Statement::Add(name, _) | Statement::Delete(name, _) |
-        Statement::Table(name, _) if name == table => true,
-        Statement::Set(name, _, values) if name == table =>
-            values.iter().any(|(name, _)| name == column),
-        Statement::Atomic(nested) => index_is_dirty(table, column, nested),
-        _ => false,
-    })
+fn diff_entries(before: &[Pair], after: &[Pair]) -> (Vec<Pair>, Vec<Pair>) {
+    let mut remove = Vec::new();
+    let mut insert = Vec::new();
+    let mut old = 0;
+    let mut new = 0;
+    while old < before.len() || new < after.len() {
+        match (before.get(old), after.get(new)) {
+            (Some(a), Some(b)) if a == b => { old+=1; new+=1; },
+            (Some(a), Some(b)) if a < b => { remove.push(*a); old+=1; },
+            (Some(_), Some(b)) => { insert.push(*b); new+=1; },
+            (Some(a), None) => { remove.push(*a); old+=1; },
+            (None, Some(b)) => { insert.push(*b); new+=1; },
+            (None, None) => break,
+        }
+    }
+    (remove, insert)
 }
 
-/// Persist dirty 4 KiB B+ pages and return the generation-bound index manifest.
-/// Existing content-identical pages are verified and reused, never rewritten.
+/// Persist new indexes by balanced bulk creation; update existing stable-key
+/// indexes by logarithmic copy-on-write insertion/removal, not by rebuilding.
+/// SHA-verified unchanged subtrees are reused by hash across generations.
 pub fn write_index_manifest(versions: &Path, db: &Database) -> Result<Vec<u8>> {
-    write_index_manifest_delta(versions, db, None, &[])
+    write_index_manifest_delta(versions, db, None, &[], None)
 }
-/// Reuse authenticated previous index roots when the transaction's AST
-/// provably left that index's contents and row ordinals unchanged. Modified
-/// trees are rebuilt in memory, but only physically dirty immutable page
-/// blobs are written; unaffected trees do zero index I/O beyond their roots.
 pub fn write_index_manifest_delta(
     versions: &Path,
     db: &Database,
     previous: Option<&[u8]>,
     statements: &[Statement],
+    before: Option<&IndexCapture>,
 ) -> Result<Vec<u8>> {
-    let previous = previous.map(parse_roots).transpose()?.unwrap_or_default();
+    let (stable, previous) = previous.map(parse_roots).transpose()?
+        .unwrap_or((false, BTreeMap::new()));
     let directory = prepare_dir(versions)?;
     let mut output = Vec::new();
-    output.extend_from_slice(MAP_MAGIC);
+    output.extend_from_slice(MAP_MAGIC_V2);
     let fields = expected_indexes(db);
     if fields.len() > u32::MAX as usize { return Err("too many indexes".into()); }
     output.extend_from_slice(&(fields.len() as u32).to_le_bytes());
@@ -248,16 +309,39 @@ pub fn write_index_manifest_delta(
         if table.len() > u16::MAX as usize || field.len() > u16::MAX as usize {
             return Err("index name too long".into());
         }
-        let (root, count) = if !index_is_dirty(&table, &field, statements) {
-            if let Some((root, count)) = previous.get(&(table.clone(), field.clone())) {
-                (*root, *count)
+        let primary = db.tables[&table].fields.iter().find(|f| f.key)
+            .ok_or("indexed table has no primary key")?;
+        let dirty = index_is_dirty(&table, &field, &primary.name, statements);
+        let previous_root = previous.get(&(table.clone(), field.clone()));
+        let (root, count) = if stable && !dirty {
+            if let Some(&(root, count)) = previous_root {
+                (root, count)
             } else {
-                let entries = row_entries(db, &table, &field)?;
-                (persist_tree(&directory, &entries)?, entries.len() as u64)
+                let entries = stable_entries(db, &table, &field)?;
+                let root = cow::build(&directory, entries.clone())?
+                    .map_or([0;32], |node| node.hash);
+                (root, entries.len() as u64)
             }
+        } else if stable && previous_root.is_some() {
+            let (prior_hash, prior_count) = *previous_root.unwrap();
+            let prior = before.and_then(|capture| capture.get(&(table.clone(), field.clone())))
+                .ok_or("dirty stable index is missing its pre-mutation journal")?;
+            if prior.len() as u64 != prior_count {
+                return Err("pre-mutation index count differs from committed manifest".into());
+            }
+            let after = stable_entries(db, &table, &field)?;
+            let (removals, insertions) = diff_entries(prior, &after);
+            let mut root = cow::root(&directory, &prior_hash)?;
+            for pair in removals { root = cow::remove(&directory, root, pair)?; }
+            for pair in insertions { root = cow::insert(&directory, root, pair)?; }
+            (root.map_or([0;32], |node| node.hash), after.len() as u64)
         } else {
-            let entries = row_entries(db, &table, &field)?;
-            (persist_tree(&directory, &entries)?, entries.len() as u64)
+            // Creation, new index, or the single mandatory migration from
+            // NQBI0001 row offsets to NQBI0002 stable primary-key identity.
+            let entries = stable_entries(db, &table, &field)?;
+            let root = cow::build(&directory, entries.clone())?
+                .map_or([0;32], |node| node.hash);
+            (root, entries.len() as u64)
         };
         output.extend_from_slice(&(table.len() as u16).to_le_bytes());
         output.extend_from_slice(&(field.len() as u16).to_le_bytes());
