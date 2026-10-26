@@ -14,6 +14,8 @@ pub const STATUS_FAILURE: i32 = -2;
 pub const STATUS_BUFFER_TOO_SMALL: i32 = -3;
 pub const STATUS_DUPLICATE: i32 = -4;
 pub const STATUS_INDEX_FULL: i32 = -5;
+// Retryable storage contention: distinct from corruption, IO and invalid formats.
+pub const STATUS_LOCKED: i32 = -6;
 
 pub export fn noesql_zig_page_open(version: u32, name: ?[*:0]const u8, out: ?*?*anyopaque) i32 {
     const dest = out orelse return STATUS_INVALID;
@@ -22,7 +24,10 @@ pub export fn noesql_zig_page_open(version: u32, name: ?[*:0]const u8, out: ?*?*
     const path = name orelse return STATUS_INVALID;
     const value = std.mem.span(path);
     if (value.len == 0 or value.len > 4000) return STATUS_INVALID;
-    const pager = storage.Pager.open(std.heap.page_allocator, value) catch return STATUS_FAILURE;
+    const pager = storage.Pager.open(std.heap.page_allocator, value) catch |err| return switch (err) {
+        error.Locked => STATUS_LOCKED,
+        else => STATUS_FAILURE,
+    };
     dest.* = @ptrCast(pager);
     return STATUS_OK;
 }
