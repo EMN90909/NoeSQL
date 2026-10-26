@@ -88,3 +88,27 @@ fn explain_reports_real_plan_and_rejects_mutations() {
     clean(&source);
     let _ = fs::remove_file(script);
 }
+
+#[test]
+fn schema_check_validates_evolution_but_never_applies_it() {
+    let source = path("schema-check");
+    let setup = source.with_extension("noe");
+    let evolution = source.with_extension("migration.noe");
+    clean(&source);
+    fs::write(&setup, "table users {\n id:int key auto\n name:text required\n}\nusers add {name:\"Amina\"}").unwrap();
+    fs::write(&evolution, "alter users add { active:bool required = true }").unwrap();
+    let db = source.to_str().unwrap();
+    cli(&["run", db, setup.to_str().unwrap()], true);
+    let report = cli(&["schema-check", db, evolution.to_str().unwrap()], true);
+    assert!(report.contains("not applied"));
+    assert!(report.contains("version 1 -> 2"));
+    cli(&["query", db, "users get name,active"], false);
+    assert!(cli(&["query", db, "users get name"], true).contains("Amina"));
+
+    fs::write(&evolution, "alter unknown_table add { active:bool }").unwrap();
+    cli(&["schema-check", db, evolution.to_str().unwrap()], false);
+
+    clean(&source);
+    let _ = fs::remove_file(setup);
+    let _ = fs::remove_file(evolution);
+}
