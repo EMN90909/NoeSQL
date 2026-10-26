@@ -12,9 +12,11 @@ Rust module: `Native/rust/src/mvcc.rs`. `MvccStore::snapshot()` pins an immutabl
 
 ## Embedded authorization
 
-Rust module: `Native/rust/src/authorization.rs`. `AccessControl::new()` denies all reads, writes and schema changes by default. A caller explicitly grants table read/write rights; schema-admin rights are separate. The authorizer checks both tables of a join and recursively checks every statement within an atomic block. It enforces source-byte and returned-row budgets, and rejects a failing authorization without publishing database changes.
+Rust module: `Native/rust/src/authorization.rs`. `AccessControl::new()` denies all reads, writes and schema changes by default. A caller explicitly grants table read/write rights; schema-admin rights are separate. The `AuthorizedSession` façade keeps its mutable database handle private. The authorizer checks both tables of a join and recursively checks every statement within an atomic block. It enforces source-byte and returned-row budgets, and rejects a failing authorization without publishing database changes.
 
-**Limitations:** It is an opt-in API boundary. Raw `Database::execute` is still an administrative interface. No transport-layer authentication, tenant isolation, durable row-level security, encrypted secrets or tamper-resistant audit records have been added. Do not expose the raw SDK to untrusted users.
+An optional `restrict_rows(table, column, Value)` policy adds a mandatory equality predicate to reads, updates and deletes, rejects inserted rows carrying a different tenant value, and disallows modifying the tenant column. JOINs involving any row-policy-protected table fail closed rather than risk an incomplete policy rewrite. Tests cover tenant escape attempts and nested mutations.
+
+**Limitations:** This is only an opt-in **in-process** authorization boundary. Raw `Database::execute` remains administrative, policies are not persisted, untrusted callers cannot safely receive raw database or process access, and the CLI/native Noqeri paths do not enforce these policies. No transport-layer authentication, encrypted secrets, robust tenant isolation across processes, complete SQL row-level security or tamper-resistant audit records have been added.
 
 ## Validated text-backed types
 
