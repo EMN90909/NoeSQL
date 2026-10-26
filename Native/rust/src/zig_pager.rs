@@ -184,6 +184,10 @@ fn load_or_default_with_pager(pager: &Pager) -> Result<Database, Error> {
 /// Execute under the Zig pager's inter-process writer lock, checking the
 /// serialized response size BEFORE publishing the WAL transaction. A caller
 /// with an undersized output buffer never accidentally commits a write.
+/// A read-only program loads its durable, WAL-recovered snapshot under the
+/// existing short exclusive pager lock, then releases that lock before running
+/// the query. Separate processes can evaluate snapshots while writers commit.
+/// This does NOT keep historical versions on disk or provide a v3 MVCC pager.
 pub fn execute_locked_bounded(
     path: &Path,
     source: &str,
@@ -193,24 +197,30 @@ pub fn execute_locked_bounded(
     use crate::reference::rows_json;
     let statements = parse(source).map_err(|error| error.to_string())?;
     let read_only = Database::statements_read_only(&statements);
+    if read_only {
+        // The pager is dropped by load_or_default before query evaluation.
+        let database = load_or_default(path).map_err(|error| error.to_string())?;
+        let report = database.query_parsed(&statements, params).map_err(|error| error.to_string())?;
+        let output = format!(
+            "{{\"affected\":{},\"rows\":{}}}",
+            report.affected, rows_json(&report.rows)
+        );
+        if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+            return Err(format!("response of {} bytes exceeds output budget of {} bytes (not committed)",
+                output.len(), max_output_bytes.min(crate::MAX_OUTPUT_BYTES)));
+        }
+        return Ok((report, output));
+    }
+
+    // Writers still serialize across processes. Never release the file lock
+    // between reading the base generation and fsyncing its successor.
     let pager = Pager::open(path).map_err(|error| error.to_string())?;
     let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
-
-    // Changes remain private until the response fits and the durable commit
-    // succeeds. Rust's execute_parsed is additionally atomic on statement
-    // failures. The lock covers load, execute, capacity check and commit.
-    let before = if read_only { None } else {
-        Some(codec::encode(&database).map_err(|error| error.to_string())?)
-    };
-    let report = if read_only {
-        database.query_parsed(&statements, params)
-    } else {
-        database.execute_parsed(&statements, params)
-    }.map_err(|error| error.to_string())?;
+    let before = codec::encode(&database).map_err(|error| error.to_string())?;
+    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
     let output = format!(
         "{{\"affected\":{},\"rows\":{}}}",
-        report.affected,
-        rows_json(&report.rows)
+        report.affected, rows_json(&report.rows)
     );
     if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
         return Err(format!(
@@ -218,11 +228,9 @@ pub fn execute_locked_bounded(
             output.len(), max_output_bytes.min(crate::MAX_OUTPUT_BYTES)
         ));
     }
-    if let Some(before) = before {
-        let after = codec::encode(&database).map_err(|error| error.to_string())?;
-        if before != after {
-            save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
-        }
+    let after = codec::encode(&database).map_err(|error| error.to_string())?;
+    if before != after {
+        save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
     }
     Ok((report, output))
 }
