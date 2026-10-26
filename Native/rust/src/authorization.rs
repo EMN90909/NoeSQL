@@ -106,9 +106,37 @@ impl AccessControl {
     }
 }
 
+/// Restricted embedded façade. Callers must not expose an independent
+/// unrestricted Database handle to untrusted principals.
+pub struct AuthorizedSession {
+    database: Database,
+    access: AccessControl,
+}
+impl AuthorizedSession {
+    pub fn new(database: Database, access: AccessControl) -> Self { Self { database, access } }
+    pub fn execute(&mut self, source: &str, params: &Params) -> Result<ExecutionReport, AccessError> {
+        self.access.execute(&mut self.database, source, params)
+    }
+    pub fn version(&self) -> u32 { self.database.version }
+    /// Explicit administrative escape hatch, consumes this session.
+    pub fn into_database(self) -> Database { self.database }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn restricted_session_keeps_database_handle_private() {
+        let mut db = Database::default();
+        db.execute("table clients { id:int key auto }", &Params::new()).unwrap();
+        let mut grants = AccessControl::new();
+        grants.grant("clients", true, false);
+        let mut session = AuthorizedSession::new(db, grants);
+        assert!(session.execute("clients add {}", &Params::new()).is_err());
+        assert_eq!(session.execute("clients get id", &Params::new()).unwrap().rows.len(), 0);
+        assert_eq!(session.version(), 1);
+    }
 
     #[test]
     fn denies_by_default_and_nested_atomic_is_not_a_privilege_bypass() {
