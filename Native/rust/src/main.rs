@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql v2-schema-check <legacy.noedb> <migration.noe>\n  noesql v2-export-sql <legacy.noedb> <sqlite|postgres> <new.sql>\n  noesql v2-export-sqlite <legacy.noedb> <new.sqlite3>\n  noesql v2-backup <legacy.noedb> <new.noedb>\n  noesql v2-restore <legacy.noedb> <new.noedb>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -103,49 +103,61 @@ fn main() {
                     .unwrap_or_else(|error| fail(error)));
             }
         }
-        Some("export-sql") => {
+        Some(operation @ ("export-sql" | "v2-export-sql")) => {
+            use noesql_runtime::interop::{export_sql, Dialect};
+            use std::io::Write;
             let database = args.next().unwrap_or_else(|| usage());
             let flavor = args.next().unwrap_or_else(|| usage());
             let destination = args.next().unwrap_or_else(|| usage());
             if args.next().is_some() { usage(); }
-            #[cfg(feature = "zig-pager")]
-            {
-                use noesql_runtime::interop::{export_sql, Dialect};
-                use std::io::Write;
-                let dialect = match flavor.as_str() {
-                    "sqlite" => Dialect::Sqlite,
-                    "postgres" => Dialect::Postgres,
-                    _ => usage(),
-                };
-                let db = noesql_runtime::zig_pager::load(Path::new(&database))
-                    .unwrap_or_else(|error| fail(error));
-                let sql = export_sql(&db, dialect).unwrap_or_else(|error| fail(error));
-                let mut output = std::fs::OpenOptions::new()
-                    .write(true).create_new(true).open(&destination)
-                    .unwrap_or_else(|error| fail(error));
-                if let Err(error) = output.write_all(sql.as_bytes()).and_then(|_| output.sync_all()) {
-                    let _ = std::fs::remove_file(&destination);
-                    fail(error);
-                }
-                println!("SQL export written: {destination}");
+            let dialect = match flavor.as_str() {
+                "sqlite" => Dialect::Sqlite, "postgres" => Dialect::Postgres, _ => usage(),
+            };
+            let db = if operation == "v2-export-sql" {
+                #[cfg(feature = "zig-pager")]
+                { noesql_runtime::zig_pager::load(Path::new(&database))
+                    .unwrap_or_else(|error| fail(error)) }
+                #[cfg(not(feature = "zig-pager"))]
+                { fail("v2-export-sql requires the zig-pager feature") }
+            } else {
+                noesql_runtime::v3_store::snapshot(&default_path(&database))
+                    .unwrap_or_else(|error| fail(error)).database().clone()
+            };
+            let sql = export_sql(&db, dialect).unwrap_or_else(|error| fail(error));
+            let mut output = std::fs::OpenOptions::new()
+                .write(true).create_new(true).open(&destination)
+                .unwrap_or_else(|error| fail(error));
+            if let Err(error) = output.write_all(sql.as_bytes()).and_then(|_| output.sync_all()) {
+                let _ = std::fs::remove_file(&destination);
+                fail(error);
             }
-            #[cfg(not(feature = "zig-pager"))]
-            fail("SQL export requires the zig-pager feature");
+            println!("SQL export written: {destination}");
         }
-        Some("export-sqlite") => {
+        Some(operation @ ("export-sqlite" | "v2-export-sqlite")) => {
             let source = args.next().unwrap_or_else(|| usage());
             let target = args.next().unwrap_or_else(|| usage());
             if args.next().is_some() { usage(); }
-            #[cfg(all(feature = "zig-pager", feature = "sqlite-adapter"))]
+            #[cfg(feature = "sqlite-adapter")]
             {
-                let db = noesql_runtime::zig_pager::load(Path::new(&source))
-                    .unwrap_or_else(|error| fail(error));
+                let db = if operation == "v2-export-sqlite" {
+                    #[cfg(feature = "zig-pager")]
+                    { noesql_runtime::zig_pager::load(Path::new(&source))
+                        .unwrap_or_else(|error| fail(error)) }
+                    #[cfg(not(feature = "zig-pager"))]
+                    { fail("v2-export-sqlite requires zig-pager") }
+                } else {
+                    noesql_runtime::v3_store::snapshot(&default_path(&source))
+                        .unwrap_or_else(|error| fail(error)).database().clone()
+                };
                 noesql_runtime::sqlite_adapter::export_into_sqlite(&db, Path::new(&target))
                     .unwrap_or_else(|error| fail(error));
-                println!("verified SQLite import: {target}");
+                println!("verified SQLite export: {target}");
             }
-            #[cfg(not(all(feature = "zig-pager", feature = "sqlite-adapter")))]
-            fail("export-sqlite requires zig-pager and sqlite-adapter features");
+            #[cfg(not(feature = "sqlite-adapter"))]
+            {
+                let _ = operation;
+                fail("export-sqlite requires sqlite-adapter");
+            }
         }
         Some("migrate-v3") => {
             let source = args.next().unwrap_or_else(|| usage());
@@ -217,38 +229,49 @@ fn main() {
             if !report.rows.is_empty() { println!("{}", rows_json(&report.rows)); }
             else { println!("affected={}", report.affected); }
         }
-        Some("schema-check") => {
+        Some(operation @ ("schema-check" | "v2-schema-check")) => {
             let database = args.next().unwrap_or_else(|| usage());
             let script = args.next().unwrap_or_else(|| usage());
             if args.next().is_some() { usage(); }
             let source = read_source(&script).unwrap_or_else(|error| fail(error));
-            #[cfg(feature = "zig-pager")]
-            {
-                let mut simulated = noesql_runtime::zig_pager::load(Path::new(&database))
-                    .unwrap_or_else(|error| fail(error));
-                let original_version = simulated.version;
-                let report = simulated.execute(&source, &Params::new())
-                    .unwrap_or_else(|error| fail(error));
-                println!(
-                    "schema-check valid: version {} -> {}; affected={} (not applied)",
-                    original_version, simulated.version, report.affected
-                );
-            }
-            #[cfg(not(feature = "zig-pager"))]
-            fail("schema-check requires the zig-pager feature");
+            let mut simulated = if operation == "v2-schema-check" {
+                #[cfg(feature = "zig-pager")]
+                { noesql_runtime::zig_pager::load(Path::new(&database))
+                    .unwrap_or_else(|error| fail(error)) }
+                #[cfg(not(feature = "zig-pager"))]
+                { fail("v2-schema-check requires zig-pager") }
+            } else {
+                noesql_runtime::v3_store::snapshot(&default_path(&database))
+                    .unwrap_or_else(|error| fail(error)).database().clone()
+            };
+            let original_version = simulated.version;
+            let report = simulated.execute(&source, &Params::new())
+                .unwrap_or_else(|error| fail(error));
+            println!("schema-check valid: version {} -> {}; affected={} (not applied)",
+                original_version, simulated.version, report.affected);
         }
-        Some(operation @ ("backup" | "restore")) => {
+        Some(operation @ ("backup" | "restore" | "v2-backup" | "v2-restore")) => {
             let from = args.next().unwrap_or_else(|| usage());
             let to = args.next().unwrap_or_else(|| usage());
             if args.next().is_some() { usage(); }
-            #[cfg(feature = "zig-pager")]
-            {
-                noesql_runtime::zig_pager::backup(Path::new(&from), Path::new(&to))
+            if operation.starts_with("v2-") {
+                #[cfg(feature = "zig-pager")]
+                {
+                    noesql_runtime::zig_pager::backup(Path::new(&from), Path::new(&to))
+                        .unwrap_or_else(|error| fail(error));
+                    println!("legacy v2 snapshot copy: {to}");
+                }
+                #[cfg(not(feature = "zig-pager"))]
+                fail("v2 backup and restore require the zig-pager feature");
+            } else {
+                // Logical v3 restore/backup creates an independent checksummed
+                // generation-1 database, never replaces an existing target.
+                let source = noesql_runtime::v3_store::snapshot(&default_path(&from))
                     .unwrap_or_else(|error| fail(error));
-                println!("{}: {to}", if operation == "restore" { "verified database restored" } else { "verified backup created" });
+                noesql_runtime::v3_store::create_new(&default_path(&to), source.database())
+                    .unwrap_or_else(|error| fail(error));
+                println!("NQDB0003 verified logical {}: {to}", operation);
             }
-            #[cfg(not(feature = "zig-pager"))]
-            fail("backup and restore require the zig-pager feature");
         }
         _ => usage(),
     }
