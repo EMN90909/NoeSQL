@@ -561,16 +561,7 @@ impl Database {
     /// to parse outside the storage lock and avoid parsing a second time.
     pub fn execute_parsed(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         if Self::statements_read_only(statements) {
-            // Keep the same last-nonempty-result semantics as execute_many.
-            let mut report = ExecutionReport::default();
-            for statement in statements {
-                if let Statement::Get(select) = statement {
-                    let current = self.select(select, params)?;
-                    report.affected += current.affected;
-                    if !current.rows.is_empty() { report.rows = current.rows; }
-                }
-            }
-            return Ok(report);
+            return self.query_parsed(statements, params);
         }
         // A write program is still atomic: work on a copy until all
         // statements have succeeded, including the late-failure case.
@@ -579,6 +570,23 @@ impl Database {
         *self = working;
         Ok(report)
     }
+    /// Execute SELECT statements against an immutable database snapshot.
+    /// This is used by the in-process MVCC reader path and never clones rows.
+    pub fn query_parsed(&self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
+        if !Self::statements_read_only(statements) {
+            return db_error("NOE241", "read-only snapshot cannot execute writes");
+        }
+        let mut report = ExecutionReport::default();
+        for statement in statements {
+            if let Statement::Get(select) = statement {
+                let current = self.select(select, params)?;
+                report.affected += current.affected;
+                if !current.rows.is_empty() { report.rows = current.rows; }
+            }
+        }
+        Ok(report)
+    }
+
     /// Describe the plan the current engine will actually use. The index
     /// catalog is currently metadata, not an executable B+tree access path.
     /// EXPLAIN must never imply that a secondary index was used.
