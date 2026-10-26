@@ -22,6 +22,13 @@ fn default_path(raw: &str) -> std::path::PathBuf {
     }
 }
 
+fn has_magic(path: &Path, magic: &[u8; 8]) -> bool {
+    use std::io::Read;
+    let Ok(mut input) = std::fs::File::open(path) else { return false; };
+    let mut header = [0u8; 8];
+    input.read_exact(&mut header).is_ok() && &header == magic
+}
+
 fn display_report(report: noesql_runtime::reference::ExecutionReport) {
     if !report.rows.is_empty() {
         println!("{}", rows_json(&report.rows));
@@ -35,6 +42,9 @@ fn display_report(report: noesql_runtime::reference::ExecutionReport) {
 /// private directory and an absolute filesystem path.
 fn run_script(database_path: &str, source: &str) {
     let path = default_path(database_path);
+    if has_magic(&path, b"NQDB0002") {
+        fail("this file is legacy NQDB0002; use v2-run/v2-query or migrate-v3 to a NEW .noedb path");
+    }
     let report = noesql_runtime::v3_store::execute_or_create(
         &path, source, &Params::new()
     ).unwrap_or_else(|error| fail(error));
@@ -44,6 +54,9 @@ fn run_script(database_path: &str, source: &str) {
 #[cfg(feature = "zig-pager")]
 fn run_v2(database_path: &str, source: &str) {
     let path = Path::new(database_path);
+    if has_magic(path, b"NQDB0003") {
+        fail("this is an NQDB0003 database; use normal run/query instead of v2-*");
+    }
     display_report(noesql_runtime::zig_pager::execute_locked(path, source, &Params::new())
         .unwrap_or_else(|error| fail(error)));
 }
