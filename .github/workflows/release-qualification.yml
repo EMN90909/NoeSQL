@@ -16,6 +16,7 @@ concurrency:
 jobs:
   native:
     uses: ./.github/workflows/reference-tests.yml
+    secrets: inherit
     permissions:
       contents: read
 
