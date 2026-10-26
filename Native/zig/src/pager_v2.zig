@@ -452,6 +452,46 @@ fn testPath(allocator: std.mem.Allocator, leaf: []const u8) ![]u8 {
     const pid = c.getpid();
     return std.fmt.allocPrint(allocator, "/tmp/noesql-zig-v2-{d}-{s}.nqdb", .{pid, leaf});
 }
+test "failed automatic checkpoint does not append the new transaction" {
+    const a = std.testing.allocator;
+    const path = try testPath(a, "auto-checkpoint-fault");
+    defer a.free(path);
+    var dbuf: [4096]u8 = undefined;
+    var wbuf: [4096]u8 = undefined;
+    var lbuf: [4096]u8 = undefined;
+    const data = try pathZ(path, "", &dbuf);
+    const wal = try pathZ(path, ".wal", &wbuf);
+    const lock = try pathZ(path, ".lck", &lbuf);
+    defer { _ = c.unlink(data.ptr); _ = c.unlink(wal.ptr); _ = c.unlink(lock.ptr); }
+
+    const pager = try Pager.open(a, path);
+    const tx_size = TX_HEADER + 40 * FRAME + TX_TRAILER;
+    var cycles: u32 = 0;
+    // Fill only with committed frames. The next commit must trigger
+    // a checkpoint BEFORE writing its WAL record.
+    while ((try size(pager.wal)) <= AUTO_CHECKPOINT_WAL_BYTES - tx_size) {
+        cycles += 1;
+        for (1..41) |id| {
+            var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+            u32put(page[0..4], cycles);
+            try pager.stage(@intCast(id), &page);
+        }
+        try pager.commit();
+    }
+    pager.injectTestFault(.before_checkpoint_rename);
+    for (1..41) |id| {
+        var page: [PAGE_BYTES]u8 = [_]u8{0} ** PAGE_BYTES;
+        u32put(page[0..4], cycles + 1);
+        try pager.stage(@intCast(id), &page);
+    }
+    try std.testing.expectError(error.FaultInjected, pager.commit());
+    pager.close();
+    const reopened = try Pager.open(a, path);
+    defer reopened.close();
+    try std.testing.expectEqual(@as(u64, cycles), reopened.generation);
+    try std.testing.expectEqual(cycles, u32get(reopened.read(1).?[0..4]));
+}
+
 test "automatic WAL checkpoint bounds replay size and preserves committed generations" {
     const a = std.testing.allocator;
     const path = try testPath(a, "auto-checkpoint");
