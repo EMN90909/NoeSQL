@@ -11,6 +11,7 @@
 //! Zig allocator, or upgrade in place. These limitations block release as the
 //! default NoeSQL engine until crash/fault/soak qualification is executed.
 use crate::codec;
+use crate::v3_bplus_disk;
 use crate::hash256::{sha256, Sha256};
 use crate::reference::{parse, Database, ExecutionReport, Params, Statement};
 use std::fs::{self, File, OpenOptions};
@@ -173,6 +174,14 @@ fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Hea
         return Err(invalid("v3 snapshot exceeds 65,536 pages"));
     }
     let pages = payload.len().div_ceil(PAGE_SIZE);
+    // Write/sync dirty content-addressed B+ pages before publishing the
+    // generation. The full index manifest is part of the generation digest.
+    let index_manifest = v3_bplus_disk::write_index_manifest(&versions(path), db)
+        .map_err(invalid)?;
+    let index_pages = index_manifest.len().div_ceil(PAGE_SIZE);
+    if pages.checked_add(index_pages).is_none_or(|count| count > MAX_PAGES) {
+        return Err(invalid("combined data and index manifest exceed 65,536 pages"));
+    }
     let filename = format!("{generation}-{}.pages", unique_nonce()?);
     let name = versions(path).join(&filename);
     let mut file = OpenOptions::new().write(true).create_new(true).open(&name)?;
@@ -182,10 +191,13 @@ fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Hea
     header[8..16].copy_from_slice(&generation.to_le_bytes());
     header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
     header[24..28].copy_from_slice(&(pages as u32).to_le_bytes());
+    // Format extension: zero means legacy NQPG0003 without persistent
+    // indexes; nonzero is the page count of the manifest after data frames.
+    header[28..32].copy_from_slice(&(index_pages as u32).to_le_bytes());
     header[32..64].copy_from_slice(&sha256(&payload));
     file.write_all(&header)?;
     outer.update(&header);
-    for chunk in payload.chunks(PAGE_SIZE) {
+    for chunk in payload.chunks(PAGE_SIZE).chain(index_manifest.chunks(PAGE_SIZE)) {
         let mut block = [0u8; PAGE_SIZE];
         block[..chunk.len()].copy_from_slice(chunk);
         let digest = sha256(&block);
@@ -206,17 +218,22 @@ fn write_generation(path: &Path, generation: u64, db: &Database) -> V3Result<Hea
 fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
     let version = versions(path).join(&head.filename);
     let mut reader = File::open(&version)?;
-    let expected_size = PAGE_HEADER as u64 + head.pages as u64 * FRAME_LEN as u64;
+    let mut header = [0u8; PAGE_HEADER];
+    reader.read_exact(&mut header)?;
+    let index_pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
+    if (head.pages as usize).checked_add(index_pages)
+        .is_none_or(|count| count > MAX_PAGES) {
+        return Err(invalid("index manifest page count exceeds v3 capacity"));
+    }
+    let expected_size = PAGE_HEADER as u64 +
+        (head.pages as u64 + index_pages as u64) * FRAME_LEN as u64;
     if reader.metadata()?.len() != expected_size {
         return Err(invalid("generation file length mismatch"));
     }
-    let mut header = [0u8; PAGE_HEADER];
-    reader.read_exact(&mut header)?;
     if &header[..8] != PAGE_MAGIC ||
        u64::from_le_bytes(header[8..16].try_into().unwrap()) != head.generation ||
        u64::from_le_bytes(header[16..24].try_into().unwrap()) != head.bytes ||
-       u32::from_le_bytes(header[24..28].try_into().unwrap()) != head.pages ||
-       header[28..32].iter().any(|byte| *byte != 0) {
+       u32::from_le_bytes(header[24..28].try_into().unwrap()) != head.pages {
         return Err(invalid("generation header mismatch"));
     }
     let mut outer = Sha256::default();
@@ -236,10 +253,31 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
         }
         payload.extend_from_slice(&block[..n]);
     }
+    // The committed HEAD SHA also covers these manifest frames. Never
+    // trust/rebuild a corrupt index silently after a cold reopen.
+    let mut index_manifest = Vec::with_capacity(index_pages * PAGE_SIZE);
+    for page_index in 0..index_pages {
+        let mut block = [0u8; PAGE_SIZE];
+        let mut digest = [0u8; 32];
+        reader.read_exact(&mut block)?;
+        reader.read_exact(&mut digest)?;
+        if sha256(&block) != digest {
+            return Err(invalid(format!("index manifest page {page_index} checksum mismatch")));
+        }
+        outer.update(&block);
+        outer.update(&digest);
+        index_manifest.extend_from_slice(&block);
+    }
     if outer.finalize() != head.digest || sha256(&payload).as_slice() != &header[32..64] {
         return Err(invalid("generation payload checksum mismatch"));
     }
-    codec::decode(&payload).map_err(|e| invalid(format!("relational snapshot rejected: {e}")))
+    let db = codec::decode(&payload)
+        .map_err(|e| invalid(format!("relational snapshot rejected: {e}")))?;
+    if index_pages != 0 {
+        v3_bplus_disk::load_index_manifest(&versions(path), &db, &index_manifest)
+            .map_err(invalid)?;
+    }
+    Ok(db)
 }
 fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
     let tmp = PathBuf::from(format!("{}.publish-{}", path.display(), unique_nonce()?));
@@ -297,20 +335,43 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
         return Err(invalid("v3 versions entry is not a directory"));
     }
     let mut files = Vec::new();
+    let mut index_pages = Vec::new();
+    let mut index_directory = None;
     for entry in fs::read_dir(&directory)? {
         let entry = entry?;
         let type_info = entry.file_type()?;
         let name = entry.file_name();
         let file_name = name.to_str().ok_or_else(|| invalid("unrecognized v3 orphan filename"))?;
-        if !type_info.is_file() ||
-           !file_name.ends_with(".pages") ||
-           !file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') ||
-           file_name.starts_with('.') || file_name.contains("..") {
+        if type_info.is_dir() && file_name == "index-pages" {
+            if index_directory.is_some() {
+                return Err(invalid("duplicate index-pages directory"));
+            }
+            for page in fs::read_dir(entry.path())? {
+                let page = page?;
+                if !page.file_type()?.is_file() ||
+                    !page.file_name().to_str().is_some_and(v3_bplus_disk::safe_index_blob_name) {
+                    return Err(invalid("unexpected file in unpublished index-pages directory"));
+                }
+                index_pages.push(page.path());
+            }
+            index_directory = Some(entry.path());
+        } else if type_info.is_file() &&
+           file_name.ends_with(".pages") &&
+           file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') &&
+           !file_name.starts_with('.') && !file_name.contains("..") {
+            files.push(entry.path());
+        } else {
             return Err(invalid("unexpected entry in unpublished versions directory"));
         }
-        files.push(entry.path());
     }
+    // Validate every path before deleting anything. Published generations
+    // can never reach this cleanup path because HEAD existence is checked.
     for file in files { fs::remove_file(file)?; }
+    for page in index_pages { fs::remove_file(page)?; }
+    if let Some(index_directory) = index_directory {
+        sync_directory(&index_directory)?;
+        fs::remove_dir(index_directory)?;
+    }
     sync_directory(&directory)?;
     fs::remove_dir(&directory)?;
     sync_directory(parent_dir(path))?;
