@@ -181,30 +181,57 @@ fn load_or_default_with_pager(pager: &Pager) -> Result<Database, Error> {
 
 // One Zig flock covers load -> query/mutation -> durable WAL commit.
 // Without this scope two CLI writers can silently lose each other's changes.
-pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<ExecutionReport, String> {
-    // Syntax errors cannot change database state, so parse before waiting
-    // for the exclusive storage lock. This also prevents a second parse.
+/// Execute under the Zig pager's inter-process writer lock, checking the
+/// serialized response size BEFORE publishing the WAL transaction. A caller
+/// with an undersized output buffer never accidentally commits a write.
+pub fn execute_locked_bounded(
+    path: &Path,
+    source: &str,
+    params: &Params,
+    max_output_bytes: usize,
+) -> Result<(ExecutionReport, String), String> {
+    use crate::reference::rows_json;
     let statements = parse(source).map_err(|error| error.to_string())?;
     let read_only = Database::statements_read_only(&statements);
-
     let pager = Pager::open(path).map_err(|error| error.to_string())?;
     let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
 
-    if read_only {
-        // No copy of the database and no two full snapshot encodings.
-        // An exclusive lock is still held during the query for consistency.
-        return database.execute_parsed(&statements, params).map_err(|error| error.to_string());
+    // Changes remain private until the response fits and the durable commit
+    // succeeds. Rust's execute_parsed is additionally atomic on statement
+    // failures. The lock covers load, execute, capacity check and commit.
+    let before = if read_only { None } else {
+        Some(codec::encode(&database).map_err(|error| error.to_string())?)
+    };
+    let report = if read_only {
+        database.query_parsed(&statements, params)
+    } else {
+        database.execute_parsed(&statements, params)
+    }.map_err(|error| error.to_string())?;
+    let output = format!(
+        "{{\"affected\":{},\"rows\":{}}}",
+        report.affected,
+        rows_json(&report.rows)
+    );
+    if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+        return Err(format!(
+            "response of {} bytes exceeds output budget of {} bytes (not committed)",
+            output.len(), max_output_bytes.min(crate::MAX_OUTPUT_BYTES)
+        ));
     }
+    if let Some(before) = before {
+        let after = codec::encode(&database).map_err(|error| error.to_string())?;
+        if before != after {
+            save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok((report, output))
+}
 
-    // Keep the canonical before/after payload comparison for writes:
-    // schema changes can affect no rows, and no-op writes must not grow WAL.
-    let before = codec::encode(&database).map_err(|error| error.to_string())?;
-    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
-    let after = codec::encode(&database).map_err(|error| error.to_string())?;
-    if before != after {
-        save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
-    }
-    Ok(report)
+/// Existing CLI host path; the result budget is large enough to cover its
+/// canonical JSON framing, just as required for the native relational ABI.
+pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<ExecutionReport, String> {
+    execute_locked_bounded(path, source, params, crate::MAX_OUTPUT_BYTES)
+        .map(|(report, _)| report)
 }
 
 /// Produce a self-contained, verified backup while keeping the source
