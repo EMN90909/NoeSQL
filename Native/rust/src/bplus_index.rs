@@ -25,8 +25,8 @@ impl BPlusIndex {
         let mut sorted: Vec<_> = entries.into_iter().collect();
         sorted.sort_unstable();
         if sorted.is_empty() { return Self::default(); }
-        let mut pages = Vec::new();
-        let mut level = Vec::new();
+        let mut pages: Vec<Page> = Vec::new();
+        let mut level: Vec<usize> = Vec::new();
         for chunk in sorted.chunks(FANOUT) {
             let id = pages.len();
             if let Some(&previous) = level.last() {
