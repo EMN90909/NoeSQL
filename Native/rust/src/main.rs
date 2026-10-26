@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -82,14 +82,26 @@ fn main() {
             if operation == "v2-query" { run_v2(&database, &query.join(" ")); }
             else { run_script(&database, &query.join(" ")); }
         }
-        Some("explain") => {
+        Some(operation @ ("explain" | "v2-explain")) => {
             let database = args.next().unwrap_or_else(|| usage());
             let query: Vec<String> = args.collect();
             if query.is_empty() { usage(); }
-            let snapshot = noesql_runtime::v3_store::snapshot(&default_path(&database))
-                .unwrap_or_else(|error| fail(error));
-            println!("{}", snapshot.database().explain(&query.join(" "), &Params::new())
-                .unwrap_or_else(|error| fail(error)));
+            if operation == "v2-explain" {
+                #[cfg(feature = "zig-pager")]
+                {
+                    let db = noesql_runtime::zig_pager::load(Path::new(&database))
+                        .unwrap_or_else(|error| fail(error));
+                    println!("{}", db.explain(&query.join(" "), &Params::new())
+                        .unwrap_or_else(|error| fail(error)));
+                }
+                #[cfg(not(feature = "zig-pager"))]
+                fail("v2-explain requires zig-pager");
+            } else {
+                let snapshot = noesql_runtime::v3_store::snapshot(&default_path(&database))
+                    .unwrap_or_else(|error| fail(error));
+                println!("{}", snapshot.database().explain(&query.join(" "), &Params::new())
+                    .unwrap_or_else(|error| fail(error)));
+            }
         }
         Some("export-sql") => {
             let database = args.next().unwrap_or_else(|| usage());
