@@ -235,6 +235,48 @@ pub fn execute_locked_bounded(
     Ok((report, output))
 }
 
+/// Executes authorized NoeSQL programs against the real Zig-backed store,
+/// under the same durable per-database lock as unguarded administrative writes.
+/// The AccessControl must be supplied by a trusted host for EVERY call; this
+/// does not persist policies or authenticate principals between processes.
+pub fn execute_locked_authorized(
+    path: &Path,
+    source: &str,
+    params: &Params,
+    access: &crate::authorization::AccessControl,
+    max_output_bytes: usize,
+) -> Result<(ExecutionReport, String), String> {
+    use crate::reference::rows_json;
+    let statements = access.prepare(source, params).map_err(|error| error.to_string())?;
+    let read_only = Database::statements_read_only(&statements);
+    if read_only {
+        // The WAL-recovered snapshot is private to this process after load.
+        let database = load_or_default(path).map_err(|error| error.to_string())?;
+        let report = database.query_parsed(&statements, params).map_err(|error| error.to_string())?;
+        access.validate_result(&report).map_err(|error| error.to_string())?;
+        let output = format!("{{\"affected\":{},\"rows\":{}}}", report.affected, rows_json(&report.rows));
+        if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+            return Err("NOE429: authorized read result exceeds output-byte budget".into());
+        }
+        return Ok((report, output));
+    }
+
+    let pager = Pager::open(path).map_err(|error| error.to_string())?;
+    let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
+    let before = codec::encode(&database).map_err(|error| error.to_string())?;
+    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
+    access.validate_result(&report).map_err(|error| error.to_string())?;
+    let output = format!("{{\"affected\":{},\"rows\":{}}}", report.affected, rows_json(&report.rows));
+    if output.len() > max_output_bytes || output.len() > crate::MAX_OUTPUT_BYTES {
+        return Err("NOE429: authorized write result exceeds output-byte budget (not committed)".into());
+    }
+    let after = codec::encode(&database).map_err(|error| error.to_string())?;
+    if before != after {
+        save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
+    }
+    Ok((report, output))
+}
+
 /// Existing CLI host path; the result budget is large enough to cover its
 /// canonical JSON framing, just as required for the native relational ABI.
 pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<ExecutionReport, String> {
@@ -428,4 +470,36 @@ users add {name:"Brian",active:false}"#,
         assert!(database.tables.is_empty());
         cleanup(&path);
     }
+    #[test]
+    fn authorized_durable_tenant_scope_survives_cold_reopen_and_denies_bypass() {
+        use crate::authorization::AccessControl;
+        let path = temp_path("acl-durable");
+        execute_locked(&path, "table tenant_rows { id:int key auto\n tenant:int required\n value:int required }\ntenant_rows add {tenant:1,value:10}\ntenant_rows add {tenant:2,value:20}",
+            &Params::new()).unwrap();
+        let mut rights = AccessControl::new();
+        rights.grant("tenant_rows", true, true);
+        rights.restrict_rows("tenant_rows", "tenant", Value::Int(1));
+        let rows = execute_locked_authorized(&path, "tenant_rows get id,tenant,value",
+            &Params::new(), &rights, 1024).unwrap().0.rows;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("value"), Some(&Value::Int(10)));
+        assert_eq!(execute_locked_authorized(&path,
+            "tenant_rows where tenant == 2 set value = 99", &Params::new(),
+            &rights, 1024).unwrap().0.affected, 0);
+        assert!(execute_locked_authorized(&path,
+            "tenant_rows add {tenant:2,value:123}", &Params::new(), &rights, 1024).is_err());
+        assert!(execute_locked_authorized(&path,
+            "tenant_rows add {tenant:1,value:50}", &Params::new(), &rights, 3).is_err());
+        assert_eq!(execute_locked_authorized(&path,
+            "tenant_rows add {tenant:1,value:30}", &Params::new(), &rights, 1024).unwrap().0.affected, 1);
+        // Unrestricted administrative cold reopen sees all 3 rows, including
+        // the other tenant's unchanged value; rejected writes did not persist.
+        let mut db = load(&path).unwrap();
+        let all = db.execute("tenant_rows get tenant,value sort id", &Params::new()).unwrap().rows;
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[1].get("value"), Some(&Value::Int(20)));
+        assert_eq!(all[2].get("value"), Some(&Value::Int(30)));
+        cleanup(&path);
+    }
+
 }
