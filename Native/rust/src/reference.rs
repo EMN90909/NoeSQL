@@ -579,6 +579,39 @@ impl Database {
         *self = working;
         Ok(report)
     }
+    /// Describe the plan the current engine will actually use. The index
+    /// catalog is currently metadata, not an executable B+tree access path.
+    /// EXPLAIN must never imply that a secondary index was used.
+    pub fn explain(&self, source: &str, params: &Params) -> Result<String, ReferenceError> {
+        let statements = parse(source)?;
+        let [Statement::Get(select)] = statements.as_slice() else {
+            return db_error("NOE240", "EXPLAIN requires exactly one read-only get query");
+        };
+        self.validate_select(select, params)?;
+        let left = self.tables.get(&select.table)
+            .ok_or_else(|| db_failure("NOE100", format!("unknown table {}", select.table)))?;
+        let right = select.join.as_ref().and_then(|join| self.tables.get(&join.table));
+        let plan = choose_relational_plan(select, left, right);
+        let join = match &plan.join {
+            JoinPlan::None => "none".to_string(),
+            JoinPlan::Nested => "nested-loop".to_string(),
+            JoinPlan::Hash { left_key, right_key } => format!("hash({left_key}={right_key})"),
+        };
+        let sort = select.sort.as_deref().unwrap_or("none");
+        Ok(format!(
+            "access=full_scan table={} rows={} join={} right_rows={} push_where={} grouped={} sort={} skip={} take={}",
+            select.table,
+            plan.left_rows,
+            join,
+            plan.right_rows,
+            plan.push_where,
+            !select.group.is_empty(),
+            sort,
+            select.skip,
+            select.take.map(|n| n.to_string()).unwrap_or_else(|| "all".into()),
+        ))
+    }
+
     fn execute_many(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let mut report = ExecutionReport::default();
         for statement in statements { let current = self.execute_one(statement, params)?; report.affected += current.affected; if !current.rows.is_empty() { report.rows = current.rows; } }
