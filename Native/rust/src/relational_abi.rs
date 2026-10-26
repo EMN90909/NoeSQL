@@ -156,7 +156,10 @@ mod tests {
             "noesql-relational-abi-{}-{}.noedb", std::process::id(),
             std::thread::current().name().unwrap_or("test")
         ));
-        let source = b"table clients { id:int key auto }\\nclients add {}";
+        for suffix in ["", ".wal", ".lck"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), suffix));
+        }
+        let source = b"table clients { id:int key auto }\nclients add {}";
         let path_str = path.to_str().unwrap().as_bytes();
         let mut buffer = [0u8; 2];
         let mut written = 100usize;
