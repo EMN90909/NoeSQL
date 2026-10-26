@@ -1,5 +1,5 @@
 use crate::codec;
-use crate::reference::{Database, ExecutionReport, Params};
+use crate::reference::{parse, Database, ExecutionReport, Params};
 use crate::{validate_database_path, Error};
 use core::ffi::{c_char, c_void};
 use std::ffi::CString;
@@ -182,10 +182,24 @@ fn load_or_default_with_pager(pager: &Pager) -> Result<Database, Error> {
 // One Zig flock covers load -> query/mutation -> durable WAL commit.
 // Without this scope two CLI writers can silently lose each other's changes.
 pub fn execute_locked(path: &Path, source: &str, params: &Params) -> Result<ExecutionReport, String> {
+    // Syntax errors cannot change database state, so parse before waiting
+    // for the exclusive storage lock. This also prevents a second parse.
+    let statements = parse(source).map_err(|error| error.to_string())?;
+    let read_only = Database::statements_read_only(&statements);
+
     let pager = Pager::open(path).map_err(|error| error.to_string())?;
     let mut database = load_or_default_with_pager(&pager).map_err(|error| error.to_string())?;
+
+    if read_only {
+        // No copy of the database and no two full snapshot encodings.
+        // An exclusive lock is still held during the query for consistency.
+        return database.execute_parsed(&statements, params).map_err(|error| error.to_string());
+    }
+
+    // Keep the canonical before/after payload comparison for writes:
+    // schema changes can affect no rows, and no-op writes must not grow WAL.
     let before = codec::encode(&database).map_err(|error| error.to_string())?;
-    let report = database.execute(source, params).map_err(|error| error.to_string())?;
+    let report = database.execute_parsed(&statements, params).map_err(|error| error.to_string())?;
     let after = codec::encode(&database).map_err(|error| error.to_string())?;
     if before != after {
         save_with_pager(&pager, &database).map_err(|error| error.to_string())?;
