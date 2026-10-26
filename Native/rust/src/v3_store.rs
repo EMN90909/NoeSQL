@@ -371,6 +371,41 @@ fn execute_internal(
     }
     Ok(report)
 }
+/// Optimistic transaction commit against a pinned durable generation.
+/// A stale writer fails rather than silently rebasing on newer data. Calling
+/// this method does not expose a lock-free writer or per-row MVCC.
+pub fn execute_if_generation(
+    path: &Path,
+    expected_generation: u64,
+    source: &str,
+    params: &Params,
+) -> V3Result<(u64, ExecutionReport)> {
+    validate_path(path)?;
+    let statements = parse(source).map_err(|e| invalid(e.to_string()))?;
+    let _lock = take_lock(path, true)?;
+    let head = read_head(path)?;
+    if head.generation != expected_generation {
+        return Err(V3Error::Conflict(format!(
+            "stale transaction generation: expected {expected_generation}, current {}",
+            head.generation
+        )));
+    }
+    let mut db = read_generation(path, &head)?;
+    let before = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
+    let report = if Database::statements_read_only(&statements) {
+        db.query_parsed(&statements, params)
+    } else {
+        db.execute_parsed(&statements, params)
+    }.map_err(|e| invalid(e.to_string()))?;
+    let after = codec::encode(&db).map_err(|e| invalid(e.to_string()))?;
+    if before == after { return Ok((head.generation, report)); }
+    let next = head.generation.checked_add(1)
+        .ok_or_else(|| invalid("generation counter exhausted"))?;
+    let published = write_generation(path, next, &db)?;
+    stage_head(path, &published, false)?;
+    Ok((next, report))
+}
+
 /// Serialized writer commit + MVCC reader snapshots, with durable immutable
 /// versions. The full relational snapshot is still cloned and rewritten.
 pub fn execute(path: &Path, source: &str, params: &Params) -> V3Result<ExecutionReport> {
@@ -534,4 +569,25 @@ mod tests {
         assert_eq!(expected.rows[0].get("owner"), Some(&Value::Int(1)));
         cleanup(&target);
     }
+    #[test]
+    fn stale_generation_cannot_overwrite_durable_committed_rows() {
+        let target = path("optimistic-cas");
+        create_new(&target, &db()).unwrap();
+        let pinned = snapshot(&target).unwrap();
+        let (next, _) = execute_if_generation(
+            &target, pinned.generation, "entries add {owner:2}", &Params::new()
+        ).unwrap();
+        assert_eq!(next, pinned.generation + 1);
+        assert!(matches!(
+            execute_if_generation(&target, pinned.generation,
+                "entries add {owner:3}", &Params::new()),
+            Err(V3Error::Conflict(_))
+        ));
+        let fresh = snapshot(&target).unwrap();
+        assert_eq!(fresh.generation, next);
+        assert_eq!(fresh.query("entries get owner", &Params::new()).unwrap().rows.len(), 2);
+        assert_eq!(pinned.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
 }
