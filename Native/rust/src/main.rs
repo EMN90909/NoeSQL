@@ -4,7 +4,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-check <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -130,6 +130,27 @@ fn main() {
             }
             #[cfg(not(feature = "zig-pager"))]
             fail("migrate-v3 requires zig-pager feature for source format");
+        }
+        Some("v3-create") => {
+            let target = args.next().unwrap_or_else(|| usage());
+            let schema = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            let source = read_source(&schema).unwrap_or_else(|e| fail(e));
+            let mut db = noesql_runtime::reference::Database::default();
+            db.execute(&source, &Params::new()).unwrap_or_else(|e| fail(e));
+            noesql_runtime::v3_store::create_new(Path::new(&target), &db)
+                .unwrap_or_else(|e| fail(e));
+            println!("NQDB0003 created: {target}");
+        }
+        Some("v3-exec") => {
+            let path = args.next().unwrap_or_else(|| usage());
+            let text: Vec<_> = args.collect();
+            if text.is_empty() { usage(); }
+            let report = noesql_runtime::v3_store::execute(
+                Path::new(&path), &text.join(" "), &Params::new()
+            ).unwrap_or_else(|e| fail(e));
+            if !report.rows.is_empty() { println!("{}", rows_json(&report.rows)); }
+            else { println!("affected={}", report.affected); }
         }
         Some("v3-check") => {
             let source = args.next().unwrap_or_else(|| usage());
