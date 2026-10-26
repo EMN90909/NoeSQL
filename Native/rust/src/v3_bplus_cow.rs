@@ -131,7 +131,7 @@ fn balanced_chunks(total: usize, capacity: usize) -> Vec<usize> {
     let groups = total.div_ceil(capacity);
     let base = total/groups;
     let extra = total%groups;
-    (0..groups).map(|i| base + usize::from(i < extra)).collect()
+    (0..groups).map(|i| base + if i < extra { 1 } else { 0 }).collect()
 }
 /// Used only for brand-new indexes and one-time migration from the old
 /// ordinal-index format. Modifying an existing v2 index uses insert/remove.
@@ -283,7 +283,7 @@ fn scan_rec(dir: &Path, hash: &Hash, depth: usize, previous: &mut Option<Pair>,
                 return Err("underfull nonroot B+ leaf".into());
             }
             for pair in xs {
-                if previous.is_some_and(|last| last >= pair) {
+                if previous.as_ref().is_some_and(|last| *last >= pair) {
                     return Err("B+ global leaf ordering violation".into());
                 }
                 *previous = Some(pair);
@@ -344,6 +344,36 @@ mod tests {
         assert!(insert(&dir, root.clone(), expected[0]).is_err());
         let _ = fs::remove_dir_all(dir);
     }
+    #[test]
+    fn mixed_inserts_removals_and_reinsertions_match_sorted_reference() {
+        use std::collections::BTreeSet;
+        let dir = directory("differential");
+        let mut reference = BTreeSet::new();
+        let mut current = None;
+        // Deliberately interleave duplicates in the indexed-value dimension,
+        // nonmonotonic stable PKs, leaf boundary crossings and late deletes.
+        for id in 0..510i64 {
+            let pair = ((id*37)%97, id*11);
+            assert!(reference.insert(pair));
+            current = insert(&dir, current, pair).unwrap();
+        }
+        assert_eq!(scan(&dir, current.clone()).unwrap(),
+            reference.iter().copied().collect::<Vec<_>>());
+        for id in (0..510i64).step_by(7) {
+            let pair = ((id*37)%97, id*11);
+            assert!(reference.remove(&pair));
+            current = remove(&dir, current, pair).unwrap();
+        }
+        for id in 510..760i64 {
+            let pair = ((id*37)%97, id*11);
+            assert!(reference.insert(pair));
+            current = insert(&dir, current, pair).unwrap();
+        }
+        assert_eq!(scan(&dir, current).unwrap(),
+            reference.into_iter().collect::<Vec<_>>());
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn three_level_tree_mutates_only_one_logarithmic_path() {
         let dir = directory("three-level");
