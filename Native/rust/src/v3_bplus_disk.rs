@@ -414,7 +414,10 @@ fn walk_tree(directory: &Path, hash: &[u8; 32], depth: usize,
 /// Fail closed on corrupt committed indexes; do not silently rebuild them
 /// from the relational rows. Install a validated warm query cache on cold load.
 pub fn load_index_manifest(versions: &Path, db: &Database, padded: &[u8]) -> Result<()> {
-    if padded.len() < 44 || &padded[..8] != MAP_MAGIC { return Err("invalid B+ manifest".into()); }
+    if padded.len() < 44 || (&padded[..8] != MAP_MAGIC && &padded[..8] != MAP_MAGIC_V2) {
+        return Err("invalid B+ manifest".into());
+    }
+    let stable = &padded[..8] == MAP_MAGIC_V2;
     let count = u32_at(padded, 8) as usize;
     let expected = expected_indexes(db);
     if count != expected.len() { return Err("B+ manifest schema mismatch".into()); }
@@ -441,16 +444,44 @@ pub fn load_index_manifest(versions: &Path, db: &Database, padded: &[u8]) -> Res
             return Err("unexpected or duplicated B+ index".into());
         }
         let mut found = Vec::new();
-        if root != [0; 32] {
+        if stable {
+            found = cow::scan(&index_dir(versions), cow::root(&index_dir(versions), &root)?)?
+                .into_iter().map(|(key, id)| (key, id as u64)).collect();
+        } else if root != [0; 32] {
             let mut visited = BTreeSet::new();
             walk_tree(&index_dir(versions), &root, 0, &mut visited, &mut found)?;
         }
-        if found.len() as u64 != entry_count || found != row_entries(db, &table, &field)? {
-            return Err("B+ index disagrees with committed relational snapshot".into());
-        }
-        let positions = found.into_iter().map(|(value, row)| {
-            usize::try_from(row).map(|index| (value, index)).map_err(err)
-        }).collect::<Result<Vec<_>>>()?;
+        let positions = if stable {
+            let expected = stable_entries(db, &table, &field)?;
+            if found.len() as u64 != entry_count ||
+                found.iter().map(|(k, id)| (*k, *id as i64)).collect::<Vec<_>>() != expected {
+                return Err("stable B+ index disagrees with committed primary-key rows".into());
+            }
+            let target = db.tables.get(&table).ok_or("indexed table missing")?;
+            let key = target.fields.iter().find(|f| f.key)
+                .ok_or("missing indexed table primary key")?;
+            let mut row_lookup = BTreeMap::new();
+            for (position, row) in target.rows.iter().enumerate() {
+                let Some(Value::Int(pk)) = row.get(&key.name) else {
+                    return Err("indexed row lacks integer primary key".into());
+                };
+                if row_lookup.insert(*pk, position).is_some() {
+                    return Err("duplicate committed table primary key".into());
+                }
+            }
+            found.into_iter().map(|(value, id)| {
+                let position = row_lookup.get(&(id as i64))
+                    .ok_or("stable B+ index refers to nonexistent primary key")?;
+                Ok((value, *position))
+            }).collect::<Result<Vec<_>>>()?
+        } else {
+            if found.len() as u64 != entry_count || found != row_entries(db, &table, &field)? {
+                return Err("legacy B+ index disagrees with committed relational snapshot".into());
+            }
+            found.into_iter().map(|(value, ordinal)| {
+                usize::try_from(ordinal).map(|index| (value, index)).map_err(err)
+            }).collect::<Result<Vec<_>>>()?
+        };
         db.tables.get(&table).ok_or("missing index table")?
             .install_index(&field, BPlusIndex::build(positions))?;
     }
