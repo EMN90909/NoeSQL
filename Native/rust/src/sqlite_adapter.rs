@@ -3,7 +3,8 @@
 //! parameters. Refuses to overwrite an existing target. It is an OFFLINE
 //! one-way migration for the portable export subset, not change-data capture.
 use crate::interop::{export_sql, Dialect, InteropError};
-use crate::reference::Database;
+use crate::reference::{Database, Table};
+use crate::value::Value;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs::{File, OpenOptions};
 use std::path::Path;
@@ -27,6 +28,8 @@ unsafe extern "C" {
         length: c_int, stmt: *mut *mut c_void, tail: *mut *const c_char) -> c_int;
     fn sqlite3_step(stmt: *mut c_void) -> c_int;
     fn sqlite3_column_int64(stmt: *mut c_void, index: c_int) -> i64;
+    fn sqlite3_column_type(stmt: *mut c_void, index: c_int) -> c_int;
+    fn sqlite3_column_bytes(stmt: *mut c_void, index: c_int) -> c_int;
     fn sqlite3_column_text(stmt: *mut c_void, index: c_int) -> *const u8;
     fn sqlite3_finalize(stmt: *mut c_void) -> c_int;
 }
@@ -95,6 +98,65 @@ impl Sqlite {
         if close != OK { return Err(InteropError(format!("SQLite finalize status {close}"))); }
         result
     }
+    /// Compare every column value and row identity, not merely row counts.
+    /// SQLite stores supported exact decimals as TEXT, so no floating-point
+    /// conversion is involved during this verification.
+    fn verify_table(&self, name: &str, table: &Table) -> Result<(), InteropError> {
+        let primary = table.fields.iter().find(|f| f.key)
+            .ok_or_else(|| InteropError(format!("missing primary key in {name}")))?;
+        let query = format!(
+            "SELECT {} FROM {} ORDER BY {};",
+            table.fields.iter().map(|f| identifier(&f.name)).collect::<Vec<_>>().join(","),
+            identifier(name), identifier(&primary.name)
+        );
+        let sql = CString::new(query).map_err(|_| InteropError("invalid SQLite SELECT query".into()))?;
+        let mut ptr: *mut c_void = std::ptr::null_mut();
+        let code = unsafe { sqlite3_prepare_v2(self.0.as_ptr(), sql.as_ptr(), -1,
+            &mut ptr, std::ptr::null_mut()) };
+        if code != OK { return Err(InteropError(self.errmsg())); }
+        let statement = NonNull::new(ptr).ok_or_else(|| InteropError("SQLite verifier query is empty".into()))?;
+        struct Guard(NonNull<c_void>);
+        impl Drop for Guard {
+            fn drop(&mut self) { let _ = unsafe { sqlite3_finalize(self.0.as_ptr()) }; }
+        }
+        let statement = Guard(statement);
+        let mut expected = table.rows.iter().collect::<Vec<_>>();
+        expected.sort_by_key(|row| row.get(&primary.name).and_then(Value::as_i64).unwrap_or(i64::MIN));
+        let mut count = 0usize;
+        loop {
+            let step = unsafe { sqlite3_step(statement.0.as_ptr()) };
+            if step == DONE { break; }
+            if step != ROW { return Err(InteropError(self.errmsg())); }
+            let row = expected.get(count)
+                .ok_or_else(|| InteropError(format!("unexpected extra SQLite row in {name}")))?;
+            for (index, field) in table.fields.iter().enumerate() {
+                let column = index as c_int;
+                let kind = unsafe { sqlite3_column_type(statement.0.as_ptr(), column) };
+                let value = row.get(&field.name).unwrap_or(&Value::Null);
+                let equal = match value {
+                    Value::Null => kind == 5, // SQLITE_NULL
+                    Value::Bool(b) => kind == 1 &&
+                        unsafe { sqlite3_column_int64(statement.0.as_ptr(), column) } == i64::from(*b),
+                    Value::Int(n) => kind == 1 &&
+                        unsafe { sqlite3_column_int64(statement.0.as_ptr(), column) } == *n,
+                    Value::Text(expected) => kind == 3 &&
+                        sqlite_text_equals(statement.0.as_ptr(), column, expected.as_bytes()),
+                    Value::Decimal(decimal) => kind == 3 &&
+                        sqlite_text_equals(statement.0.as_ptr(), column, decimal.to_string().as_bytes()),
+                };
+                if !equal {
+                    return Err(InteropError(format!(
+                        "SQLite value mismatch at {name}[{count}].{}", field.name
+                    )));
+                }
+            }
+            count += 1;
+        }
+        if count != expected.len() {
+            return Err(InteropError(format!("SQLite missing rows in {name}: got {count}, expected {}", expected.len())));
+        }
+        Ok(())
+    }
 }
 impl Drop for Sqlite {
     fn drop(&mut self) { let _ = unsafe { sqlite3_close(self.0.as_ptr()) }; }
@@ -102,6 +164,14 @@ impl Drop for Sqlite {
 #[derive(Debug, PartialEq, Eq)]
 enum Scalar { Int(i64), Text(String) }
 
+fn sqlite_text_equals(statement: *mut c_void, column: c_int, expected: &[u8]) -> bool {
+    let length = unsafe { sqlite3_column_bytes(statement, column) };
+    if length < 0 || length as usize != expected.len() { return false; }
+    let ptr = unsafe { sqlite3_column_text(statement, column) };
+    if ptr.is_null() { return false; }
+    let actual = unsafe { std::slice::from_raw_parts(ptr, length as usize) };
+    actual == expected
+}
 fn identifier(name: &str) -> String { format!("\"{}\"", name.replace('"', "\"\"")) }
 
 /// Imports into a brand new SQLite file and checks SQLite integrity and every
@@ -123,14 +193,7 @@ pub fn export_into_sqlite(db: &Database, target: &Path) -> Result<(), InteropErr
         if conn.scalar("PRAGMA integrity_check;")? != Scalar::Text("ok".into()) {
             return Err(InteropError("SQLite failed PRAGMA integrity_check".into()));
         }
-        for (name, table) in &db.tables {
-            let query = format!("SELECT COUNT(*) FROM {};", identifier(name));
-            let expected = i64::try_from(table.rows.len())
-                .map_err(|_| InteropError("SQLite row count overflow".into()))?;
-            if conn.scalar(&query)? != Scalar::Int(expected) {
-                return Err(InteropError(format!("SQLite row count mismatch for {name}")));
-            }
-        }
+        for (name, table) in &db.tables { conn.verify_table(name, table)?; }
         drop(conn);
         File::open(target).and_then(|file| file.sync_all())
             .map_err(|error| InteropError(error.to_string()))?;
@@ -152,14 +215,7 @@ pub fn verify_sqlite(db: &Database, target: &Path) -> Result<(), InteropError> {
     if conn.scalar("PRAGMA integrity_check;")? != Scalar::Text("ok".into()) {
         return Err(InteropError("SQLite integrity check failed".into()));
     }
-    for (name, table) in &db.tables {
-        let query = format!("SELECT COUNT(*) FROM {};", identifier(name));
-        if conn.scalar(&query)? != Scalar::Int(
-            i64::try_from(table.rows.len()).map_err(|_| InteropError("row count overflow".into()))?)
-        {
-            return Err(InteropError(format!("SQLite row count mismatch for {name}")));
-        }
-    }
+    for (name, table) in &db.tables { conn.verify_table(name, table)?; }
     Ok(())
 }
 
@@ -186,6 +242,11 @@ ledger add {category:"coast",amount:0.2}"#, &Params::new()).unwrap();
         let mut changed = db.clone();
         changed.execute("ledger add {category:\"new\",amount:0.3}", &Params::new()).unwrap();
         assert!(verify_sqlite(&changed, &path).is_err());
+        // Value corruption with an unchanged row count is also detected.
+        let conn = Sqlite::open(&path, OPEN_READWRITE).unwrap();
+        conn.exec("UPDATE ledger SET category='tampered' WHERE id=1;").unwrap();
+        drop(conn);
+        assert!(verify_sqlite(&db, &path).is_err());
         let _ = std::fs::remove_file(path);
     }
 }
