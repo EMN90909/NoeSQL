@@ -282,6 +282,41 @@ fn create_internal(path: &Path, db: &Database, fault: FaultPoint) -> V3Result<()
 pub fn create_new(path: &Path, db: &Database) -> V3Result<()> {
     create_internal(path, db, FaultPoint::None)
 }
+/// Remove ONLY uncommitted generation files left by a crash during creation.
+/// This is an explicit administrative recovery operation, never automatic.
+/// Refuses to touch a published database or an unexpected sidecar entry.
+pub fn discard_unpublished(path: &Path) -> V3Result<()> {
+    validate_path(path)?;
+    let _lock = take_lock(path, true)?;
+    if path.exists() {
+        return Err(V3Error::Conflict("cannot discard generations from a published v3 target".into()));
+    }
+    let directory = versions(path);
+    if !directory.exists() { return Ok(()); }
+    if !fs::symlink_metadata(&directory)?.file_type().is_dir() {
+        return Err(invalid("v3 versions entry is not a directory"));
+    }
+    let mut files = Vec::new();
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        let type_info = entry.file_type()?;
+        let name = entry.file_name();
+        let file_name = name.to_str().ok_or_else(|| invalid("unrecognized v3 orphan filename"))?;
+        if !type_info.is_file() ||
+           !file_name.ends_with(".pages") ||
+           !file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') ||
+           file_name.starts_with('.') || file_name.contains("..") {
+            return Err(invalid("unexpected entry in unpublished versions directory"));
+        }
+        files.push(entry.path());
+    }
+    for file in files { fs::remove_file(file)?; }
+    sync_directory(&directory)?;
+    fs::remove_dir(&directory)?;
+    sync_directory(parent_dir(path))?;
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct Snapshot {
     pub generation: u64,
@@ -349,14 +384,18 @@ pub fn migrate_copy_v2(source: &Path, target: &Path) -> V3Result<()> {
     validate_path(target)?;
     if source == target { return Err(invalid("v2 source and v3 target must differ")); }
     crate::zig_pager::with_locked_snapshot(source, |db| {
-        // Source is not mutated. Verify the target before releasing the v2
-        // lock, so a concurrent v2 writer cannot invalidate the comparison.
-        create_new(target, db).map_err(|e| e.to_string())?;
+        // If a crash happened after publishing HEAD but before the caller
+        // received success, an identical, verified target is idempotently OK.
+        // Different or corrupt targets always fail closed. The v2 source
+        // remains locked throughout both the copy and verification.
+        if !target.exists() {
+            create_new(target, db).map_err(|e| e.to_string())?;
+        }
         let imported = snapshot(target).map_err(|e| e.to_string())?;
         let before = codec::encode(db).map_err(|e| e.to_string())?;
         let after = codec::encode(&imported.database).map_err(|e| e.to_string())?;
         if before != after {
-            return Err("v2/v3 migration verification mismatch".into());
+            return Err("existing v3 target does not match the locked v2 source; no overwrite".into());
         }
         Ok(())
     }).map_err(invalid)?;
@@ -417,6 +456,12 @@ mod tests {
         let target = path("create-fault");
         assert!(create_internal(&target, &db(), FaultPoint::BeforePublish).is_err());
         assert!(!target.exists());
+        assert!(versions(&target).exists());
+        discard_unpublished(&target).unwrap();
+        assert!(!versions(&target).exists());
+        create_new(&target, &db()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 1);
+        assert!(discard_unpublished(&target).is_err(), "cannot delete published data");
         cleanup(&target);
     }
     #[test]
