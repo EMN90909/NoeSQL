@@ -74,7 +74,7 @@ fn main() {
             #[cfg(not(feature = "zig-pager"))]
             fail("EXPLAIN requires the zig-pager feature");
         }
-        Some("backup") | Some("restore") => {
+        Some(operation @ ("backup" | "restore")) => {
             let from = args.next().unwrap_or_else(|| usage());
             let to = args.next().unwrap_or_else(|| usage());
             if args.next().is_some() { usage(); }
@@ -82,7 +82,7 @@ fn main() {
             {
                 noesql_runtime::zig_pager::backup(Path::new(&from), Path::new(&to))
                     .unwrap_or_else(|error| fail(error));
-                println!("verified backup created: {to}");
+                println!("{}: {to}", if operation == "restore" { "verified database restored" } else { "verified backup created" });
             }
             #[cfg(not(feature = "zig-pager"))]
             fail("backup and restore require the zig-pager feature");
