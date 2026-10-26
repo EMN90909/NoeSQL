@@ -138,7 +138,7 @@ pub enum AuthorizedMvccError {
 }
 impl std::fmt::Display for AuthorizedMvccError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self { Self::Access(e) => e.fmt(f), Self::Mvcc(e) => e.fmt(f) }
+        match self { Self::Access(e) => write!(f, "{e}"), Self::Mvcc(e) => write!(f, "{e}") }
     }
 }
 impl std::error::Error for AuthorizedMvccError {}
