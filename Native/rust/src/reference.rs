@@ -1299,7 +1299,7 @@ ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
         assert_eq!(sums.remove(0).get("total"), Some(&Value::Decimal(Decimal::parse("0.3").unwrap())));
         let check = db.execute("ledger get amount where amount >= 0.2", &params()).unwrap().rows;
         assert_eq!(check.len(), 1);
-        let loaded = crate::codec::decode(&crate::codec::encode(&db).unwrap()).unwrap();
+        let mut loaded = crate::codec::decode(&crate::codec::encode(&db).unwrap()).unwrap();
         assert_eq!(loaded.execute("ledger get amount where amount == 0.1", &params()).unwrap().rows.len(), 1);
         assert!(db.execute("ledger add {category:\"wrong\",amount:1.0000001}", &params()).is_err());
         assert!(db.execute("ledger where id == 1 set amount = 1.0 / 0.0", &params()).is_err());
