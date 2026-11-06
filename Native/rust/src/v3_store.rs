@@ -36,6 +36,9 @@ pub enum V3Error {
     Invalid(String),
     Conflict(String),
     Access(String),
+    /// The new HEAD was published but its parent directory sync failed.
+    /// The write may be visible/durable: inspect before retrying.
+    CommitUncertain(String),
 }
 impl std::fmt::Display for V3Error {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -44,6 +47,7 @@ impl std::fmt::Display for V3Error {
             Self::Invalid(error) => write!(out, "v3 corrupt/incompatible: {error}"),
             Self::Conflict(error) => write!(out, "v3 conflict: {error}"),
             Self::Access(error) => write!(out, "v3 authorization/budget: {error}"),
+            Self::CommitUncertain(error) => write!(out, "v3 COMMIT OUTCOME UNCERTAIN: {error}"),
         }
     }
 }
@@ -379,6 +383,12 @@ fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>
 }
 
 fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
+    stage_head_with_fault(path, head, initial, FaultPoint::None)
+}
+
+fn stage_head_with_fault(
+    path: &Path, head: &Head, initial: bool, fault: FaultPoint,
+) -> V3Result<()> {
     let tmp = PathBuf::from(format!("{}.publish-{}", path.display(), unique_nonce()?));
     let result = (|| {
         let mut file = private_create_file(&tmp)?;
@@ -392,14 +402,23 @@ fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
             // Atomic replacement; old or new head is valid after a crash.
             fs::rename(&tmp, path)?;
         }
-        sync_directory(parent_dir(path))
+        // The HEAD is already visible after hard_link/rename. If this sync
+        // fails we cannot truthfully report an uncommitted transaction.
+        if fault == FaultPoint::AfterPublish {
+            return Err(V3Error::CommitUncertain(
+                "injected interruption after HEAD publication; inspect generation before retrying".into()
+            ));
+        }
+        sync_directory(parent_dir(path)).map_err(|e| V3Error::CommitUncertain(format!(
+            "HEAD was published, but the parent directory could not be synced ({e}); inspect the current generation before retrying a non-idempotent write"
+        )))
     })();
     let _ = fs::remove_file(&tmp);
     result
 }
 /// Failpoints are exposed to unit tests for deterministic crash boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FaultPoint { None, BeforePublish }
+pub enum FaultPoint { None, BeforePublish, AfterPublish }
 fn create_internal(path: &Path, db: &Database, fault: FaultPoint) -> V3Result<()> {
     validate_path(path)?;
     let _lock = take_lock(path, true)?;
@@ -412,7 +431,7 @@ fn create_internal(path: &Path, db: &Database, fault: FaultPoint) -> V3Result<()
     if fault == FaultPoint::BeforePublish {
         return Err(V3Error::Conflict("injected crash before head publication".into()));
     }
-    stage_head(path, &head, true)
+    stage_head_with_fault(path, &head, true, fault)
 }
 /// Creates a fresh v3 target from an existing logical database. No v2 file
 /// is ever renamed, replaced or interpreted as v3 storage.
@@ -606,7 +625,7 @@ fn execute_with_access(
         if fault == FaultPoint::BeforePublish {
             return Err(V3Error::Conflict("injected crash after generation fsync".into()));
         }
-        stage_head(path, &published, false)?;
+        stage_head_with_fault(path, &published, false, fault)?;
     }
     Ok(report)
 }
@@ -1160,6 +1179,25 @@ mod tests {
         assert_eq!(fs::metadata(&page).unwrap().permissions().mode() & 0o777, 0o644);
         fs::set_permissions(&page, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(audit_private_permissions(&target).unwrap().is_empty());
+        cleanup(&target);
+    }
+
+
+    #[test]
+    fn post_publish_sync_failure_is_not_reported_as_an_uncommitted_write() {
+        let target = path("post-publish-uncertain");
+        create_new(&target, &db()).unwrap();
+        let outcome = execute_internal(
+            &target, "entries add {owner:4}", &Params::new(), FaultPoint::AfterPublish
+        );
+        assert!(matches!(outcome, Err(V3Error::CommitUncertain(_))));
+        // Process-visible state already points at the new generation.
+        // This is NOT a claim that the rename would survive a power cut.
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        assert_eq!(
+            snapshot(&target).unwrap().query("entries get owner", &Params::new())
+                .unwrap().rows.len(), 2
+        );
         cleanup(&target);
     }
 
