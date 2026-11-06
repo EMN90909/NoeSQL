@@ -153,6 +153,10 @@ fn take_lock(path: &Path, exclusive: bool) -> V3Result<Lock> {
         let flags = if exclusive { 2 } else { 1 };
         for _ in 0..500 {
             if unsafe { flock(file.as_raw_fd(), flags | 4) } == 0 { return Ok(Lock(file)); }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(V3Error::Io(error));
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         Err(V3Error::Conflict("timed out acquiring cross-process v3 lock".into()))
@@ -502,6 +506,48 @@ pub fn inspect(path: &Path) -> V3Result<(u64, u64, u32)> {
     let head = read_head(path)?;
     let _ = read_generation(path, &head)?;
     Ok((head.generation, head.bytes, head.pages))
+}
+
+/// Audit all existing v3 generations, metadata, and index blobs for unsafe
+/// Unix permissions. Earlier versions could create world-readable files.
+/// This is a read-only audit, NOT an automatic chmod or a TOCTOU-safe sandbox;
+/// the database directory and its ancestors must still be trusted.
+pub fn audit_private_permissions(path: &Path) -> V3Result<Vec<PathBuf>> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Err(invalid("permission audit requires a Unix host"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        validate_path(path)?;
+        let _lock = take_lock(path, false)?;
+        let head = read_head(path)?;
+        let _ = read_generation(path, &head)?;
+        let mut pending = vec![path.to_path_buf(), lock_name(path), versions(path)];
+        let mut violations = Vec::new();
+        let mut visited = 0usize;
+        while let Some(candidate) = pending.pop() {
+            visited += 1;
+            if visited > 100_000 {
+                return Err(invalid("permission audit exceeds 100,000 filesystem entries"));
+            }
+            let meta = fs::symlink_metadata(&candidate)?;
+            let kind = meta.file_type();
+            if kind.is_symlink() || !(kind.is_file() || kind.is_dir()) ||
+                meta.permissions().mode() & 0o077 != 0 {
+                violations.push(candidate.clone());
+            }
+            // Never follow a symlink or descend into non-directories.
+            if kind.is_dir() {
+                for entry in fs::read_dir(candidate)? {
+                    pending.push(entry?.path());
+                }
+            }
+        }
+        Ok(violations)
+    }
 }
 fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
     affected != 0 || statements.iter().any(|statement| !matches!(
@@ -1095,6 +1141,25 @@ mod tests {
         fs::remove_file(&blob).unwrap();
         fs::rename(&shadow, &blob).unwrap();
         assert!(snapshot(&target).is_ok());
+        cleanup(&target);
+    }
+
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn permission_audit_detects_insecure_existing_generations_without_mutating_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let target = path("permissions-audit");
+        create_new(&target, &db()).unwrap();
+        assert!(audit_private_permissions(&target).unwrap().is_empty());
+        let head = read_head(&target).unwrap();
+        let page = versions(&target).join(head.filename);
+        fs::set_permissions(&page, fs::Permissions::from_mode(0o644)).unwrap();
+        let violations = audit_private_permissions(&target).unwrap();
+        assert!(violations.contains(&page));
+        assert_eq!(fs::metadata(&page).unwrap().permissions().mode() & 0o777, 0o644);
+        fs::set_permissions(&page, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(audit_private_permissions(&target).unwrap().is_empty());
         cleanup(&target);
     }
 
