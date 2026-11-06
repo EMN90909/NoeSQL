@@ -2,6 +2,9 @@ pub mod codec;
 pub mod decimal;
 mod hash256;
 pub mod v3_store;
+mod session_bindings;
+#[cfg(target_os = "linux")]
+pub mod session_provider;
 #[cfg(feature = "zig-pager")]
 pub mod relational_abi;
 pub mod planner;
