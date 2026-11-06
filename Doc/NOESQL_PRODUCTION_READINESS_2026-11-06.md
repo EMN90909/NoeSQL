@@ -17,7 +17,7 @@
 | --- | --- | --- |
 | v3 new metadata, generation and index files | Create with owner-only mode (0600); newly created versions/index directories with 0700 on Unix | Source changed, tests added; **not executed** |
 | v3 final-component symlink defense | Linux `O_NOFOLLOW` when opening lock, HEAD, generation and index-blob files; require regular files | Source changed, tests added; **not executed** |
-| Existing v3 permission exposure | Read-only `noesql v3-audit-permissions <absolute-db.noedb>` audits HEAD, lock, all retained generation files and index blobs | Source changed, tests added; **not executed** |
+| Existing v3 permission exposure | Read-only `noesql v3-audit-permissions <absolute-db.noedb>` audits the parent directory, HEAD, lock, all retained generation files and index blobs | Source changed, tests added; **not executed** |
 | v3 restricted embedded execution | `v3_store::execute_authorized` uses `AccessControl::prepare` for grants and row scoping and validates result budget **before** publishing HEAD | Source changed, tests added; **not executed** |
 | Host script reader | `read_source` reads at most `MAX_SOURCE_BYTES + 1` bytes before rejecting, instead of allocating the entire script | Source changed, test added; **not executed** |
 | v3 lock acquisition | Fail immediately on non-contention errors instead of retrying every OS error for 10 seconds | Source changed; **not executed** |
