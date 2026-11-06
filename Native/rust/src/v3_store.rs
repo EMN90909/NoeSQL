@@ -35,6 +35,10 @@ pub enum V3Error {
     Io(std::io::Error),
     Invalid(String),
     Conflict(String),
+    Access(String),
+    /// The new HEAD was published but its parent directory sync failed.
+    /// The write may be visible/durable: inspect before retrying.
+    CommitUncertain(String),
 }
 impl std::fmt::Display for V3Error {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -42,6 +46,8 @@ impl std::fmt::Display for V3Error {
             Self::Io(error) => write!(out, "v3 I/O: {error}"),
             Self::Invalid(error) => write!(out, "v3 corrupt/incompatible: {error}"),
             Self::Conflict(error) => write!(out, "v3 conflict: {error}"),
+            Self::Access(error) => write!(out, "v3 authorization/budget: {error}"),
+            Self::CommitUncertain(error) => write!(out, "v3 COMMIT OUTCOME UNCERTAIN: {error}"),
         }
     }
 }
@@ -84,11 +90,65 @@ fn validate_path(path: &Path) -> V3Result<()> {
     Ok(())
 }
 
+// A private parent directory is still required: O_NOFOLLOW only protects the
+// final pathname component, not hostile ancestor-directory replacements.
+fn private_create_file(path: &Path) -> V3Result<File> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    Ok(options.open(path)?)
+}
+
+fn read_regular_file(path: &Path) -> V3Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000); // Linux O_NOFOLLOW
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(invalid("expected a regular v3 data file"));
+    }
+    Ok(file)
+}
+
+fn private_create_dir(path: &Path) -> V3Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)?;
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 unsafe extern "C" { fn flock(fd: std::os::raw::c_int, operation: std::os::raw::c_int) -> std::os::raw::c_int; }
 struct Lock(File);
 fn take_lock(path: &Path, exclusive: bool) -> V3Result<Lock> {
-    let file = OpenOptions::new().read(true).write(true).create(true).open(lock_name(path))?;
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000); // Never follow a preexisting lock symlink
+    }
+    let file = options.open(lock_name(path))?;
+    if !file.metadata()?.is_file() {
+        return Err(invalid("v3 lock is not a regular file"));
+    }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
@@ -97,6 +157,13 @@ fn take_lock(path: &Path, exclusive: bool) -> V3Result<Lock> {
         let flags = if exclusive { 2 } else { 1 };
         for _ in 0..500 {
             if unsafe { flock(file.as_raw_fd(), flags | 4) } == 0 { return Ok(Lock(file)); }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(V3Error::Io(error));
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         Err(V3Error::Conflict("timed out acquiring cross-process v3 lock".into()))
@@ -163,7 +230,7 @@ fn encode_head(head: &Head) -> V3Result<[u8; HEAD_LEN]> {
 }
 fn read_head(path: &Path) -> V3Result<Head> {
     let mut buffer = Vec::new();
-    let f = File::open(path)?;
+    let f = read_regular_file(path)?;
     if f.metadata()?.len() != HEAD_LEN as u64 { return Err(invalid("head length mismatch")); }
     f.take(HEAD_LEN as u64 + 1).read_to_end(&mut buffer)?;
     decode_head(&buffer)
@@ -195,7 +262,7 @@ fn write_generation_delta(
     }
     let filename = format!("{generation}-{}.pages", unique_nonce()?);
     let name = versions(path).join(&filename);
-    let mut file = OpenOptions::new().write(true).create_new(true).open(&name)?;
+    let mut file = private_create_file(&name)?;
     let mut outer = Sha256::default();
     let mut header = [0u8; PAGE_HEADER];
     header[..8].copy_from_slice(PAGE_MAGIC);
@@ -228,7 +295,7 @@ fn write_generation_delta(
 }
 fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
     let version = versions(path).join(&head.filename);
-    let mut reader = File::open(&version)?;
+    let mut reader = read_regular_file(&version)?;
     let mut header = [0u8; PAGE_HEADER];
     reader.read_exact(&mut header)?;
     let index_pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
@@ -294,7 +361,7 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
 /// already verified the committed HEAD digest, all manifest pages, and
 /// content-addressed nodes before a write reaches this function.
 fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>>> {
-    let mut file = File::open(versions(path).join(&head.filename))?;
+    let mut file = read_regular_file(&versions(path).join(&head.filename))?;
     let mut header = [0u8; PAGE_HEADER];
     file.read_exact(&mut header)?;
     let pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
@@ -319,9 +386,15 @@ fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>
 }
 
 fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
+    stage_head_with_fault(path, head, initial, FaultPoint::None)
+}
+
+fn stage_head_with_fault(
+    path: &Path, head: &Head, initial: bool, fault: FaultPoint,
+) -> V3Result<()> {
     let tmp = PathBuf::from(format!("{}.publish-{}", path.display(), unique_nonce()?));
     let result = (|| {
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        let mut file = private_create_file(&tmp)?;
         file.write_all(&encode_head(head)?)?;
         file.sync_all()?;
         drop(file);
@@ -332,27 +405,36 @@ fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
             // Atomic replacement; old or new head is valid after a crash.
             fs::rename(&tmp, path)?;
         }
-        sync_directory(parent_dir(path))
+        // The HEAD is already visible after hard_link/rename. If this sync
+        // fails we cannot truthfully report an uncommitted transaction.
+        if fault == FaultPoint::AfterPublish {
+            return Err(V3Error::CommitUncertain(
+                "injected interruption after HEAD publication; inspect generation before retrying".into()
+            ));
+        }
+        sync_directory(parent_dir(path)).map_err(|e| V3Error::CommitUncertain(format!(
+            "HEAD was published, but the parent directory could not be synced ({e}); inspect the current generation before retrying a non-idempotent write"
+        )))
     })();
     let _ = fs::remove_file(&tmp);
     result
 }
 /// Failpoints are exposed to unit tests for deterministic crash boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FaultPoint { None, BeforePublish }
+pub enum FaultPoint { None, BeforePublish, AfterPublish }
 fn create_internal(path: &Path, db: &Database, fault: FaultPoint) -> V3Result<()> {
     validate_path(path)?;
     let _lock = take_lock(path, true)?;
     if path.exists() || versions(path).exists() {
         return Err(V3Error::Conflict("target and its generation directory must be absent".into()));
     }
-    fs::create_dir(versions(path))?;
+    private_create_dir(&versions(path))?;
     sync_directory(parent_dir(path))?;
     let head = write_generation(path, 1, db)?;
     if fault == FaultPoint::BeforePublish {
         return Err(V3Error::Conflict("injected crash before head publication".into()));
     }
-    stage_head(path, &head, true)
+    stage_head_with_fault(path, &head, true, fault)
 }
 /// Creates a fresh v3 target from an existing logical database. No v2 file
 /// is ever renamed, replaced or interpreted as v3 storage.
@@ -447,6 +529,56 @@ pub fn inspect(path: &Path) -> V3Result<(u64, u64, u32)> {
     let _ = read_generation(path, &head)?;
     Ok((head.generation, head.bytes, head.pages))
 }
+
+/// Audit all existing v3 generations, metadata, and index blobs for unsafe
+/// Unix permissions. Earlier versions could create world-readable files.
+/// This is a read-only audit, NOT an automatic chmod or a TOCTOU-safe sandbox;
+/// the database directory and its ancestors must still be trusted.
+pub fn audit_private_permissions(path: &Path) -> V3Result<Vec<PathBuf>> {
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        return Err(invalid("permission audit requires a Unix host"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        validate_path(path)?;
+        let _lock = take_lock(path, false)?;
+        let head = read_head(path)?;
+        let _ = read_generation(path, &head)?;
+        let mut pending = vec![path.to_path_buf(), lock_name(path), versions(path)];
+        let mut violations = Vec::new();
+        // Do not report a clean audit when the immediate database parent
+        // is shared or otherwise untrusted. We do not descend into it.
+        let parent = parent_dir(path);
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if !parent_metadata.file_type().is_dir() ||
+            parent_metadata.permissions().mode() & 0o077 != 0 {
+            violations.push(parent.to_path_buf());
+        }
+        let mut visited = 0usize;
+        while let Some(candidate) = pending.pop() {
+            visited += 1;
+            if visited > 100_000 {
+                return Err(invalid("permission audit exceeds 100,000 filesystem entries"));
+            }
+            let meta = fs::symlink_metadata(&candidate)?;
+            let kind = meta.file_type();
+            if kind.is_symlink() || !(kind.is_file() || kind.is_dir()) ||
+                meta.permissions().mode() & 0o077 != 0 {
+                violations.push(candidate.clone());
+            }
+            // Never follow a symlink or descend into non-directories.
+            if kind.is_dir() {
+                for entry in fs::read_dir(candidate)? {
+                    pending.push(entry?.path());
+                }
+            }
+        }
+        Ok(violations)
+    }
+}
 fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
     affected != 0 || statements.iter().any(|statement| !matches!(
         statement, Statement::Get(_) | Statement::Set(_, _, _) | Statement::Delete(_, _)
@@ -456,11 +588,30 @@ fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
 fn execute_internal(
     path: &Path, source: &str, params: &Params, fault: FaultPoint
 ) -> V3Result<ExecutionReport> {
+    execute_with_access(path, source, params, fault, None)
+}
+
+fn execute_with_access(
+    path: &Path,
+    source: &str,
+    params: &Params,
+    fault: FaultPoint,
+    access: Option<&crate::authorization::AccessControl>,
+) -> V3Result<ExecutionReport> {
     validate_path(path)?;
-    let statements = parse(source).map_err(|e| invalid(e.to_string()))?;
+    let statements = match access {
+        Some(access) => access.prepare(source, params)
+            .map_err(|e| V3Error::Access(e.to_string()))?,
+        None => parse(source).map_err(|e| invalid(e.to_string()))?,
+    };
     if Database::statements_read_only(&statements) {
-        return snapshot(path)?.database.query_parsed(&statements, params)
-            .map_err(|e| invalid(e.to_string()));
+        let report = snapshot(path)?.database.query_parsed(&statements, params)
+            .map_err(|e| invalid(e.to_string()))?;
+        if let Some(access) = access {
+            access.validate_result(&report)
+                .map_err(|e| V3Error::Access(e.to_string()))?;
+        }
+        return Ok(report);
     }
     let _lock = take_lock(path, true)?;
     let head = read_head(path)?;
@@ -471,6 +622,12 @@ fn execute_internal(
         .map_err(invalid)?;
     let report = db.execute_isolated_parsed(&statements, params)
         .map_err(|e| invalid(e.to_string()))?;
+    // Validate the complete result BEFORE the new immutable generation is
+    // published. A denied or over-budget statement must not reach durable HEAD.
+    if let Some(access) = access {
+        access.validate_result(&report)
+            .map_err(|e| V3Error::Access(e.to_string()))?;
+    }
     if material_change_possible(&statements, report.affected) {
         let next = head.generation.checked_add(1)
             .ok_or_else(|| invalid("generation counter exhausted"))?;
@@ -479,7 +636,7 @@ fn execute_internal(
         if fault == FaultPoint::BeforePublish {
             return Err(V3Error::Conflict("injected crash after generation fsync".into()));
         }
-        stage_head(path, &published, false)?;
+        stage_head_with_fault(path, &published, false, fault)?;
     }
     Ok(report)
 }
@@ -524,6 +681,19 @@ pub fn execute_if_generation(
 /// versions. The full relational snapshot is still cloned and rewritten.
 pub fn execute(path: &Path, source: &str, params: &Params) -> V3Result<ExecutionReport> {
     execute_internal(path, source, params, FaultPoint::None)
+}
+
+/// Deny-by-default, explicitly granted in-process authorization on the live
+/// immutable-generation path. The scoped AST and returned-row budget are
+/// checked before durable publication. This does not persist principals or
+/// policies, authenticate network users, or restrict the administrative API.
+pub fn execute_authorized(
+    path: &Path,
+    source: &str,
+    params: &Params,
+    access: &crate::authorization::AccessControl,
+) -> V3Result<ExecutionReport> {
+    execute_with_access(path, source, params, FaultPoint::None, Some(access))
 }
 
 
@@ -915,6 +1085,139 @@ mod tests {
         assert!(execute_or_create(&old, "table messages { id:int key }", &Params::new()).is_err());
         assert_eq!(fs::read(&old).unwrap(), b"NQDB0002");
         cleanup(&old);
+        cleanup(&target);
+    }
+
+
+    #[test]
+    fn authorized_v3_transactions_do_not_publish_denied_or_over_budget_writes() {
+        use crate::authorization::AccessControl;
+        let target = path("authorized");
+        create_new(&target, &db()).unwrap();
+        let deny = AccessControl::new();
+        assert!(matches!(
+            execute_authorized(&target, "entries add {owner:1}", &Params::new(), &deny),
+            Err(V3Error::Access(_))
+        ));
+        assert_eq!(inspect(&target).unwrap().0, 1);
+        let mut scoped = AccessControl::new();
+        scoped.grant("entries", true, true);
+        scoped.restrict_rows("entries", "owner", Value::Int(1));
+        assert!(matches!(
+            execute_authorized(&target, "entries add {owner:2}", &Params::new(), &scoped),
+            Err(V3Error::Access(_))
+        ));
+        assert!(matches!(
+            execute_authorized(&target, "entries where id == 1 set owner = 2", &Params::new(), &scoped),
+            Err(V3Error::Access(_))
+        ));
+        assert_eq!(inspect(&target).unwrap().0, 1);
+        execute_authorized(&target, "entries add {owner:1}", &Params::new(), &scoped).unwrap();
+        assert_eq!(inspect(&target).unwrap().0, 2);
+        assert_eq!(
+            execute_authorized(&target, "entries get owner", &Params::new(), &scoped)
+                .unwrap().rows.len(), 2
+        );
+        let mut capped = scoped.clone();
+        capped.max_returned_rows = 0;
+        assert!(matches!(
+            execute_authorized(
+                &target,
+                "atomic { entries add {owner:1}; entries get id }",
+                &Params::new(),
+                &capped,
+            ),
+            Err(V3Error::Access(_))
+        ));
+        assert_eq!(inspect(&target).unwrap().0, 2,
+            "the over-budget transaction must not be published");
+        assert_eq!(
+            snapshot(&target).unwrap().query("entries get id", &Params::new())
+                .unwrap().rows.len(), 2
+        );
+        cleanup(&target);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn v3_files_are_private_and_final_symlinks_are_rejected() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let target = path("private-files");
+        create_new(&target, &db()).unwrap();
+        let _ = snapshot(&target).unwrap();
+        let head = read_head(&target).unwrap();
+        let version_dir = versions(&target);
+        let index_dir = version_dir.join("index-pages");
+        let blob = fs::read_dir(&index_dir).unwrap().next().unwrap().unwrap().path();
+        let files = [target.clone(), lock_name(&target),
+            version_dir.join(&head.filename), blob.clone()];
+        for file in &files {
+            let mode = fs::metadata(file).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "v3 data exposed to group/other: {}", file.display());
+        }
+        for dir in [&version_dir, &index_dir] {
+            let mode = fs::metadata(dir).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "v3 directory is not private: {}", dir.display());
+        }
+        let alias = path("symlink-to-head");
+        symlink(&target, &alias).unwrap();
+        assert!(read_head(&alias).is_err(), "HEAD must not follow symlinks");
+        fs::remove_file(alias).unwrap();
+
+        let shadow = blob.with_extension("shadow");
+        fs::rename(&blob, &shadow).unwrap();
+        symlink(&shadow, &blob).unwrap();
+        assert!(snapshot(&target).is_err(), "index blob symlink must not be followed");
+        fs::remove_file(&blob).unwrap();
+        fs::rename(&shadow, &blob).unwrap();
+        assert!(snapshot(&target).is_ok());
+        cleanup(&target);
+    }
+
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn permission_audit_detects_insecure_existing_generations_without_mutating_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-private-audit-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        private_create_dir(&directory).unwrap();
+        let target = directory.join("data.noedb");
+        create_new(&target, &db()).unwrap();
+        assert!(audit_private_permissions(&target).unwrap().is_empty());
+        let head = read_head(&target).unwrap();
+        let page = versions(&target).join(head.filename);
+        fs::set_permissions(&page, fs::Permissions::from_mode(0o644)).unwrap();
+        let violations = audit_private_permissions(&target).unwrap();
+        assert!(violations.contains(&page));
+        assert_eq!(fs::metadata(&page).unwrap().permissions().mode() & 0o777, 0o644);
+        fs::set_permissions(&page, fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(audit_private_permissions(&target).unwrap().is_empty());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(audit_private_permissions(&target).unwrap().contains(&directory),
+            "shared parent directory must invalidate a private-store audit");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        cleanup(&target);
+        fs::remove_dir(&directory).unwrap();
+    }
+
+
+    #[test]
+    fn post_publish_sync_failure_is_not_reported_as_an_uncommitted_write() {
+        let target = path("post-publish-uncertain");
+        create_new(&target, &db()).unwrap();
+        let outcome = execute_internal(
+            &target, "entries add {owner:4}", &Params::new(), FaultPoint::AfterPublish
+        );
+        assert!(matches!(outcome, Err(V3Error::CommitUncertain(_))));
+        // Process-visible state already points at the new generation.
+        // This is NOT a claim that the rename would survive a power cut.
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        assert_eq!(
+            snapshot(&target).unwrap().query("entries get owner", &Params::new())
+                .unwrap().rows.len(), 2
+        );
         cleanup(&target);
     }
 

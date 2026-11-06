@@ -48,10 +48,33 @@ fn u64_at(page: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(page[at..at+8].try_into().expect("checked page"))
 }
 fn sync_dir(path: &Path) -> Result<()> { File::open(path).and_then(|dir| dir.sync_all()).map_err(err) }
+
+// The database's parent must be a trusted private directory. On Linux,
+// O_NOFOLLOW also prevents a final-component index blob symlink swap.
+fn open_index_file(path: &Path) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(0x20000); // O_NOFOLLOW
+    }
+    let file = options.open(path).map_err(err)?;
+    if !file.metadata().map_err(err)?.is_file() {
+        return Err("index blob is not a regular file".into());
+    }
+    Ok(file)
+}
 pub(crate) fn prepare_dir(versions: &Path) -> Result<PathBuf> {
     let dir = index_dir(versions);
     if !dir.exists() {
-        match fs::create_dir(&dir) {
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&dir) {
             Ok(()) => sync_dir(versions)?,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {},
             Err(e) => return Err(err(e)),
@@ -70,7 +93,7 @@ pub(crate) fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result
     let hash = sha256(image);
     let path = blob_path(directory, &hash);
     let verify_existing = || -> Result<()> {
-        let mut file = File::open(&path).map_err(err)?;
+        let mut file = open_index_file(&path)?;
         if file.metadata().map_err(err)?.len() != PAGE_BYTES as u64 {
             return Err("existing index page has wrong length".into());
         }
@@ -89,8 +112,14 @@ pub(crate) fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = directory.join(format!(".bpi-{}-{n}-{sequence}.tmp", std::process::id()));
     let result = (|| -> Result<()> {
-        let mut writer = OpenOptions::new().write(true).create_new(true)
-            .open(&temporary).map_err(err)?;
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut writer = options.open(&temporary).map_err(err)?;
         writer.write_all(image).map_err(err)?;
         writer.sync_all().map_err(err)?;
         drop(writer);
@@ -112,7 +141,7 @@ pub(crate) fn publish_blob(directory: &Path, image: &[u8; PAGE_BYTES]) -> Result
 
 pub(crate) fn read_blob(directory: &Path, hash: &[u8; 32]) -> Result<[u8; PAGE_BYTES]> {
     let path = blob_path(directory, hash);
-    let mut f = File::open(path).map_err(err)?;
+    let mut f = open_index_file(&path)?;
     if f.metadata().map_err(err)?.len() != PAGE_BYTES as u64 {
         return Err("index page size is not 4096".into());
     }

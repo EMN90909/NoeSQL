@@ -27,6 +27,7 @@ use core::ffi::c_void;
 use core::fmt;
 use std::ffi::OsStr;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub const SESSION_ABI_VERSION: u32 = 2;
@@ -204,8 +205,15 @@ impl Drop for Statement<'_, '_> {
     }
 }
 
+/// Read no more than one byte past the source limit. fs::read would allocate
+/// the entire file before checking the 1 MiB input limit, allowing a local
+/// oversized script to exhaust host memory.
 pub fn read_source(path: impl AsRef<Path>) -> Result<String, Error> {
-    let bytes = fs::read(path.as_ref()).map_err(|e| Error::Io(e.to_string()))?;
+    let file = fs::File::open(path.as_ref()).map_err(|e| Error::Io(e.to_string()))?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SOURCE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Error::Io(e.to_string()))?;
     validate_source(&bytes)?;
     String::from_utf8(bytes).map_err(|_| Error::Utf8)
 }
@@ -276,4 +284,19 @@ mod tests {
         let source = vec![b'a'; MAX_SOURCE_BYTES + 1];
         assert!(matches!(validate_source(&source), Err(Error::SourceTooLarge(_))));
     }
+    #[test]
+    fn reading_a_large_source_is_bounded_before_allocation() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "noesql-source-limit-{}-{nonce}.noe", std::process::id()
+        ));
+        let file = fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
+        file.set_len((MAX_SOURCE_BYTES + 8192) as u64).unwrap();
+        drop(file);
+        let result = read_source(&path);
+        fs::remove_file(&path).unwrap();
+        assert!(matches!(result, Err(Error::SourceTooLarge(n)) if n == MAX_SOURCE_BYTES + 1));
+    }
+
 }
