@@ -5,7 +5,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql exec <file.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-exec <legacy.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql v2-schema-check <legacy.noedb> <migration.noe>\n  noesql v2-export-sql <legacy.noedb> <sqlite|postgres> <new.sql>\n  noesql v2-export-sqlite <legacy.noedb> <new.sqlite3>\n  noesql v2-backup <legacy.noedb> <new.noedb>\n  noesql v2-restore <legacy.noedb> <new.noedb>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-audit-permissions <file.noedb>\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql exec <file.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-exec <legacy.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql v2-schema-check <legacy.noedb> <migration.noe>\n  noesql v2-export-sql <legacy.noedb> <sqlite|postgres> <new.sql>\n  noesql v2-export-sqlite <legacy.noedb> <new.sqlite3>\n  noesql v2-backup <legacy.noedb> <new.noedb>\n  noesql v2-restore <legacy.noedb> <new.noedb>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-audit-permissions <file.noedb>\n  noesql v3-vacuum <file.noedb> [--apply --discard-history]\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -274,6 +274,29 @@ fn main() {
                 ));
             }
             println!("NQDB0003 permission audit passed (current store and retained generations)");
+        }
+        Some("v3-vacuum") => {
+            let database = args.next().unwrap_or_else(|| usage());
+            let extra: Vec<String> = args.collect();
+            let apply = match extra.as_slice() {
+                [] => false, // Always inspect first.
+                [first, second] if first == "--apply" &&
+                    second == "--discard-history" => true,
+                _ => usage(),
+            };
+            let target = default_path(&database);
+            let result = noesql_runtime::v3_store::vacuum(&target, apply)
+                .unwrap_or_else(|error| fail(error));
+            println!(
+                "NQDB0003 vacuum {}: generation={} obsolete_generations={} obsolete_index_blobs={} orphan_index_temporaries={} reclaimable_bytes={}",
+                if result.applied { "APPLIED" } else { "DRY-RUN" },
+                result.generation, result.obsolete_generations,
+                result.obsolete_index_blobs,
+                result.orphan_index_temporaries, result.reclaimable_bytes,
+            );
+            if !apply {
+                println!("no files removed; explicitly pass --apply --discard-history to reclaim");
+            }
         }
         Some("v3-query") => {
             let database = args.next().unwrap_or_else(|| usage());
