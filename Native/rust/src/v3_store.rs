@@ -1097,6 +1097,41 @@ mod tests {
         fs::remove_dir(directory).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_v3_vacuum_rejects_corrupt_live_index_before_removing_history() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-v3-vacuum-corruption-{}-{}", std::process::id(),
+            unique_nonce().unwrap()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = directory.join("db.noedb");
+        let mut indexed = Database::default();
+        indexed.execute(
+            "table entries { id:int key auto\n owner:int required }\nindex by_owner on entries(owner)\nentries add {owner:10}",
+            &Params::new()
+        ).unwrap();
+        create_new(&target, &indexed).unwrap();
+        let obsolete = read_head(&target).unwrap().filename;
+        execute(&target, "entries add {owner:11}", &Params::new()).unwrap();
+        let current = read_head(&target).unwrap();
+        let map = committed_index_manifest(&target, &current).unwrap();
+        let hashes = v3_bplus_disk::committed_blob_reachability(
+            &versions(&target), map.as_deref()
+        ).unwrap();
+        let live = hashes.iter().next().expect("the test index has a persisted page");
+        let blob = versions(&target).join("index-pages").join(format!("{live}.bpi"));
+        fs::write(blob, b"CORRUPTED").unwrap();
+        assert!(vacuum(&target, true).is_err());
+        assert!(versions(&target).join(obsolete).exists(),
+            "vacuum must not delete historical files when live data is invalid");
+        assert_eq!(read_head(&target).unwrap().generation, 2);
+        cleanup(&target);
+        fs::remove_dir(directory).unwrap();
+    }
+
     #[test]
     fn staged_transaction_rejects_stale_generation_before_publishing() {
         let target = path("staged-conflict");
