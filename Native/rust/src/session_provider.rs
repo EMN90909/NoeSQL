@@ -11,7 +11,8 @@
 //! SAFETY CONTRACT: Hosts pass live handles created by these callbacks, valid
 //! non-overlapping buffers, and release all statements before closing their
 //! connection. A close may not race with any callback on that handle.
-use crate::reference::{parse, rows_json, Database, ExecutionReport, Params, Statement};
+use crate::reference::{parse, Database, ExecutionReport, Params, Statement};
+use crate::value::Value;
 use crate::session_bindings::parse_bindings;
 use crate::v3_store::{self, V3Error};
 use crate::{ConnectionHandle, NoeSqlSessionV2, StatementHandle, SESSION_ABI_VERSION};
@@ -90,12 +91,73 @@ fn set_error(state: &mut State, code: i32, error: impl ToString) -> i32 {
     state.last_error = error.to_string();
     code
 }
-fn report_bytes(report: &ExecutionReport, query: bool) -> Vec<u8> {
-    if query {
-        rows_json(&report.rows).into_bytes()
-    } else {
-        format!("affected={}", report.affected).into_bytes()
+fn append_bounded(out: &mut String, part: &str, capacity: usize) -> Result<(), (i32, String)> {
+    let maximum = capacity.min(MAX_RESPONSE);
+    if out.len().checked_add(part.len()).is_none_or(|size| size > maximum) {
+        return Err((TOO_SMALL, format!(
+            "response exceeds {maximum}-byte budget; nothing committed"
+        )));
     }
+    out.push_str(part);
+    Ok(())
+}
+fn json_string_bounded(
+    out: &mut String, text: &str, capacity: usize,
+) -> Result<(), (i32, String)> {
+    append_bounded(out, "\"", capacity)?;
+    for ch in text.chars() {
+        match ch {
+            '"' => append_bounded(out, "\\\"", capacity)?,
+            '\\' => append_bounded(out, "\\\\", capacity)?,
+            '\n' => append_bounded(out, "\\n", capacity)?,
+            '\r' => append_bounded(out, "\\r", capacity)?,
+            '\t' => append_bounded(out, "\\t", capacity)?,
+            control if control.is_control() => {
+                append_bounded(out, &format!("\\u{:04x}", control as u32), capacity)?;
+            },
+            c => {
+                let mut tmp = [0u8; 4];
+                append_bounded(out, c.encode_utf8(&mut tmp), capacity)?;
+            },
+        }
+    }
+    append_bounded(out, "\"", capacity)
+}
+fn report_bytes(
+    report: &ExecutionReport, query: bool, capacity: usize,
+) -> Result<Vec<u8>, (i32, String)> {
+    if !query {
+        let payload = format!("affected={}", report.affected);
+        require_capacity(payload.as_bytes(), capacity)?;
+        return Ok(payload.into_bytes());
+    }
+    // Don't materialize unbounded rows_json before checking the response cap:
+    // it can multiply a small output buffer into a very large allocation.
+    let mut out = String::new();
+    append_bounded(&mut out, "[", capacity)?;
+    for (index, row) in report.rows.iter().enumerate() {
+        if index != 0 { append_bounded(&mut out, ",", capacity)?; }
+        append_bounded(&mut out, "{", capacity)?;
+        for (i, (key, value)) in row.iter().enumerate() {
+            if i != 0 { append_bounded(&mut out, ",", capacity)?; }
+            json_string_bounded(&mut out, key, capacity)?;
+            append_bounded(&mut out, ":", capacity)?;
+            match value {
+                Value::Null => append_bounded(&mut out, "null", capacity)?,
+                Value::Bool(v) => append_bounded(
+                    &mut out, if *v { "true" } else { "false" }, capacity
+                )?,
+                Value::Int(v) => append_bounded(&mut out, &v.to_string(), capacity)?,
+                Value::Decimal(v) => json_string_bounded(
+                    &mut out, &v.to_string(), capacity
+                )?,
+                Value::Text(v) => json_string_bounded(&mut out, v, capacity)?,
+            }
+        }
+        append_bounded(&mut out, "}", capacity)?;
+    }
+    append_bounded(&mut out, "]", capacity)?;
+    Ok(out.into_bytes())
 }
 unsafe fn write_response(
     payload: &[u8], output: *mut u8, capacity: usize, written: *mut usize,
@@ -141,8 +203,7 @@ fn execute_inner(
         if read || is_read_only {
             let report = transaction.staged.query_parsed(&prepared.parsed, params)
                 .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
-            let data = report_bytes(&report, read || is_read_only);
-            require_capacity(&data, capacity)?;
+            let data = report_bytes(&report, read || is_read_only, capacity)?;
             return Ok(data);
         }
         if transaction.statements.len().saturating_add(prepared.parsed.len()) > MAX_TRANSACTION_STATEMENTS ||
@@ -154,8 +215,7 @@ fn execute_inner(
         let mut candidate = transaction.staged.clone();
         let report = candidate.execute_parsed(&prepared.parsed, params)
             .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
-        let data = report_bytes(&report, false);
-        require_capacity(&data, capacity)?;
+        let data = report_bytes(&report, false, capacity)?;
         transaction.staged = candidate;
         transaction.statements.extend(prepared.parsed.iter().cloned());
         transaction.source_bytes += prepared.source.len();
@@ -167,8 +227,7 @@ fn execute_inner(
     if read || is_read_only {
         let report = pinned.database().query_parsed(&prepared.parsed, params)
             .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
-        let data = report_bytes(&report, true);
-        require_capacity(&data, capacity)?;
+        let data = report_bytes(&report, true, capacity)?;
         return Ok(data);
     }
 
@@ -177,8 +236,7 @@ fn execute_inner(
     let mut staged = pinned.database().clone();
     let report = staged.execute_parsed(&prepared.parsed, params)
         .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
-    let data = report_bytes(&report, false);
-    require_capacity(&data, capacity)?;
+    let data = report_bytes(&report, false, capacity)?;
     v3_store::commit_staged_if_generation(
         path, pinned.generation, &staged, &prepared.parsed
     ).map_err(|e| (code_for_v3(&e), e.to_string()))?;
@@ -489,6 +547,24 @@ mod tests {
         fn drop(&mut self) {
             assert_eq!(unsafe { self.api.close.unwrap()(self.api.context,self.handle) },0);
         }
+    }
+
+
+    #[test]
+    fn bounded_row_encoding_matches_reference_json_and_prevents_output_growth() {
+        use crate::reference::rows_json;
+        use crate::value::Value;
+        let mut row = std::collections::BTreeMap::new();
+        row.insert("name".into(), Value::Text("Quote \" <>&\n🚀".into()));
+        row.insert("count".into(), Value::Int(2));
+        let report = ExecutionReport { affected: 0, rows: vec![row] };
+        let reference = rows_json(&report.rows);
+        assert_eq!(report_bytes(&report, true, reference.len()).unwrap(), reference.as_bytes());
+        assert!(matches!(
+            report_bytes(&report, true, reference.len()-1),
+            Err((TOO_SMALL, _))
+        ));
+        assert_eq!(report_bytes(&report, false, 10).unwrap(), b"affected=0");
     }
 
     #[test]
