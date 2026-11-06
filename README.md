@@ -253,6 +253,35 @@ The native Noqeri scalar-row fixture and the Stage-2 NQRI fixture use the same `
 
 This repository contains source-level fixes and executable tests for cold reopening, WAL corruption rejection, index mutations, format bounds, and native/Stage-2 cross-mode behavior, but passing source review is **not** a replacement for a successful test run. The full Noqeri + Rust + Zig stack must execute on a trusted Linux x86-64 runner before merge or production deployment.
 
+## v3 offline storage vacuum (source added, qualification pending)
+
+**Not production-qualified.** NoeSQL v3 currently rewrites a complete
+relational snapshot on mutation and accumulates immutable historical
+generation files and B+ index blobs. Operators must monitor space and keep
+independent verified backups; an unbounded workload can still fill a disk.
+
+An explicit Linux-only, fail-closed offline maintenance command plans and
+optionally reclaims unreachable history under the exclusive database lock:
+
+    noesql v3-vacuum /private/data/app.noedb
+    # Always verify a separate backup and examine the DRY-RUN output first.
+    noesql v3-vacuum /private/data/app.noedb --apply --discard-history
+    noesql v3-check /private/data/app.noedb
+
+The operation re-verifies the current HEAD and index graph before deletion,
+rejects unexpected directory contents and symlinks, and syncs storage
+directories between generation and index reclamation. Existing materialized
+snapshots remain valid; external backup agents not using NoeSQL's flock
+protocol must be stopped. A private owner-only database parent is required.
+
+This is **not** incremental row-page storage, an automatically scheduled
+vacuum, a full durability proof, or an authorization/security audit.
+Source-level tests and an actual CLI backup/reopen/reclaim/recovery harness
+were added, but must run successfully with a Rust/Zig/Noqeri toolchain before
+this deletion path is enabled on real data.
+
+See [production engine exit criteria](Doc/PRODUCTION_ENGINE_EXIT_CRITERIA_2026-11-07.md).
+
 ## Native Noqeri web framework session-v2 integration (unverified)
 
 NoeSQL now includes a Linux Rust shared-library provider for the exact
