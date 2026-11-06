@@ -253,6 +253,31 @@ The native Noqeri scalar-row fixture and the Stage-2 NQRI fixture use the same `
 
 This repository contains source-level fixes and executable tests for cold reopening, WAL corruption rejection, index mutations, format bounds, and native/Stage-2 cross-mode behavior, but passing source review is **not** a replacement for a successful test run. The full Noqeri + Rust + Zig stack must execute on a trusted Linux x86-64 runner before merge or production deployment.
 
+## v3 security and local qualification (unverified hardening)
+
+Newly created NQDB0003 HEAD/generation/index files use private Unix permissions
+(0600 files, 0700 generation directories); on Linux, final-component file
+symlinks are rejected for critical v3 reads and the lock file. **Existing v3
+stores are not silently modified.** Audit current and retained generations with:
+
+```sh
+noesql v3-audit-permissions /private/data/example.noedb
+```
+
+Use a privately owned, trusted parent directory: these precautions do not
+provide dirfd containment, public-service authentication, encryption at rest,
+or verified cross-platform isolation. The library's
+`v3_store::execute_authorized` applies explicit embedded table grants,
+row filters and returned-row budgets before durable publication; the ordinary
+CLI and low-level APIs remain trusted **administrative** interfaces.
+
+For local engineering tests without GitHub Actions, see
+`scripts/qualify-production-local.sh`. This requires pinned Rust, Zig,
+Noqeri AOT and Stage-2 toolchains and **fails closed** if any suite fails.
+A successful local suite is not a production certificate. See
+[`Doc/NOESQL_PRODUCTION_READINESS_2026-11-06.md`](Doc/NOESQL_PRODUCTION_READINESS_2026-11-06.md)
+for audit scope, unresolved P0/P1 blockers and release acceptance criteria.
+
 ## Release qualification
 
 The source migration is complete, but production qualification is not. Remaining gates include:
