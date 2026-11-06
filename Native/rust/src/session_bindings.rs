@@ -270,7 +270,7 @@ mod tests {
             r#"{"x":[1]}"#,
             r#"{"x":true,}"#,
             r#"{"x":1} extra"#,
-            "{\\\"x\\\": 1}\u000b",
+            "{\"x\": 1}\u{000b}",
         ] {
             assert!(parse_bindings(payload.as_bytes()).is_err(), "{payload}");
         }
