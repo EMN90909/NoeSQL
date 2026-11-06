@@ -371,7 +371,13 @@ unsafe extern "C" fn rollback(_: *mut c_void, handle: ConnectionHandle) -> i32 {
         // Last-error is deliberately retained if the previous commit outcome
         // was uncertain; rollback cannot undo an already published HEAD.
         if state.transaction.take().is_none() {
-            return set_error(&mut state, TX_ERROR, "no active transaction to roll back");
+            // Noqeri's native web adapter calls rollback when COMMIT failed.
+            // Preserve the precise conflict / COMMIT OUTCOME UNCERTAIN error:
+            // rollback after a failed commit cannot reverse a published HEAD.
+            if state.last_error.is_empty() {
+                state.last_error = "no active transaction to roll back".into();
+            }
+            return TX_ERROR;
         }
         state.last_error.clear();
         OK
