@@ -270,8 +270,13 @@ unsafe extern "C" fn open(
                 Err(_) => return ENGINE_ERROR,
             }
         };
-        // Fail closed on missing, legacy, corrupt, or incompatible stores.
-        if v3_store::snapshot(&owned).is_err() { return ENGINE_ERROR; }
+        // Fail closed on missing, legacy, corrupt, or incompatible stores,
+        // and on a publicly accessible database parent or metadata entry.
+        // For a large retained history use the separate offline full audit.
+        if v3_store::snapshot(&owned).is_err() ||
+           v3_store::verify_embedded_private_store(&owned).is_err() {
+            return ENGINE_ERROR;
+        }
         let holder = Box::new(Connection {
             path: owned,
             state: Mutex::new(State {
@@ -511,9 +516,11 @@ mod tests {
 
     fn database_path(label: &str) -> PathBuf {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        std::env::temp_dir().join(format!(
-            "noesql-native-v2-{label}-{}-{nonce}.noedb", std::process::id()
-        ))
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-native-v2-{label}-{}-{nonce}", std::process::id()
+        ));
+        fs::create_dir(&directory).unwrap();
+        directory.join("database.noedb")
     }
     fn create(path: &Path) {
         let mut db = Database::default();
@@ -524,6 +531,7 @@ mod tests {
         let _ = fs::remove_file(path);
         let _ = fs::remove_file(format!("{}.lck", path.display()));
         let _ = fs::remove_dir_all(format!("{}.versions", path.display()));
+        let _ = fs::remove_dir(path.parent().unwrap());
     }
     struct TestConnection {
         api: &'static NoeSqlSessionV2,
