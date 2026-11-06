@@ -519,7 +519,9 @@ mod tests {
         let directory = std::env::temp_dir().join(format!(
             "noesql-native-v2-{label}-{}-{nonce}", std::process::id()
         ));
+        use std::os::unix::fs::PermissionsExt;
         fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         directory.join("database.noedb")
     }
     fn create(path: &Path) {
