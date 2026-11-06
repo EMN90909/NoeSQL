@@ -44,7 +44,7 @@ test-sqlite: no-js no-c-family
 test-noqeri-framework-local: no-js no-c-family
 	@test -n "$(NOQERI_WEB)" && test -x "$(NOQERI_WEB)" || \
 		(echo "Set NOQERI_WEB=/absolute/path/to/noqeri-web" >&2; exit 2)
-	@test "$(uname -s)" = Linux || \
+	@uname -s | grep -qx Linux || \
 		(echo "Real native provider test currently requires Linux" >&2; exit 2)
 	@test -n "$(NOQERI_REPO)" && test -f "$(NOQERI_REPO)/Compiler/bootstrap/web_native_noesql_v2.hpp" || \
 		(echo "Set NOQERI_REPO=/absolute/path/to/Noqeri checkout" >&2; exit 2)
