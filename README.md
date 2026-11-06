@@ -253,6 +253,36 @@ The native Noqeri scalar-row fixture and the Stage-2 NQRI fixture use the same `
 
 This repository contains source-level fixes and executable tests for cold reopening, WAL corruption rejection, index mutations, format bounds, and native/Stage-2 cross-mode behavior, but passing source review is **not** a replacement for a successful test run. The full Noqeri + Rust + Zig stack must execute on a trusted Linux x86-64 runner before merge or production deployment.
 
+## Native Noqeri web framework session-v2 integration (unverified)
+
+NoeSQL now includes a Linux Rust shared-library provider for the exact
+Noqeri native web session-v2 C ABI. It exports noesql_session_v2_get and
+backs prepared queries, strict JSON/typed bindings, transaction begin/commit/
+rollback, and generation-checked autocommit with the real NQDB0003 engine.
+
+This is an **opt-in trusted embedded provider**, not a public database
+server or proof of full Noqeri Stage-2 source-language integration.
+Noqeri's language-side noesqlHost* extern implementations, durable tenant
+security, and full Noqeri-compiled relational NIR are still incomplete.
+
+Build locally with Rust/Cargo (Linux):
+
+    cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
+
+Then set NOESQL_NATIVE_PROVIDER to the absolute path of
+Native/rust/target/release/libnoesql_runtime.so in the Noqeri web process.
+The database must already exist in canonical NQDB0003 format, under a
+trusted private directory; no storage migration happens implicitly.
+
+Run the real framework integration locally, WITHOUT GitHub Actions:
+
+    make test-noqeri-framework-local NOQERI_WEB=/absolute/path/to/noqeri-web
+
+See Doc/NOQERI_NATIVE_WEB_SESSION_V2_INTEGRATION.md for the exact upstream
+capability scan, v2 binding contract and outstanding production release
+gates. Neither compilation nor the end-to-end test has been run in the
+authoring environment.
+
 ## v3 security and local qualification (unverified hardening)
 
 Newly created NQDB0003 HEAD/generation/index files use private Unix permissions
