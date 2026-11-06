@@ -276,7 +276,7 @@ trusted private directory; no storage migration happens implicitly.
 
 Run the real framework integration locally, WITHOUT GitHub Actions:
 
-    make test-noqeri-framework-local NOQERI_WEB=/absolute/path/to/noqeri-web
+    make test-noqeri-framework-local NOQERI_WEB=/absolute/path/to/noqeri-web NOQERI_REPO=/absolute/path/to/Noqeri
 
 See Doc/NOQERI_NATIVE_WEB_SESSION_V2_INTEGRATION.md for the exact upstream
 capability scan, v2 binding contract and outstanding production release
