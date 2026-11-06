@@ -40,6 +40,10 @@ struct Transaction {
     staged: Database,
     statements: Vec<Statement>,
     source_bytes: usize,
+    // Once any request fails, no earlier staged write can be committed.
+    // COMMIT consumes and rejects this transaction until the caller retries
+    // in a NEW transaction after an explicit ROLLBACK.
+    failed: bool,
 }
 struct State {
     transaction: Option<Transaction>,
@@ -200,6 +204,9 @@ fn execute_inner(
         return Err((BAD_INPUT, "query callback refuses any mutating statement".into()));
     }
     if let Some(transaction) = &mut state.transaction {
+        if transaction.failed {
+            return Err((TX_ERROR, "transaction aborted by prior failure; rollback required".into()));
+        }
         if read || is_read_only {
             let report = transaction.staged.query_parsed(&prepared.parsed, params)
                 .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
@@ -213,7 +220,7 @@ fn execute_inner(
         // The current staged state is not modified unless both the executor
         // succeeds and the entire result fits the caller-owned output buffer.
         let mut candidate = transaction.staged.clone();
-        let report = candidate.execute_parsed(&prepared.parsed, params)
+        let report = candidate.execute_isolated_parsed(&prepared.parsed, params)
             .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
         let data = report_bytes(&report, false, capacity)?;
         transaction.staged = candidate;
@@ -234,7 +241,7 @@ fn execute_inner(
     // No explicit BEGIN: standalone stdlib/database_execute is autocommit,
     // but only AFTER the bounded response has been fully validated.
     let mut staged = pinned.database().clone();
-    let report = staged.execute_parsed(&prepared.parsed, params)
+    let report = staged.execute_isolated_parsed(&prepared.parsed, params)
         .map_err(|e| (ENGINE_ERROR, e.to_string()))?;
     let data = report_bytes(&report, false, capacity)?;
     v3_store::commit_staged_if_generation(
@@ -350,15 +357,24 @@ unsafe fn invoke(
         let mut state = match conn.state.lock() { Ok(v) => v, Err(_) => return ENGINE_ERROR };
         let bytes = match unsafe { input(ptr, len, MAX_BINDINGS) } {
             Ok(v) => v,
-            Err(e) => return set_error(&mut state, BAD_INPUT, e),
+            Err(e) => {
+                if let Some(tx) = &mut state.transaction { tx.failed = true; }
+                return set_error(&mut state, BAD_INPUT, e);
+            },
         };
         let params = match parse_bindings(bytes) {
             Ok(params) => params,
-            Err(e) => return set_error(&mut state, BAD_INPUT, e),
+            Err(e) => {
+                if let Some(tx) = &mut state.transaction { tx.failed = true; }
+                return set_error(&mut state, BAD_INPUT, e);
+            },
         };
         let data = match execute_inner(&conn.path, &mut state, prepared, &params, read, capacity) {
             Ok(data) => data,
-            Err((status, error)) => return set_error(&mut state, status, error),
+            Err((status, error)) => {
+                if let Some(tx) = &mut state.transaction { tx.failed = true; }
+                return set_error(&mut state, status, error);
+            },
         };
         match unsafe { write_response(&data, output, capacity, written) } {
             Ok(()) => { state.last_error.clear(); OK },
@@ -396,6 +412,7 @@ unsafe extern "C" fn begin(_: *mut c_void, handle: ConnectionHandle) -> i32 {
             staged: pinned.database().clone(),
             statements: Vec::new(),
             source_bytes: 0,
+            failed: false,
         });
         state.last_error.clear();
         OK
@@ -408,6 +425,10 @@ unsafe extern "C" fn commit(_: *mut c_void, handle: ConnectionHandle) -> i32 {
         let Some(tx) = state.transaction.take() else {
             return set_error(&mut state, TX_ERROR, "no active session-v2 transaction");
         };
+        if tx.failed {
+            return set_error(&mut state, TX_ERROR,
+                "transaction had a failed statement; all staged changes discarded");
+        }
         if tx.statements.is_empty() {
             state.last_error.clear();
             return OK;
@@ -604,7 +625,7 @@ mod tests {
         let query = first.prepare("users get name");
         assert_eq!(first.begin(),0);
         assert_eq!(first.exec(add,r#"{"name":"not committed"}"#,false,1).0,TOO_SMALL);
-        assert_eq!(first.commit(),0);
+        assert_eq!(first.commit(),TX_ERROR);
         assert_eq!(v3_store::snapshot(&path).unwrap().generation,1);
         assert_eq!(first.begin(),0);
         assert_eq!(first.exec(add,r#"{"name":"stale"}"#,false,1024).0,0);
@@ -656,6 +677,29 @@ mod tests {
         assert_eq!(v3_store::snapshot(&path).unwrap()
             .query("accounts get id", &Params::new()).unwrap().rows.len(),2);
         client.release(insert);client.release(duplicate);
+        drop(client);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_failed_statement_poisoned_transaction_cannot_commit_prior_writes() {
+        let path = database_path("abort-on-error");
+        create(&path);
+        let client = TestConnection::new(&path);
+        let add = client.prepare("users add {name:$name}");
+        assert_eq!(client.begin(), OK);
+        assert_eq!(client.exec(add, r#"{"name":"first"}"#, false, 1024).0, OK);
+        assert_eq!(client.exec(add, r#"{"name":"first"}"#, false, 1024).0, ENGINE_ERROR);
+        assert_eq!(client.exec(add, r#"{"name":"second"}"#, false, 1024).0, TX_ERROR);
+        assert_eq!(client.commit(), TX_ERROR);
+        assert_eq!(v3_store::snapshot(&path).unwrap().generation, 1);
+        assert_eq!(v3_store::snapshot(&path).unwrap()
+            .query("users get name", &Params::new()).unwrap().rows.len(), 0);
+        assert_eq!(client.begin(), OK);
+        assert_eq!(client.exec(add, r#"{"name":"recovered"}"#, false, 1024).0, OK);
+        assert_eq!(client.commit(), OK);
+        assert_eq!(v3_store::snapshot(&path).unwrap().generation, 2);
+        client.release(add);
         drop(client);
         cleanup(&path);
     }
