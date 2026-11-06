@@ -5,7 +5,7 @@ set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 
 die() { printf 'NoeSQL qualification blocked: %s\n' "$*" >&2; exit 2; }
-for cmd in uname make cargo rustc zig sha256sum tee; do
+for cmd in uname make cargo rustc zig sha256sum tee python3; do
   command -v "$cmd" >/dev/null 2>&1 || die "missing $cmd"
 done
 [[ "$(uname -s)" == Linux && "$(uname -m)" == x86_64 ]] ||
@@ -17,6 +17,8 @@ done
   die "set NOQERI_REPO to the pinned local Noqeri source tree"
 [[ -n "${NOQERI_NQRI_VM:-}" && -x "$NOQERI_NQRI_VM" ]] ||
   die "set NOQERI_NQRI_VM to the trusted NQRI runtime executable"
+[[ -n "${NOQERI_WEB:-}" && -x "$NOQERI_WEB" ]] ||
+  die "set NOQERI_WEB to the locally compiled native Noqeri web executable"
 
 EVIDENCE="${NOESQL_EVIDENCE_DIR:-$PWD/.qualification}"
 mkdir -p "$EVIDENCE"
@@ -41,6 +43,8 @@ run make stress
 run make test-sqlite
 run make native-chain NOQERI_COMPILER="$NOQERI_COMPILER"
 run make stage2-chain NOQERI_REPO="$NOQERI_REPO" NOQERI_NQRI_VM="$NOQERI_NQRI_VM"
+run make test-noqeri-framework-local NOQERI_REPO="$NOQERI_REPO" NOQERI_WEB="$NOQERI_WEB"
+run python3 tests/v3_vacuum_cli.py "$PWD/Native/rust/target/release/noesql"
 run make benchmark-parser-reads
 run make benchmark-bplus
 

@@ -548,6 +548,85 @@ pub fn load_index_manifest(versions: &Path, db: &Database, padded: &[u8]) -> Res
     }
     Ok(())
 }
+/// Collect the exact content-addressed index blobs transitively reachable
+/// from a fully verified committed v3 manifest. Used only by offline
+/// exclusive-lock maintenance; never guess reachability from filenames.
+///
+/// Both legacy NQBI0001 (48-byte branch descriptors) and stable NQBI0002
+/// (64-byte descriptors) are supported. The main v3 reader validates the
+/// complete manifest against relational rows BEFORE a reclaim plan is built.
+pub(crate) fn committed_blob_reachability(
+    versions: &Path, padded: Option<&[u8]>,
+) -> Result<BTreeSet<String>> {
+    let mut live = BTreeSet::<[u8; 32]>::new();
+    if let Some(padded) = padded {
+        let (_, roots) = parse_roots(padded)?;
+        let directory = index_dir(versions);
+        for (_, (root, _)) in roots {
+            if root != [0; 32] {
+                collect_reachable_node(&directory, &root, 0, &mut live)?;
+            }
+        }
+    }
+    Ok(live.into_iter().map(|digest| digest_hex(&digest)).collect())
+}
+
+fn collect_reachable_node(
+    directory: &Path, hash: &[u8; 32], depth: usize,
+    live: &mut BTreeSet<[u8; 32]>,
+) -> Result<()> {
+    if depth > MAX_DEPTH || live.len() > 1_000_000 {
+        return Err("committed B+ page graph exceeds maintenance safety limits".into());
+    }
+    if !live.insert(*hash) {
+        // Shared immutable subtrees are legitimate. The fully verified
+        // committed reader has already rejected cycles and invalid structure.
+        return Ok(());
+    }
+    let image = read_blob(directory, hash)?;
+    if image[9..12].iter().any(|b| *b != 0) ||
+       image[16..64].iter().any(|b| *b != 0) {
+        return Err("noncanonical reachable B+ header".into());
+    }
+    let count = u32_at(&image, 12) as usize;
+    match image[8] {
+        1 => {
+            if count == 0 || count > LEAF_FANOUT ||
+               image[64 + count * 16..].iter().any(|b| *b != 0) {
+                return Err("invalid reachable B+ leaf".into());
+            }
+        },
+        2 if &image[..8] == NODE_MAGIC => {
+            if count == 0 || count > BRANCH_FANOUT ||
+               image[64 + count * 48..].iter().any(|b| *b != 0) {
+                return Err("invalid reachable legacy B+ branch".into());
+            }
+            for i in 0..count {
+                let at = 64 + i * 48;
+                let mut child = [0u8; 32];
+                child.copy_from_slice(&image[at + 16..at + 48]);
+                collect_reachable_node(directory, &child, depth + 1, live)?;
+            }
+        },
+        2 if &image[..8] == NODE_MAGIC_V2 => {
+            // Stable-key copy-on-write branches store two tuple bounds,
+            // followed by the SHA256 of the child node.
+            if count == 0 || count > 60 ||
+               image[64 + count * 64..].iter().any(|b| *b != 0) {
+                return Err("invalid reachable stable-key B+ branch".into());
+            }
+            for i in 0..count {
+                let at = 64 + i * 64;
+                let mut child = [0u8; 32];
+                child.copy_from_slice(&image[at + 32..at + 64]);
+                collect_reachable_node(directory, &child, depth + 1, live)?;
+            }
+        },
+        _ => return Err("invalid reachable B+ page type".into()),
+    }
+    Ok(())
+}
+
 pub fn safe_index_blob_name(name: &str) -> bool {
     name.len() == 68 && name.ends_with(".bpi") &&
         name.get(..64).is_some_and(|hash|

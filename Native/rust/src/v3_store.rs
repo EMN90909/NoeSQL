@@ -619,6 +619,157 @@ pub fn audit_private_permissions(path: &Path) -> V3Result<Vec<PathBuf>> {
         Ok(violations)
     }
 }
+/// Offline storage maintenance summary. All counts are computed from a
+/// single exclusive-lock snapshot and refer only to *unreachable* files.
+/// The active generation's index graph is always retained.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct VacuumStats {
+    pub generation: u64,
+    pub obsolete_generations: usize,
+    pub obsolete_index_blobs: usize,
+    pub orphan_index_temporaries: usize,
+    pub reclaimable_bytes: u64,
+    pub applied: bool,
+}
+
+fn safe_obsolete_generation_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".pages") else { return false; };
+    let mut parts = stem.split('-');
+    let (Some(generation), Some(process), Some(nonce), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    generation.parse::<u64>().is_ok() &&
+        process.parse::<u32>().is_ok() && nonce.parse::<u128>().is_ok()
+}
+
+/// Inspect and, only when explicitly authorized, remove obsolete v3 files.
+/// This is NOT online compaction. Uncoordinated external backup readers that
+/// access historical *.pages or *.bpi files outside the v3 flock protocol
+/// must be stopped. Readers acquired through snapshot() have already fully
+/// materialized their verified state and continue to work after reclaim.
+///
+/// Safety protocol:
+///  - require a trusted owner-private parent and metadata;
+///  - take the exclusive v3 cross-process lock for the entire operation;
+///  - fsync the HEAD's parent BEFORE deleting any prior generation (important
+///    when a prior commit may have had an uncertain directory sync);
+///  - verify the CURRENT committed generation and all its index subtrees;
+///  - validate every sidecar filename/type before deleting anything;
+///  - delete only non-HEAD generations, then fsync versions/;
+///  - delete only index blobs unreachable from the live index manifest,
+///    then fsync index-pages/; interruption leaves at worst extra garbage.
+///
+/// Never run against a directory containing extra files from backup tooling;
+/// an unknown name causes a fail-closed rejection rather than a broad sweep.
+/// Reclaim is intentionally explicit rather than automatic during writes.
+#[cfg(target_os = "linux")]
+pub fn vacuum(path: &Path, apply: bool) -> V3Result<VacuumStats> {
+    validate_path(path)?;
+    verify_embedded_private_store(path)?;
+    let _lock = take_lock(path, true)?;
+    // A successful parent directory sync establishes the visible HEAD as the
+    // durable starting point; otherwise old generations must not be deleted.
+    sync_directory(parent_dir(path))?;
+    let head = read_head(path)?;
+    let _ = read_generation(path, &head)?;
+    let manifest = committed_index_manifest(path, &head)?;
+    let live_indexes = v3_bplus_disk::committed_blob_reachability(
+        &versions(path), manifest.as_deref()
+    ).map_err(invalid)?;
+
+    let directory = versions(path);
+    let index_directory = directory.join("index-pages");
+    let mut obsolete_generations = Vec::<PathBuf>::new();
+    let mut obsolete_indexes = Vec::<PathBuf>::new();
+    let mut old_temporaries = Vec::<PathBuf>::new();
+    let mut stats = VacuumStats { generation: head.generation, ..Default::default() };
+    let mut checked = 0usize;
+    let mut found_indexes = false;
+
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        checked += 1;
+        if checked > 1_000_000 { return Err(invalid("v3 maintenance directory exceeds 1,000,000 entries")); }
+        let kind = entry.file_type()?;
+        let name = entry.file_name().to_str()
+            .ok_or_else(|| invalid("invalid UTF-8 v3 maintenance entry"))?.to_string();
+        if name == "index-pages" && kind.is_dir() {
+            found_indexes = true;
+        } else if name == head.filename && kind.is_file() {
+            // Never remove the authenticated committed generation.
+        } else if kind.is_file() && safe_obsolete_generation_name(&name) {
+            let metadata = fs::symlink_metadata(entry.path())?;
+            let len = metadata.len();
+            stats.reclaimable_bytes = stats.reclaimable_bytes.checked_add(len)
+                .ok_or_else(|| invalid("maintenance reclaimed-size counter overflow"))?;
+            obsolete_generations.push(entry.path());
+        } else {
+            return Err(invalid(format!(
+                "unrecognized or unsafe v3 maintenance entry: {name}"
+            )));
+        }
+    }
+    if !found_indexes && !live_indexes.is_empty() {
+        return Err(invalid("committed B+ index graph has no index-pages directory"));
+    }
+    if found_indexes {
+        for entry in fs::read_dir(&index_directory)? {
+            let entry = entry?;
+            checked += 1;
+            if checked > 1_000_000 {
+                return Err(invalid("v3 maintenance directory exceeds 1,000,000 entries"));
+            }
+            if !entry.file_type()?.is_file() {
+                return Err(invalid("v3 index sidecar is not a regular file"));
+            }
+            let name = entry.file_name().to_str()
+                .ok_or_else(|| invalid("invalid UTF-8 index page filename"))?.to_string();
+            if v3_bplus_disk::safe_index_blob_name(&name) {
+                if !live_indexes.contains(&name[..64]) {
+                    let len = fs::symlink_metadata(entry.path())?.len();
+                    stats.reclaimable_bytes = stats.reclaimable_bytes.checked_add(len)
+                        .ok_or_else(|| invalid("maintenance reclaimed-size counter overflow"))?;
+                    obsolete_indexes.push(entry.path());
+                }
+            } else if v3_bplus_disk::safe_unpublished_index_temp_name(&name) {
+                // No writer may be publishing a new blob while the v3
+                // exclusive lock is held. This temp can only be an orphan.
+                let len = fs::symlink_metadata(entry.path())?.len();
+                stats.reclaimable_bytes = stats.reclaimable_bytes.checked_add(len)
+                    .ok_or_else(|| invalid("maintenance reclaimed-size counter overflow"))?;
+                old_temporaries.push(entry.path());
+            } else {
+                return Err(invalid(format!(
+                    "unrecognized or unsafe index maintenance entry: {name}"
+                )));
+            }
+        }
+    }
+    stats.obsolete_generations = obsolete_generations.len();
+    stats.obsolete_index_blobs = obsolete_indexes.len();
+    stats.orphan_index_temporaries = old_temporaries.len();
+
+    if apply {
+        // Important order: no reachable index page can be removed, and old
+        // generation references disappear DURABLY before index blob deletion.
+        for path in obsolete_generations { fs::remove_file(path)?; }
+        sync_directory(&directory)?;
+        for path in obsolete_indexes.into_iter().chain(old_temporaries) {
+            fs::remove_file(path)?;
+        }
+        if found_indexes { sync_directory(&index_directory)?; }
+        stats.applied = true;
+    }
+    Ok(stats)
+}
+
+/// Non-Linux hosts must not attempt destructive cleanup without the v3 flock.
+#[cfg(not(target_os = "linux"))]
+pub fn vacuum(_path: &Path, _apply: bool) -> V3Result<VacuumStats> {
+    Err(invalid("v3 maintenance currently requires Linux"))
+}
+
 fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
     affected != 0 || statements.iter().any(|statement| !matches!(
         statement, Statement::Get(_) | Statement::Set(_, _, _) | Statement::Delete(_, _)
@@ -875,6 +1026,110 @@ mod tests {
         assert!(verify_embedded_private_store(&target).is_ok());
         cleanup(&target);
         fs::remove_dir(&base).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_v3_vacuum_is_dry_run_first_reuses_live_index_and_keeps_pinned_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-v3-vacuum-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = directory.join("main.noedb");
+        let mut indexed = Database::default();
+        indexed.execute(
+            "table accounts { id:int key auto\n tenant:int required }\nindex tenant_idx on accounts(tenant)\naccounts add {tenant:1}",
+            &Params::new()
+        ).unwrap();
+        create_new(&target, &indexed).unwrap();
+        let held = snapshot(&target).unwrap();
+        execute(&target, "accounts add {tenant:2}", &Params::new()).unwrap();
+        execute(&target, "accounts add {tenant:3}", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 3);
+
+        let plan = vacuum(&target, false).unwrap();
+        assert!(!plan.applied);
+        assert_eq!(plan.obsolete_generations, 2);
+        assert!(plan.reclaimable_bytes > 0);
+        assert_eq!(snapshot(&target).unwrap().query(
+            "accounts get id", &Params::new()
+        ).unwrap().rows.len(), 3);
+        let reclaimed = vacuum(&target, true).unwrap();
+        assert!(reclaimed.applied);
+        assert_eq!(reclaimed, VacuumStats { applied: true, ..plan });
+        assert_eq!(held.query("accounts get id", &Params::new()).unwrap().rows.len(), 1);
+        assert_eq!(snapshot(&target).unwrap().query(
+            "accounts get id where tenant == 3", &Params::new()
+        ).unwrap().rows.len(), 1);
+        let second = vacuum(&target, false).unwrap();
+        assert_eq!(second.obsolete_generations, 0);
+        assert_eq!(second.obsolete_index_blobs, 0);
+        assert_eq!(second.orphan_index_temporaries, 0);
+        execute(&target, "accounts add {tenant:4}", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 4);
+        cleanup(&target);
+        fs::remove_dir(&directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_v3_vacuum_never_deletes_on_unexpected_entries() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-v3-vacuum-refuse-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = directory.join("main.noedb");
+        create_new(&target, &db()).unwrap();
+        execute(&target, "entries add {owner:2}", &Params::new()).unwrap();
+        let marker = versions(&target).join("external-backup.txt");
+        fs::write(&marker, b"do not remove").unwrap();
+        assert!(vacuum(&target, true).is_err());
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        assert!(marker.exists());
+        fs::remove_file(marker).unwrap();
+        let plan = vacuum(&target, false).unwrap();
+        assert_eq!(plan.obsolete_generations, 1);
+        cleanup(&target);
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn offline_v3_vacuum_rejects_corrupt_live_index_before_removing_history() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-v3-vacuum-corruption-{}-{}", std::process::id(),
+            unique_nonce().unwrap()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = directory.join("db.noedb");
+        let mut indexed = Database::default();
+        indexed.execute(
+            "table entries { id:int key auto\n owner:int required }\nindex by_owner on entries(owner)\nentries add {owner:10}",
+            &Params::new()
+        ).unwrap();
+        create_new(&target, &indexed).unwrap();
+        let obsolete = read_head(&target).unwrap().filename;
+        execute(&target, "entries add {owner:11}", &Params::new()).unwrap();
+        let current = read_head(&target).unwrap();
+        let map = committed_index_manifest(&target, &current).unwrap();
+        let hashes = v3_bplus_disk::committed_blob_reachability(
+            &versions(&target), map.as_deref()
+        ).unwrap();
+        let live = hashes.iter().next().expect("the test index has a persisted page");
+        let blob = versions(&target).join("index-pages").join(format!("{live}.bpi"));
+        fs::write(blob, b"CORRUPTED").unwrap();
+        assert!(vacuum(&target, true).is_err());
+        assert!(versions(&target).join(obsolete).exists(),
+            "vacuum must not delete historical files when live data is invalid");
+        assert_eq!(read_head(&target).unwrap().generation, 2);
+        cleanup(&target);
+        fs::remove_dir(directory).unwrap();
     }
 
     #[test]

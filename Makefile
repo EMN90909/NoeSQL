@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -56,6 +56,16 @@ test-noqeri-framework-local: no-js no-c-family
 		"$(NOQERI_WEB)" \
 		"$(CURDIR)/Native/rust/target/release/noesql" \
 		"$(CURDIR)/Native/rust/target/release/libnoesql_runtime.so"
+
+# Linux v3 offline maintenance regression using real Rust engine binaries.
+# No Noqeri compiler or GitHub Actions required for this narrower test.
+test-v3-vacuum-local: no-js no-c-family
+	@uname -s | grep -qx Linux || \
+		(echo "v3 maintenance currently requires Linux" >&2; exit 2)
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib v3_store::tests::offline_v3_vacuum
+	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
+	python3 tests/v3_vacuum_cli.py \
+		"$(CURDIR)/Native/rust/target/release/noesql"
 
 # Three independent Rust↔Zig executions; the Zig ABI test binary itself
 # exercises 96 write/reopen/checkpoint cycles and corruption rejection cases.
