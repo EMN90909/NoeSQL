@@ -624,6 +624,64 @@ mod tests {
     }
 
     #[test]
+    fn v2_sessions_commit_validated_integer_bplus_rows_atomically() {
+        let path = database_path("index");
+        let mut db = Database::default();
+        db.execute(
+            "table accounts { id:int key auto\n tenant:int required }\nindex by_tenant on accounts(tenant)",
+            &Params::new()
+        ).unwrap();
+        v3_store::create_new(&path, &db).unwrap();
+        let client = TestConnection::new(&path);
+        let insert = client.prepare("accounts add {tenant:$tenant}");
+        assert_eq!(client.begin(),0);
+        assert_eq!(client.exec(insert,r#"{"tenant":11}"#,false,1024).0,0);
+        assert_eq!(client.exec(insert,r#"{"tenant":{"kind":"int","value":"22"}}"#,false,1024).0,0);
+        assert_eq!(client.commit(),0);
+        let reopened = v3_store::snapshot(&path).unwrap();
+        assert_eq!(reopened.generation,2);
+        assert_eq!(reopened.query(
+            "accounts get id where tenant == 11", &Params::new()
+        ).unwrap().rows.len(),1);
+        assert_eq!(reopened.query(
+            "accounts get id where tenant == 22", &Params::new()
+        ).unwrap().rows.len(),1);
+
+        let duplicate = client.prepare("accounts add {id:1,tenant:44}");
+        assert_eq!(client.begin(),0);
+        assert_eq!(client.exec(insert,r#"{"tenant":33}"#,false,1024).0,0);
+        assert_eq!(client.exec(duplicate,"{}",false,1024).0,ENGINE_ERROR);
+        assert_eq!(client.rollback(),0);
+        assert_eq!(v3_store::snapshot(&path).unwrap().generation,2);
+        assert_eq!(v3_store::snapshot(&path).unwrap()
+            .query("accounts get id", &Params::new()).unwrap().rows.len(),2);
+        client.release(insert);client.release(duplicate);
+        drop(client);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn rust_session_v2_wrapper_uses_real_provider_contract() {
+        let path = database_path("rust-wrapper");
+        create(&path);
+        let provider = unsafe { &*noesql_session_v2_get() };
+        let session = crate::Session::open(provider, &path).unwrap();
+        session.begin().unwrap();
+        {
+            let statement = session.prepare("users add {name:$name}").unwrap();
+            assert_eq!(statement.execute(br#"{"name":"wrapper"}"#).unwrap(), b"affected=1");
+        }
+        session.commit().unwrap();
+        {
+            let read = session.prepare("users get name").unwrap();
+            let json = read.query(b"{}").unwrap();
+            assert!(String::from_utf8(json).unwrap().contains("wrapper"));
+        }
+        drop(session);
+        cleanup(&path);
+    }
+
+    #[test]
     fn malformed_binding_and_restricted_read_do_not_publish_writes() {
         let path = database_path("rejections");
         create(&path);
