@@ -37,13 +37,17 @@ compatibility. They are not silently imported as the canonical NoeSQL v3 engine.
    reads see staged writes; writes remain private until COMMIT. COMMIT checks
    the durable generation under the exclusive writer lock and publishes one
    checksummed snapshot. ROLLBACK drops all pending writes.
-5. Response bounds checked before any transaction is staged/published. A stale
+5. A statement failure poisons the entire active transaction: subsequent
+   operations and COMMIT fail until the caller drops the transaction. No
+   previously successful staged writes can leak into the persistent HEAD.
+   Private writer drafts execute without an unnecessary second database clone.
+6. Response bounds checked before any transaction is staged/published. A stale
    writer conflicts, and a commit failure after HEAD publication is marked
    CommitUncertain instead of incorrectly reporting a definitely aborted write.
-6. Per-connection Mutex protects transactions and error state. Host must not
+7. Per-connection Mutex protects transactions and error state. Host must not
    close a handle while another callback uses it; opaque FFI handles remain
    trusted capabilities, not untrusted network session tokens.
-7. Rust tests, new live Noqeri web/NoeSQL integration regression and a Makefile
+8. Rust tests, new live Noqeri web/NoeSQL integration regression and a Makefile
    target are added. No GitHub Actions tests are started.
 
 ## Local tests and building (Linux only)
