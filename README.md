@@ -264,7 +264,8 @@ stores are not silently modified.** Audit current and retained generations with:
 noesql v3-audit-permissions /private/data/example.noedb
 ```
 
-Use a privately owned, trusted parent directory: these precautions do not
+The audit also flags an insecure immediate parent directory. Use a privately
+owned, trusted parent directory: these precautions do not
 provide dirfd containment, public-service authentication, encryption at rest,
 or verified cross-platform isolation. The library's
 `v3_store::execute_authorized` applies explicit embedded table grants,
