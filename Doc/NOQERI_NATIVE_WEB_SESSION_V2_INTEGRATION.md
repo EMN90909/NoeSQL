@@ -63,7 +63,7 @@ adapter uses that library instead of launching the CLI when set.
 
 Run the real cross-repository verification without GitHub Actions:
 
-    make test-noqeri-framework-local NOQERI_WEB=/absolute/path/to/noqeri-web
+    make test-noqeri-framework-local NOQERI_WEB=/absolute/path/to/noqeri-web NOQERI_REPO=/absolute/path/to/Noqeri
 
 The integration test boots Noqeri's actual web server against a temporary
 NQDB0003 store, performs GET, a parameterized POST, an unsafe-looking string
