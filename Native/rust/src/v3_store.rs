@@ -530,6 +530,46 @@ pub fn inspect(path: &Path) -> V3Result<(u64, u64, u32)> {
     Ok((head.generation, head.bytes, head.pages))
 }
 
+/// Fast fail-closed permission policy for opening a trusted embedded v3
+/// session. A new Noqeri web connection must not read a database from a
+/// group/world-accessible immediate parent. All metadata entry symlinks are
+/// rejected. This is intentionally not a recursive retained-index audit,
+/// which remains a separate offline administrative operation.
+///
+/// Only the *immediate* parent is checked: operators must own and protect all
+/// ancestor directories. This is not a directory-fd/openat2 sandbox.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_embedded_private_store(path: &Path) -> V3Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    validate_path(path)?;
+    let entries = [
+        (parent_dir(path).to_path_buf(), true),
+        (path.to_path_buf(), false),
+        (lock_name(path), false),
+        (versions(path), true),
+        (versions(path).join("index-pages"), true),
+    ];
+    for (entry, is_directory) in entries {
+        let metadata = match fs::symlink_metadata(&entry) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound &&
+                entry.file_name().is_some_and(|name| name == "index-pages") => continue,
+            Err(error) => return Err(V3Error::Io(error)),
+        };
+        let ty = metadata.file_type();
+        if ty.is_symlink() ||
+           (is_directory && !ty.is_dir()) ||
+           (!is_directory && !ty.is_file()) ||
+           metadata.permissions().mode() & 0o077 != 0 {
+            return Err(V3Error::Access(format!(
+                "NoeSQL embedded session requires a trusted private directory and private regular files: {}",
+                entry.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Audit all existing v3 generations, metadata, and index blobs for unsafe
 /// Unix permissions. Earlier versions could create world-readable files.
 /// This is a read-only audit, NOT an automatic chmod or a TOCTOU-safe sandbox;
@@ -813,6 +853,27 @@ mod tests {
         let mut db = Database::default();
         db.execute("table entries { id:int key auto\n owner:int required }\nentries add {owner:1}", &Params::new()).unwrap();
         db
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedded_storage_requires_a_private_immediate_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!(
+            "noesql-embedded-private-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        fs::create_dir(&base).unwrap();
+        let target = base.join("db.noedb");
+        create_new(&target, &db()).unwrap();
+        assert!(verify_embedded_private_store(&target).is_ok());
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            verify_embedded_private_store(&target), Err(V3Error::Access(_))
+        ));
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(verify_embedded_private_store(&target).is_ok());
+        cleanup(&target);
+        fs::remove_dir(&base).unwrap();
     }
 
     #[test]
