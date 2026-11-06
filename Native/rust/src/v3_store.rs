@@ -863,6 +863,7 @@ mod tests {
             "noesql-embedded-private-{}-{}", std::process::id(), unique_nonce().unwrap()
         ));
         fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
         let target = base.join("db.noedb");
         create_new(&target, &db()).unwrap();
         assert!(verify_embedded_private_store(&target).is_ok());
