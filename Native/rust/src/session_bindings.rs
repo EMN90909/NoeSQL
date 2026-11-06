@@ -23,7 +23,7 @@ impl Reader<'_> {
         Some(byte)
     }
     fn space(&mut self) {
-        while self.peek().is_some_and(|b| b.is_ascii_whitespace()) { self.pos += 1; }
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) { self.pos += 1; }
     }
     fn expect(&mut self, byte: u8) -> Result<(), String> {
         if self.advance() == Some(byte) { Ok(()) }
@@ -270,6 +270,7 @@ mod tests {
             r#"{"x":[1]}"#,
             r#"{"x":true,}"#,
             r#"{"x":1} extra"#,
+            "{\\\"x\\\": 1}\u000b",
         ] {
             assert!(parse_bindings(payload.as_bytes()).is_err(), "{payload}");
         }
