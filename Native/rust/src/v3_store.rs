@@ -530,6 +530,46 @@ pub fn inspect(path: &Path) -> V3Result<(u64, u64, u32)> {
     Ok((head.generation, head.bytes, head.pages))
 }
 
+/// Fast fail-closed permission policy for opening a trusted embedded v3
+/// session. A new Noqeri web connection must not read a database from a
+/// group/world-accessible immediate parent. All metadata entry symlinks are
+/// rejected. This is intentionally not a recursive retained-index audit,
+/// which remains a separate offline administrative operation.
+///
+/// Only the *immediate* parent is checked: operators must own and protect all
+/// ancestor directories. This is not a directory-fd/openat2 sandbox.
+#[cfg(target_os = "linux")]
+pub(crate) fn verify_embedded_private_store(path: &Path) -> V3Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    validate_path(path)?;
+    let entries = [
+        (parent_dir(path).to_path_buf(), true),
+        (path.to_path_buf(), false),
+        (lock_name(path), false),
+        (versions(path), true),
+        (versions(path).join("index-pages"), true),
+    ];
+    for (entry, is_directory) in entries {
+        let metadata = match fs::symlink_metadata(&entry) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound &&
+                entry.file_name().is_some_and(|name| name == "index-pages") => continue,
+            Err(error) => return Err(V3Error::Io(error)),
+        };
+        let ty = metadata.file_type();
+        if ty.is_symlink() ||
+           (is_directory && !ty.is_dir()) ||
+           (!is_directory && !ty.is_file()) ||
+           metadata.permissions().mode() & 0o077 != 0 {
+            return Err(V3Error::Access(format!(
+                "NoeSQL embedded session requires a trusted private directory and private regular files: {}",
+                entry.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Audit all existing v3 generations, metadata, and index blobs for unsafe
 /// Unix permissions. Earlier versions could create world-readable files.
 /// This is a read-only audit, NOT an automatic chmod or a TOCTOU-safe sandbox;
@@ -677,6 +717,46 @@ pub fn execute_if_generation(
     Ok((next, report))
 }
 
+/// Publish a PRIVATE, already validated relational transaction at its pinned
+/// generation. Used by the Noqeri web session-v2 adapter to stage multiple
+/// parameterized statements until a single durable commit. The caller may
+/// never publish an externally mutable Database or execute an unchecked AST.
+///
+/// No transaction changes its visible HEAD until every statement succeeds and
+/// the reader generation is rechecked under the exclusive cross-process lock.
+/// Stale writers conflict rather than overwriting newer data; publication may
+/// still return CommitUncertain after a rename but before parent fsync.
+pub(crate) fn commit_staged_if_generation(
+    path: &Path,
+    expected_generation: u64,
+    staged: &Database,
+    statements: &[Statement],
+) -> V3Result<u64> {
+    validate_path(path)?;
+    if statements.is_empty() || Database::statements_read_only(statements) {
+        return Err(invalid("session commit requires a staged mutation"));
+    }
+    let _lock = take_lock(path, true)?;
+    let head = read_head(path)?;
+    if head.generation != expected_generation {
+        return Err(V3Error::Conflict(format!(
+            "stale session transaction: expected generation {expected_generation}, current {}",
+            head.generation
+        )));
+    }
+    let before = read_generation(path, &head)?;
+    let before_indexes = v3_bplus_disk::capture_dirty_indexes(&before, statements)
+        .map_err(invalid)?;
+    let previous = committed_index_manifest(path, &head)?;
+    let next = head.generation.checked_add(1)
+        .ok_or_else(|| invalid("generation counter exhausted"))?;
+    let published = write_generation_delta(
+        path, next, staged, previous.as_deref(), statements, Some(&before_indexes)
+    )?;
+    stage_head(path, &published, false)?;
+    Ok(next)
+}
+
 /// Serialized writer commit + MVCC reader snapshots, with durable immutable
 /// versions. The full relational snapshot is still cloned and rewritten.
 pub fn execute(path: &Path, source: &str, params: &Params) -> V3Result<ExecutionReport> {
@@ -774,6 +854,71 @@ mod tests {
         db.execute("table entries { id:int key auto\n owner:int required }\nentries add {owner:1}", &Params::new()).unwrap();
         db
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedded_storage_requires_a_private_immediate_parent() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!(
+            "noesql-embedded-private-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = base.join("db.noedb");
+        create_new(&target, &db()).unwrap();
+        assert!(verify_embedded_private_store(&target).is_ok());
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(matches!(
+            verify_embedded_private_store(&target), Err(V3Error::Access(_))
+        ));
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(verify_embedded_private_store(&target).is_ok());
+        cleanup(&target);
+        fs::remove_dir(&base).unwrap();
+    }
+
+    #[test]
+    fn staged_transaction_rejects_stale_generation_before_publishing() {
+        let target = path("staged-conflict");
+        create_new(&target, &db()).unwrap();
+        let pinned = snapshot(&target).unwrap();
+        let mut staged = pinned.database().clone();
+        let source = "entries add {owner:42}";
+        let parsed = parse(source).unwrap();
+        staged.execute_parsed(&parsed, &Params::new()).unwrap();
+        execute(&target, "entries add {owner:8}", &Params::new()).unwrap();
+        assert!(matches!(
+            commit_staged_if_generation(&target, pinned.generation, &staged, &parsed),
+            Err(V3Error::Conflict(_))
+        ));
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        let rows = snapshot(&target).unwrap()
+            .query("entries get owner sort owner", &Params::new()).unwrap().rows;
+        assert!(rows.iter().any(|r| r.get("owner") == Some(&Value::Int(8))));
+        assert!(!rows.iter().any(|r| r.get("owner") == Some(&Value::Int(42))));
+        cleanup(&target);
+    }
+    #[test]
+    fn staged_mutations_commit_as_one_visible_generation() {
+        let target = path("staged-atomic");
+        create_new(&target, &db()).unwrap();
+        let pinned = snapshot(&target).unwrap();
+        let mut staged = pinned.database().clone();
+        let a = parse("entries add {owner:20}").unwrap();
+        let b = parse("entries add {owner:30}").unwrap();
+        staged.execute_parsed(&a, &Params::new()).unwrap();
+        staged.execute_parsed(&b, &Params::new()).unwrap();
+        let mut changes = a;
+        changes.extend(b);
+        assert_eq!(commit_staged_if_generation(
+            &target, pinned.generation, &staged, &changes
+        ).unwrap(), 2);
+        assert_eq!(snapshot(&target).unwrap()
+            .query("entries get owner", &Params::new()).unwrap().rows.len(), 3);
+        assert_eq!(pinned.query("entries get owner", &Params::new()).unwrap().rows.len(), 1);
+        cleanup(&target);
+    }
+
     #[test]
     fn v3_cold_reopen_rejects_corruption_and_supports_large_page_count() {
         let target = path("cold");

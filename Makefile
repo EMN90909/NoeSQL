@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -37,6 +37,25 @@ test-sqlite: no-js no-c-family
 	zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 	NOESQL_ZIG_LIB_DIR="$(CURDIR)/Native/zig/zig-out/lib" \
 		cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets --features zig-pager,sqlite-adapter
+
+# Live Noqeri native web -> Rust session-v2 -> NQDB0003 integration.
+# NO GitHub Actions or mock provider. NOQERI_WEB must point to a locally
+# built Noqeri web executable; requires Linux x86-64 and Python 3.
+test-noqeri-framework-local: no-js no-c-family
+	@test -n "$(NOQERI_WEB)" && test -x "$(NOQERI_WEB)" || \
+		(echo "Set NOQERI_WEB=/absolute/path/to/noqeri-web" >&2; exit 2)
+	@uname -s | grep -qx Linux || \
+		(echo "Real native provider test currently requires Linux" >&2; exit 2)
+	@test -n "$(NOQERI_REPO)" && test -f "$(NOQERI_REPO)/Compiler/bootstrap/web_native_noesql_v2.hpp" || \
+		(echo "Set NOQERI_REPO=/absolute/path/to/Noqeri checkout" >&2; exit 2)
+	python3 scripts/check_noqeri_session_abi.py "$(NOQERI_REPO)"
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib session_bindings::tests
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib session_provider::tests
+	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
+	python3 tests/noqeri_framework_session_v2.py \
+		"$(NOQERI_WEB)" \
+		"$(CURDIR)/Native/rust/target/release/noesql" \
+		"$(CURDIR)/Native/rust/target/release/libnoesql_runtime.so"
 
 # Three independent Rust↔Zig executions; the Zig ABI test binary itself
 # exercises 96 write/reopen/checkpoint cycles and corruption rejection cases.
