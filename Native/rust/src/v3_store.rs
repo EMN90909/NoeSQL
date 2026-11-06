@@ -158,6 +158,9 @@ fn take_lock(path: &Path, exclusive: bool) -> V3Result<Lock> {
         for _ in 0..500 {
             if unsafe { flock(file.as_raw_fd(), flags | 4) } == 0 { return Ok(Lock(file)); }
             let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
             if error.kind() != std::io::ErrorKind::WouldBlock {
                 return Err(V3Error::Io(error));
             }
@@ -546,6 +549,14 @@ pub fn audit_private_permissions(path: &Path) -> V3Result<Vec<PathBuf>> {
         let _ = read_generation(path, &head)?;
         let mut pending = vec![path.to_path_buf(), lock_name(path), versions(path)];
         let mut violations = Vec::new();
+        // Do not report a clean audit when the immediate database parent
+        // is shared or otherwise untrusted. We do not descend into it.
+        let parent = parent_dir(path);
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if !parent_metadata.file_type().is_dir() ||
+            parent_metadata.permissions().mode() & 0o077 != 0 {
+            violations.push(parent.to_path_buf());
+        }
         let mut visited = 0usize;
         while let Some(candidate) = pending.pop() {
             visited += 1;
@@ -1168,7 +1179,11 @@ mod tests {
     #[test]
     fn permission_audit_detects_insecure_existing_generations_without_mutating_them() {
         use std::os::unix::fs::PermissionsExt;
-        let target = path("permissions-audit");
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-private-audit-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        private_create_dir(&directory).unwrap();
+        let target = directory.join("data.noedb");
         create_new(&target, &db()).unwrap();
         assert!(audit_private_permissions(&target).unwrap().is_empty());
         let head = read_head(&target).unwrap();
@@ -1179,7 +1194,12 @@ mod tests {
         assert_eq!(fs::metadata(&page).unwrap().permissions().mode() & 0o777, 0o644);
         fs::set_permissions(&page, fs::Permissions::from_mode(0o600)).unwrap();
         assert!(audit_private_permissions(&target).unwrap().is_empty());
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(audit_private_permissions(&target).unwrap().contains(&directory),
+            "shared parent directory must invalidate a private-store audit");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
         cleanup(&target);
+        fs::remove_dir(&directory).unwrap();
     }
 
 
