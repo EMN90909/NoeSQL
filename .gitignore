@@ -24,3 +24,6 @@ Native/rust/native-stage2/
 
 # Verified CI-only native toolchain checkout (never publish)
 .ci-noqeri/
+
+# Local qualification logs and manual test evidence
+.qualification/
