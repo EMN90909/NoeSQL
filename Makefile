@@ -46,6 +46,9 @@ test-noqeri-framework-local: no-js no-c-family
 		(echo "Set NOQERI_WEB=/absolute/path/to/noqeri-web" >&2; exit 2)
 	@test "$(uname -s)" = Linux || \
 		(echo "Real native provider test currently requires Linux" >&2; exit 2)
+	@test -n "$(NOQERI_REPO)" && test -f "$(NOQERI_REPO)/Compiler/bootstrap/web_native_noesql_v2.hpp" || \
+		(echo "Set NOQERI_REPO=/absolute/path/to/Noqeri checkout" >&2; exit 2)
+	python3 scripts/check_noqeri_session_abi.py "$(NOQERI_REPO)"
 	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib session_bindings::tests
 	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib session_provider::tests
 	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
