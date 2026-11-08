@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local test-noeqr-rest-local no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -66,6 +66,18 @@ test-v3-vacuum-local: no-js no-c-family
 	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
 	python3 tests/v3_vacuum_cli.py \
 		"$(CURDIR)/Native/rust/target/release/noesql"
+
+# Real local NoeSQL CLI + IPv4 loopback HTTP/1.1 + NQDB0003 integration.
+# Includes .noeqr source, authenticated JSON binding, REST DML and rejection.
+# No Node, GitHub Actions, public networking or a mock storage provider.
+test-noeqr-rest-local: no-js no-c-family
+	@uname -s | grep -qx Linux || \
+		(echo "NoeSQL embedded REST currently requires Linux" >&2; exit 2)
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib session_bindings::tests
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib rest_server::tests
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib tests::only_noeqr_script_extension_is_accepted
+	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
+	python3 tests/noeqr_rest_local.py "$(CURDIR)/Native/rust/target/release/noesql"
 
 # Three independent Rust↔Zig executions; the Zig ABI test binary itself
 # exercises 96 write/reopen/checkpoint cycles and corruption rejection cases.
