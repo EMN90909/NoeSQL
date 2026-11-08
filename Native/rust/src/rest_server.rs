@@ -113,9 +113,27 @@ fn route(config: &Config, request: Request) -> Reply {
         return Reply::json(200, "{\"status\":\"ok\"}".into());
     }
     if request.origin { return Reply::error(403, "origin_denied", "browser origins not permitted"); }
-    let authorized = request.authorization.as_deref().and_then(|s| s.strip_prefix("Bearer "))
-        .is_some_and(|secret| token_eq(secret.as_bytes(), &config.token));
-    if !authorized { return Reply::error(401, "unauthorized", "bearer token required"); }
+    // Prefer HTTP Authorization. Noqeri std.http.client currently exposes
+    // http_client_json_post but no custom-header argument: accept a JSON
+    // body token on IPv4 loopback for those native Noqeri clients only.
+    // Never echo, log, or include either token in error messages.
+    let mut body_parsed = None;
+    let authorized = if let Some(header) = request.authorization.as_deref() {
+        header.strip_prefix("Bearer ")
+            .is_some_and(|secret| token_eq(secret.as_bytes(), &config.token))
+    } else if request.method == "POST" &&
+              matches!(request.path.as_str(), "/v1/query" | "/v1/execute") &&
+              request.content_type.as_deref() == Some("application/json") {
+        match parse_rest_request(&request.body) {
+            Ok(body) => {
+                let valid = body.token.as_ref().is_some_and(|t| token_eq(t.as_bytes(), &config.token));
+                body_parsed = Some(body);
+                valid
+            },
+            Err(_) => false,
+        }
+    } else { false };
+    if !authorized { return Reply::error(401, "unauthorized", "valid bearer token required"); }
     if request.method == "GET" && request.path == "/v1/status" {
         return match v3_store::inspect(&config.db) {
             Ok((generation, bytes, pages)) => Reply::json(200, format!(
@@ -131,8 +149,11 @@ fn route(config: &Config, request: Request) -> Reply {
     if request.content_type.as_deref() != Some("application/json") {
         return Reply::error(415, "content_type", "Content-Type must be application/json");
     }
-    let req = match parse_rest_request(&request.body) {
-        Ok(req) => req, Err(err) => return Reply::error(400, "bad_json", &err),
+    let req = match body_parsed {
+        Some(req) => req,
+        None => match parse_rest_request(&request.body) {
+            Ok(req) => req, Err(err) => return Reply::error(400, "bad_json", &err),
+        },
     };
     let (source, params) = match source(config, req) {
         Ok(value) => value, Err(reply) => return reply,
@@ -351,6 +372,18 @@ mod tests {
         assert_eq!(route(&config, req(Some("Bearer wrong"), false)).status, 401);
         assert_eq!(route(&config, req(Some(
             "Bearer 01234567890123456789012345678901"), true)).status, 403);
+    }
+    #[test]
+    fn native_noqeri_body_token_allows_authenticated_dml_but_denies_schema() {
+        let config = Config { db: PathBuf::from("/missing.noedb"), scripts: None,
+            token: b"01234567890123456789012345678901".to_vec() };
+        let req = Request {
+            method: "POST".into(), path: "/v1/execute".into(),
+            authorization: None, content_type: Some("application/json".into()),
+            origin: false,
+            body: br#"{"token":"01234567890123456789012345678901","source":"table items { id:int key auto }"}"#.to_vec(),
+        };
+        assert_eq!(route(&config, req).status, 403);
     }
     #[test]
     fn schema_and_ddl_rejected_by_http_dml_gate() {
