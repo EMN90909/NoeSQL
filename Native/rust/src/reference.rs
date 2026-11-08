@@ -1360,7 +1360,7 @@ mod tests {
     #[test]
     fn last_read_only_get_wins_even_when_it_matches_no_rows() {
         let mut db = Database::default();
-        db.execute("table items { id:int key auto\\n value:int required }\\nitems add {value:10}", &params()).unwrap();
+        db.execute("table items { id:int key auto\n value:int required }\nitems add {value:10}", &params()).unwrap();
         let parsed = parse("items get id where id == 1; items get id where id == 999").unwrap();
         let snapshot = db.query_parsed(&parsed, &params()).unwrap();
         assert!(snapshot.rows.is_empty(), "empty final GET must discard earlier results");
@@ -1374,7 +1374,7 @@ mod tests {
     #[test]
     fn nested_atomic_get_does_not_leak_rows_from_earlier_get() {
         let mut db = Database::default();
-        db.execute("table items { id:int key auto\\n value:int required }\\nitems add {value:10}", &params()).unwrap();
+        db.execute("table items { id:int key auto\n value:int required }\nitems add {value:10}", &params()).unwrap();
         let report = db.execute(
             "items get id where id == 1; atomic { items get id where id == 999; }",
             &params(),
