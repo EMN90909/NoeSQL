@@ -35,7 +35,7 @@ fn verified_backup_is_standalone_is_consistent_and_never_overwrites() {
     let source = path("source");
     let backup = path("backup");
     let restored = path("restored");
-    let script = source.with_extension("noe");
+    let script = source.with_extension("noeqr");
     for file in [&source, &backup, &restored] { clean(file); }
     fs::write(&script, "table users {\n id:int key auto\n name:text required unique\n}\nusers add {name:\"Amina\"}").unwrap();
 
@@ -69,7 +69,7 @@ fn verified_backup_is_standalone_is_consistent_and_never_overwrites() {
 #[test]
 fn explain_reports_real_plan_and_rejects_mutations() {
     let source = path("explain");
-    let script = source.with_extension("noe");
+    let script = source.with_extension("noeqr");
     clean(&source);
     fs::write(&script, "table items {\n id:int key auto\n value:int required\n}\nitems add {value:1}").unwrap();
     let db = source.to_str().unwrap();
@@ -92,7 +92,7 @@ fn explain_reports_real_plan_and_rejects_mutations() {
 #[test]
 fn schema_check_validates_evolution_but_never_applies_it() {
     let source = path("schema-check");
-    let setup = source.with_extension("noe");
+    let setup = source.with_extension("noeqr");
     let evolution = source.with_extension("migration.noeqr");
     clean(&source);
     fs::write(&setup, "table users {\n id:int key auto\n name:text required\n}\nusers add {name:\"Amina\"}").unwrap();
