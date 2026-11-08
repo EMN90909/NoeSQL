@@ -22,7 +22,7 @@ with tempfile.TemporaryDirectory(prefix="noesql-reclaim-test-") as home:
     os.chmod(private, 0o700)
     current = private / "live.noedb"
     backup = private / "backup.noedb"
-    schema = Path(home) / "schema.noe"
+    schema = Path(home) / "schema.noeqr"
     schema.write_text(
         "table entries {\n id:int key auto\n owner:int required }\n"
         "index owner_idx on entries(owner)\n"

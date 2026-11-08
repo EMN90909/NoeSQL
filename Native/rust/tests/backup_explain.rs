@@ -93,7 +93,7 @@ fn explain_reports_real_plan_and_rejects_mutations() {
 fn schema_check_validates_evolution_but_never_applies_it() {
     let source = path("schema-check");
     let setup = source.with_extension("noe");
-    let evolution = source.with_extension("migration.noe");
+    let evolution = source.with_extension("migration.noeqr");
     clean(&source);
     fs::write(&setup, "table users {\n id:int key auto\n name:text required\n}\nusers add {name:\"Amina\"}").unwrap();
     fs::write(&evolution, "alter users add { active:bool required = true }").unwrap();

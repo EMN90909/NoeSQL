@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix="noesql-noqeri-v2-") as td:
     private = root / "private"
     private.mkdir(mode=0o700)
     database = private / "app.noedb"
-    schema = root / "schema.noe"
+    schema = root / "schema.noeqr"
     schema.write_text(
         "table users {\n id:int key auto\n name:text required unique\n}"
         '\nusers add {name:"Amina"}\n', encoding="utf8"

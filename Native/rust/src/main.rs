@@ -5,7 +5,7 @@ use std::path::Path;
 
 fn usage() -> ! {
     eprintln!(
-        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noe>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noe>\n  noesql query <file.noedb> <query>\n  noesql exec <file.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-exec <legacy.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-run <legacy.noedb> <script.noe>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql v2-schema-check <legacy.noedb> <migration.noe>\n  noesql v2-export-sql <legacy.noedb> <sqlite|postgres> <new.sql>\n  noesql v2-export-sqlite <legacy.noedb> <new.sqlite3>\n  noesql v2-backup <legacy.noedb> <new.noedb>\n  noesql v2-restore <legacy.noedb> <new.noedb>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noe>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noe>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-audit-permissions <file.noedb>\n  noesql v3-vacuum <file.noedb> [--apply --discard-history]\n  noesql v3-query <file.noedb> <query>\n  noesql v3-run <file.noedb> <script.noe>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
+        "NoeSQL native runtime\n\nusage:\n  noesql version\n  noesql check <file.noeqr>\n  noesql check-db <file.noedb>\n  noesql run <file.noedb> <script.noeqr>\n  noesql query <file.noedb> <query>\n  noesql query-file <file.noedb> <query.noeqr>\n  noesql schema-file <file.noedb> <schema.noeqr>\n  noesql exec <file.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-exec <legacy.noedb> <NoeSQL-source> [name:type:value ...]\n  noesql v2-run <legacy.noedb> <script.noeqr>\n  noesql v2-query <legacy.noedb> <query>\n  noesql v2-explain <legacy.noedb> <query>\n  noesql v2-schema-check <legacy.noedb> <migration.noeqr>\n  noesql v2-export-sql <legacy.noedb> <sqlite|postgres> <new.sql>\n  noesql v2-export-sqlite <legacy.noedb> <new.sqlite3>\n  noesql v2-backup <legacy.noedb> <new.noedb>\n  noesql v2-restore <legacy.noedb> <new.noedb>\n  noesql explain <file.noedb> <query>\n  noesql schema-check <file.noedb> <migration.noeqr>\n  noesql export-sql <file.noedb> <sqlite|postgres> <new-file.sql>\n  noesql export-sqlite <source.noedb> <new-file.sqlite3>\n  noesql migrate-v3 <existing-v2.noedb> <new-v3.noedb>\n  noesql v3-create <new-v3.noedb> <schema.noeqr>\n  noesql v3-discard-unpublished <uncommitted-v3.noedb>\n  noesql v3-check <file.noedb>\n  noesql v3-audit-permissions <file.noedb>\n  noesql v3-vacuum <file.noedb> [--apply --discard-history]\n  noesql v3-query <file.noedb> <query>\n  noesql serve <file.noedb> <port> [--scripts-root <absolute-private-dir>]\n  noesql v3-run <file.noedb> <script.noeqr>\n  noesql v3-exec <file.noedb> <NoeSQL-source>\n  noesql backup <source.noedb> <new-backup.noedb>\n  noesql restore <verified-backup.noedb> <new-database.noedb>"
     );
     std::process::exit(2);
 }
@@ -99,6 +99,56 @@ fn main() {
             let source = read_source(&path).unwrap_or_else(|error| fail(error));
             let statements = parse(&source).unwrap_or_else(|error| fail(error));
             println!("ok: {} statement(s), {} bytes", statements.len(), source.len());
+        }
+        Some("serve") => {
+            let path = args.next().unwrap_or_else(|| usage());
+            let port = args.next().unwrap_or_else(|| usage());
+            let port = port.parse::<u16>().unwrap_or_else(|_| usage());
+            let rest: Vec<String> = args.collect();
+            let scripts = match rest.as_slice() {
+                [] => None,
+                [flag, directory] if flag == "--scripts-root" =>
+                    Some(std::path::PathBuf::from(directory)),
+                _ => usage(),
+            };
+            #[cfg(target_os = "linux")]
+            noesql_runtime::rest_server::serve(&default_path(&path), port, scripts)
+                .unwrap_or_else(|error| fail(error));
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (path, port, scripts);
+                fail("REST requires Linux (private v3 storage and flock)");
+            }
+        }
+        Some("query-file") => {
+            let database = args.next().unwrap_or_else(|| usage());
+            let script = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            let text = read_source(&script).unwrap_or_else(|error| fail(error));
+            let report = noesql_runtime::v3_store::snapshot(&default_path(&database))
+                .unwrap_or_else(|error| fail(error))
+                .query(&text, &Params::new())
+                .unwrap_or_else(|error| fail(error));
+            display_report(report);
+        }
+        Some("schema-file") => {
+            use noesql_runtime::reference::Statement;
+            let database = args.next().unwrap_or_else(|| usage());
+            let script = args.next().unwrap_or_else(|| usage());
+            if args.next().is_some() { usage(); }
+            let text = read_source(&script).unwrap_or_else(|error| fail(error));
+            let parsed = parse(&text).unwrap_or_else(|error| fail(error));
+            if parsed.is_empty() || !parsed.iter().all(|s| matches!(s,
+                Statement::Database(_) | Statement::Table(_, _) |
+                Statement::AlterAdd(_, _) | Statement::Index { .. } |
+                Statement::Query { .. }
+            )) {
+                fail("schema-file accepts only database, table, alter, index and named query declarations");
+            }
+            let report = noesql_runtime::v3_store::execute(
+                &default_path(&database), &text, &Params::new()
+            ).unwrap_or_else(|error| fail(error));
+            display_report(report);
         }
         Some("check-db") => {
             let path = args.next().unwrap_or_else(|| usage());

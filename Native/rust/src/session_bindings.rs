@@ -183,11 +183,7 @@ impl Reader<'_> {
     }
 }
 
-pub(crate) fn parse_bindings(bytes: &[u8]) -> Result<Params, String> {
-    if bytes.len() > MAX_BIND_BYTES { return Err("binding JSON exceeds 32 KiB".into()); }
-    // Do not reinterpret malformed bytes as lossy UTF-8.
-    std::str::from_utf8(bytes).map_err(|_| "binding JSON is not UTF-8")?;
-    let mut reader = Reader { bytes, pos: 0 };
+fn parse_params(reader: &mut Reader<'_>) -> Result<Params, String> {
     reader.space();
     reader.expect(b'{')?;
     reader.space();
@@ -196,10 +192,12 @@ pub(crate) fn parse_bindings(bytes: &[u8]) -> Result<Params, String> {
         reader.advance();
     } else {
         loop {
-            if params.len() >= MAX_BIND_COUNT { return Err("more than 32 NoeSQL bindings".into()); }
+            if params.len() >= MAX_BIND_COUNT {
+                return Err("more than 32 NoeSQL bindings".into());
+            }
             let key = reader.json_string()?;
             if key.is_empty() || key.len() > 64 ||
-                !key.as_bytes()[0].is_ascii_alphabetic() && key.as_bytes()[0] != b'_' ||
+                (!key.as_bytes()[0].is_ascii_alphabetic() && key.as_bytes()[0] != b'_') ||
                 !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
                 return Err("binding name must be an ASCII identifier <=64 bytes".into());
             }
@@ -218,14 +216,143 @@ pub(crate) fn parse_bindings(bytes: &[u8]) -> Result<Params, String> {
             }
         }
     }
+    Ok(params)
+}
+
+/// Strict, bounded JSON binding reader shared by the Noqeri native session
+/// provider and the HTTP REST gateway. Both use exactly the same value
+/// semantics and never interpolate user values into database source.
+pub(crate) fn parse_bindings(bytes: &[u8]) -> Result<Params, String> {
+    if bytes.len() > MAX_BIND_BYTES { return Err("binding JSON exceeds 32 KiB".into()); }
+    std::str::from_utf8(bytes).map_err(|_| "binding JSON is not UTF-8")?;
+    let mut reader = Reader { bytes, pos: 0 };
+    let params = parse_params(&mut reader)?;
     reader.space();
     if reader.peek().is_some() { return Err("trailing bytes after JSON binding object".into()); }
     Ok(params)
 }
 
+/// REST body: {"source":"SELECT ...","params":{"key":"value"}}
+/// or {"script":"approved-name.noeqr","params":{...}}.
+/// A script is a BASENAME under a configured private scripts directory,
+/// never an arbitrary filesystem path sent by the caller.
+pub(crate) struct RestRequest {
+    pub source: Option<String>,
+    pub script: Option<String>,
+    // Noqeri's current HTTP client lacks arbitrary header support.
+    // Body token is permitted only by our loopback REST server.
+    pub token: Option<String>,
+    pub params: Params,
+}
+
+pub(crate) fn parse_rest_request(bytes: &[u8]) -> Result<RestRequest, String> {
+    if bytes.len() > 128 * 1024 { return Err("HTTP JSON request exceeds 128 KiB".into()); }
+    std::str::from_utf8(bytes).map_err(|_| "HTTP request JSON is not UTF-8")?;
+    let mut reader = Reader { bytes, pos: 0 };
+    reader.space();
+    reader.expect(b'{')?;
+    reader.space();
+    let mut source: Option<String> = None;
+    let mut script: Option<String> = None;
+    let mut token: Option<String> = None;
+    let mut params: Option<Params> = None;
+    if reader.peek() == Some(b'}') { reader.advance(); }
+    else {
+        loop {
+            let key = reader.json_string()?;
+            reader.space();
+            reader.expect(b':')?;
+            reader.space();
+            match key.as_str() {
+                "source" if source.is_none() => {
+                    let text = reader.json_string()?;
+                    if text.is_empty() || text.len() > 65_536 {
+                        return Err("NoeSQL inline source must be 1..65536 bytes".into());
+                    }
+                    source = Some(text);
+                },
+                "script" if script.is_none() => {
+                    let name = reader.json_string()?;
+                    if name.len() < 7 || name.len() > 96 || !name.ends_with(".noeqr") ||
+                       name.starts_with('.') ||
+                       !name.bytes().all(|b|
+                           b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'.') ||
+                       name.contains("..") {
+                        return Err("script must be a simple .noeqr filename".into());
+                    }
+                    script = Some(name);
+                },
+                "token" if token.is_none() => {
+                    let secret = reader.json_string()?;
+                    if secret.len() < 32 || secret.len() > 256 ||
+                       !secret.bytes().all(|c| (33..=126).contains(&c)) {
+                        return Err("REST body token must be 32..256 printable ASCII bytes".into());
+                    }
+                    token = Some(secret);
+                },
+                "params" if params.is_none() => {
+                    let before = reader.pos;
+                    let parsed = parse_params(&mut reader)?;
+                    if reader.pos - before > MAX_BIND_BYTES {
+                        return Err("REST parameter object exceeds 32 KiB".into());
+                    }
+                    params = Some(parsed);
+                },
+                _ => return Err("REST request permits unique source, script, token, params fields only".into()),
+            }
+            reader.space();
+            match reader.advance() {
+                Some(b'}') => break,
+                Some(b',') => { reader.space(); },
+                _ => return Err("REST request expected comma or closing brace".into()),
+            }
+        }
+    }
+    reader.space();
+    if reader.peek().is_some() { return Err("trailing bytes in REST request".into()); }
+    if source.is_some() == script.is_some() {
+        return Err("REST request must supply exactly one of source or script".into());
+    }
+    Ok(RestRequest { source, script, token, params: params.unwrap_or_default() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rest_request_supports_file_or_inline_queries_and_typed_params() {
+        let req = parse_rest_request(
+            br#"{"source":"users get id where id == $id","params":{"id":7,"q":"a; DROP table"}}"#
+        ).unwrap();
+        assert_eq!(req.source.as_deref(), Some("users get id where id == $id"));
+        assert!(req.script.is_none());
+        assert!(req.token.is_none());
+        assert_eq!(req.params.get("id"), Some(&Value::Int(7)));
+        let req = parse_rest_request(
+            br#"{"params":{"a":{"kind":"decimal","value":"1.250000"}},"script":"users.noeqr"}"#
+        ).unwrap();
+        assert_eq!(req.script.as_deref(), Some("users.noeqr"));
+        assert_eq!(req.params.get("a"), Some(&Value::Decimal(Decimal::parse("1.25").unwrap())));
+    }
+    #[test]
+    fn rest_request_rejects_traversal_duplicates_and_invalid_bindings() {
+        for bad in [
+            r#"{"script":"../secret.noeqr"}"#,
+            r#"{"script":"schema.noe"}"#,
+            r#"{"script":"users.noeqr","source":"users get id"}"#,
+            r#"{"source":"users get id","source":"users get owner"}"#,
+            r#"{"source":"users get id","params":{"p":1,"p":2}}"#,
+            r#"{"source":"users get id","params":{"p":1e20}}"#,
+            r#"{"source":"users get id","params":[]}"#,
+            r#"{"source":"users get id","token":"too-short"}"#,
+            r#"{"source":"users get id","token":"01234567890123456789012345678901","token":"01234567890123456789012345678901"}"#,
+            r#"{"source":"users get id",}"#,
+            r#"{}"#,
+        ] {
+            assert!(parse_rest_request(bad.as_bytes()).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn noesql_web_string_bindings_preserve_sql_like_input() {

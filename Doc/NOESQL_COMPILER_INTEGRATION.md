@@ -2,11 +2,11 @@
 
 ## Verified source ownership
 
-Noqeri owns compiler semantics in `Compiler/selfhost/` and exposes `stage2CompileToNir` from `Compiler/selfhost/main.nqr`. Existing `Database/storage.nqr` declares operating-system functions for handles, locks, WAL and fsync. NoeSQL owns its `.noe` frontend and typed `NoeIrPlan` schema.
+Noqeri owns compiler semantics in `Compiler/selfhost/` and exposes `stage2CompileToNir` from `Compiler/selfhost/main.nqr`. Existing `Database/storage.nqr` declares operating-system functions for handles, locks, WAL and fsync. NoeSQL owns its `.noeqr` frontend and typed `NoeIrPlan` schema.
 
 ## Proposed linking sequence (NOT integrated today)
 
-1. Parse a `.noe` module into a validated AST, resolve table/column identifiers and named parameters.
+1. Parse a `.noeqr` module into a validated AST, resolve table/column identifiers and named parameters.
 2. Type check against a catalog version; lower to `NoeIrPlan` and exact projection indices.
 3. Generate a typed Noqeri `.nqr` adapter that imports `noesql_api.nqr`; never splice user values into text-based queries.
 4. Resolve `NoeQueryContext` with authenticated tenant principal, resource budget, and schema version.
@@ -25,4 +25,4 @@ The native NoeSQL AST parser/lowerer, build target integration, host storage pro
 
 ## Release gates
 
-Build stage1→stage2→stage3 compiler; compile all native .nqr modules and their native tests; compile a real `.noe` CRUD application into executable output; run correct isolated/durable transactions and live concurrent stress tests; compare workloads against SQLite on identical hardware. No performance or >8/10 production rating is warranted until then.
+Build stage1→stage2→stage3 compiler; compile all native .nqr modules and their native tests; compile a real `.noeqr` CRUD application into executable output; run correct isolated/durable transactions and live concurrent stress tests; compare workloads against SQLite on identical hardware. No performance or >8/10 production rating is warranted until then.

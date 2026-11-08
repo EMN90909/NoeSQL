@@ -1,0 +1,18 @@
+// Noqeri native client wrapper for the NoeSQL loopback REST gateway.
+// Source is .noqeri (the application language), NOT a .noeqr query script.
+// Import API verified against Noqeri main Lib/std/http/client.noqeri.
+// The caller supplies a complete JSON body including a trusted local token.
+// Never interpolate arbitrary unescaped strings into that JSON body.
+// Compiler-to-native HTTP test qualification is pending.
+module examples.noeqr_http_client
+import "std/http/client"
+
+export function noesql_post_json(endpoint: string, jsonBody: string): string {
+    let handle = http_client_json_post(endpoint, jsonBody, 30000 as i64)
+    if handle < 0 as isize { return "" }
+    let status = http_client_status(handle as usize)
+    let response = http_client_body(handle as usize)
+    http_client_close(handle as usize)
+    if !http_client_success(status) { return "" }
+    return response
+}
