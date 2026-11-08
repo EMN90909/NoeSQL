@@ -2,7 +2,7 @@
 
 **Status:** executable *subset* for the reference implementation at `Runtime/noesql-reference.mjs`. Not the final production language grammar. The independent Noqeri scanner at `Database/noesql_lexer.nqr` recognizes the same lexical categories but has not passed Stage-2 binary verification. The broader NoeSQL roadmap in `Doc/NOESQL_IMPLEMENTATION_STATUS.md` is not part of this grammar's currently executable semantics.
 
-A NoeSQL script is `.noe`; `.nqr` remains Noqeri source. Experimental `.nqd` stores database *data*, not executable Noqeri source. `.nqo` remains compiled Noqeri object/web output. NoeSQL statements do not become Noqeri `.nqr` grammar productions until an actual compiler integration passes conformance.
+A NoeSQL query or schema script is `.noeqr`; Noqeri application source is `.noqeri` (legacy `.nqr` may occur in older documentation). Durable database data is `.noedb` (NQDB0003 or explicit legacy NQDB0002), not script source. Legacy `.noe` script filenames must be renamed to `.noeqr` for current file-based tools.
 
 ```ebnf
 unit          = { separator | declaration, boundary | statement, boundary } ;
