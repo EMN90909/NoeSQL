@@ -8,7 +8,7 @@ The **reference `.noedb` path now uses native Zig NQDB0002/NQTX0002 page and WAL
 
 - **Compiler:** preserve the normal Noqeri-authored `Compiler/selfhost/*.nqr` path; do not reintroduce C++ into the normal build. Retain the archival C++ stage-0 seed and do NOT claim self-hosting until `Doc/SELF_HOSTING.md` Stage-2/Stage-3 proof succeeds on actual compiled artifacts. `project.nqr` currently says 1.0.0, but a manifest version is not a release-qualification certificate.
 - **Naming:** NoeSQL is the intended native Noqeri database language/engine. The existing `Database/noqeridb.nqr` implementation has primitive integer-key map behavior and does not yet implement relational storage or transactions. Renaming it today without a migration would hide incompatibilities; compatibility and migration must be explicit.
-- **Extensions:** `.nqr` Noqeri source, `.noe` NoeSQL scripts, `.nqo` compiled/web output, `.nqd` database data/embedded storage, `.nqdb` legacy database naming pending a versioned migration. Experimental reference `.nqd` data here is NOT compatible with a future native page/WAL format.
+- **Extensions:** `.nqr` Noqeri source, `.noeqr` NoeSQL scripts, `.nqo` compiled/web output, `.nqd` database data/embedded storage, `.nqdb` legacy database naming pending a versioned migration. Experimental reference `.nqd` data here is NOT compatible with a future native page/WAL format.
 - **Adapters:** SQLite and PostgreSQL will be optional backends via parameterized, type-checked adapters, not runtime requirements for NoeSQL. No drivers are shipped in this increment; no compatibility is claimed.
 
 ## Tested experimental increment
@@ -25,7 +25,7 @@ From the repository root with Node.js 20+:
 
 ```sh
 node --test tests/noesql-reference.test.mjs tests/noesql-store.test.mjs
-node Runtime/noesql-cli.mjs run /tmp/school.nqd tests/school.noe
+node Runtime/noesql-cli.mjs run /tmp/school.nqd tests/school.noeqr
 node Runtime/noesql-cli.mjs query /tmp/school.nqd adults '{"minAge":20}'
 ```
 
@@ -50,7 +50,7 @@ source-independent plans, version checks and explicit predicate operators. The
 native executor is a bounded, supplied-buffer kernel: primitive int/bool/text
 values, in-memory insert/scans/projections/updates/deletes, staging of mutations,
 required and unique-field validation. The native row codec defines `NROW` ROW1
-little-endian records. It does **not** yet execute parsed `.noe` scripts, resolve
+little-endian records. It does **not** yet execute parsed `.noeqr` scripts, resolve
 relationships, implement composite indexes, sort/group/join, or persist records
 through the native runtime. The native WAL module encodes/validates NoeSQL
 NWAL v1 frames and committed full-image recovery using a required external
