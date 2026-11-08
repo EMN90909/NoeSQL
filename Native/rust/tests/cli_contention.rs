@@ -52,7 +52,7 @@ fn multiple_independent_writers_do_not_lose_committed_rows() {
     const EXPECTED: usize = WRITERS * RECORDS_PER_WRITER;
 
     let path = fixture_path();
-    let schema = path.with_extension("schema.noe");
+    let schema = path.with_extension("schema.noeqr");
     cleanup(&path);
     fs::write(
         &schema,
