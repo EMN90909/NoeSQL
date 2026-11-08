@@ -34,7 +34,10 @@ scripts directory (0700) and 0600 script files, and a strong secret.
     export NOESQL_API_TOKEN="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
     noesql serve /private/data/app.noedb 8087 --scripts-root /private/scripts
 
-The HTTP listener binds only 127.0.0.1, never a public network address. Do
+The HTTP listener binds only 127.0.0.1, never a public network address.
+The request parser rejects foreign Host headers (DNS rebinding defense); only
+127.0.0.1 and localhost, with optional valid port, are accepted. This does
+NOT make the listener suitable for public network exposure. Do
 not expose this endpoint outside a trusted local application. All routes except
 GET /health require the token. Standard clients send Authorization:
 Bearer [secret]. No CORS or cookie authentication is enabled; browser Origin
@@ -94,12 +97,20 @@ the generation before retrying**.
 ## Test without GitHub Actions
 
     make test-noeqr-rest-local
+    NOQERI_REPO=/absolute/path/to/Noqeri make test-noeqr-noqeri-api-local
 
 This builds and runs Rust parser/server tests and a real separate-process
 REST integration fixture: v3 schema creation, .noeqr CLI, HTTP bearer/body
 tokens, prepared values including injection-like text, read-only enforcement,
 DDL denial, private script lookup and persisted generations.
 No GitHub Actions, Node, JavaScript or mock database implementation.
+
+The static API compatibility gate checks the current Noqeri source's
+`Lib/std/http/client.noqeri` exports (`http_client_json_post`, status,
+body and close), the NoeSQL native client example's import and usage,
+and refuses any remaining `.noe` script files inside NoeSQL. It does not
+compile Noqeri or issue an HTTP request; the separate runtime test checks
+real HTTP/1.1 behavior without GitHub Actions.
 
 The Noqeri noesqlHost* native source-level extern link is separate from
 this REST integration. The full production exit gates (power loss, ENOSPC,
