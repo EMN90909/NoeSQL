@@ -131,7 +131,7 @@ make stage2-chain \
 ## Canonical formats
 
 - Noqeri source: `.noqeri`
-- NoeSQL script source: `.noe`
+- NoeSQL script source: `.noeqr`
 - canonical database storage: `.noedb`
 - Zig page format: `NQDB0002`
 - Zig WAL framing: `NQTX0002`
@@ -189,9 +189,9 @@ cargo build --manifest-path Native/rust/Cargo.toml --features zig-pager
 Then:
 
 ```sh
-noesql check tests/school.noe
+noesql check tests/school.noeqr
 noesql check-db scratch.noedb
-noesql run scratch.noedb tests/school.noe
+noesql run scratch.noedb tests/school.noeqr
 noesql query scratch.noedb 'users get id,name sort id'
 ```
 
