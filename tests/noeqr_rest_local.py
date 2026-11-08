@@ -138,6 +138,27 @@ with tempfile.TemporaryDirectory(prefix="noesql-noeqr-http-") as home:
             {"source": "people get id", "script": "../wrong.noeqr"}, token=TOKEN)[0] == 400
         assert request("POST", "/v1/query",
             {"source": "people get id"}, token=TOKEN, content_type="text/plain")[0] == 415
+        # Raw HTTP regression: reject ambiguous message framing, browser
+        # Origin requests and chunked transfer before executing any source.
+        def raw_status(wire):
+            with socket.create_connection(("127.0.0.1", port), timeout=3) as conn:
+                conn.sendall(wire.encode("ascii"))
+                conn.shutdown(socket.SHUT_WR)
+                line = conn.recv(4096).split(b"\r\n", 1)[0].decode("ascii")
+                return int(line.split(" ")[1])
+        assert raw_status(
+            "POST /v1/query HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Content-Length: 0\r\nContent-Length: 0\r\n\r\n"
+        ) == 400
+        assert raw_status(
+            "POST /v1/query HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Transfer-Encoding: chunked\r\n\r\n"
+        ) == 400
+        assert raw_status(
+            "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Origin: https://untrusted.example\r\n"
+            "Authorization: Bearer " + TOKEN + "\r\n\r\n"
+        ) == 403
         assert "generation=" in cli("v3-check", db)
     finally:
         server.terminate()
