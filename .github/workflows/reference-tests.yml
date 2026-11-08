@@ -53,6 +53,9 @@ jobs:
       - name: Rust reference/runtime tests
         run: cargo test --locked --manifest-path Native/rust/Cargo.toml --all-targets
 
+      - name: Verify v3 COW storage and destructive vacuum with real CLI
+        run: make test-v3-vacuum-local
+
       - name: Zig WAL/page/index corruption and recovery tests
         run: zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out test -Doptimize=Debug
 
