@@ -776,10 +776,22 @@ pub fn vacuum(_path: &Path, _apply: bool) -> V3Result<VacuumStats> {
     Err(invalid("v3 maintenance currently requires Linux"))
 }
 
+// Row mutations report their affected count. Catalog/schema changes do not,
+// so inspect nested atomic blocks rather than treating every atomic wrapper
+// as a durable mutation. This avoids rewriting snapshots for empty blocks,
+// read-only blocks and updates/deletes that match no rows.
+fn has_catalog_mutation(statements: &[Statement]) -> bool {
+    statements.iter().any(|statement| match statement {
+        Statement::Database(_) | Statement::Table(_, _) | Statement::AlterAdd(_, _) |
+        Statement::Index { .. } | Statement::Query { .. } => true,
+        Statement::Atomic(body) => has_catalog_mutation(body),
+        Statement::Get(_) | Statement::Add(_, _) | Statement::Set(_, _, _) |
+        Statement::Delete(_, _) => false,
+    })
+}
+
 fn material_change_possible(statements: &[Statement], affected: usize) -> bool {
-    affected != 0 || statements.iter().any(|statement| !matches!(
-        statement, Statement::Get(_) | Statement::Set(_, _, _) | Statement::Delete(_, _)
-    ))
+    affected != 0 || has_catalog_mutation(statements)
 }
 
 fn execute_internal(
@@ -1366,6 +1378,47 @@ mod tests {
         assert_eq!(snapshot(&target).unwrap().generation, 2);
         cleanup(&target);
     }
+    #[test]
+    fn empty_and_nested_noop_atomic_do_not_publish_generations() {
+        let target = path("atomic-noop");
+        create_new(&target, &db()).unwrap();
+        let original_head = read_head(&target).unwrap();
+        let original_files = fs::read_dir(versions(&target)).unwrap().count();
+
+        for statement in [
+            "atomic { }",
+            "atomic { entries get id where id == 1; entries get id where id == 999; }",
+            "atomic { entries where id == 999 set owner = 9; entries where id == 999 delete; }",
+            "atomic { atomic { entries where id == 999 delete; }; }",
+        ] {
+            let report = execute(&target, statement, &Params::new()).unwrap();
+            assert_eq!(report.affected, 0, "no-op should not modify rows: {statement}");
+            assert_eq!(snapshot(&target).unwrap().generation, 1,
+                "no-op advanced generation: {statement}");
+        }
+
+        let (generation, report) = execute_if_generation(
+            &target, 1, "atomic { atomic { entries where id == 999 delete; }; }",
+            &Params::new()
+        ).unwrap();
+        assert_eq!(generation, 1);
+        assert_eq!(report.affected, 0);
+        let unchanged_head = read_head(&target).unwrap();
+        assert_eq!(unchanged_head.filename, original_head.filename);
+        assert_eq!(fs::read_dir(versions(&target)).unwrap().count(), original_files);
+
+        // Catalog mutations return affected=0 but must still be published,
+        // including when nested inside an atomic block.
+        let schema = execute(&target,
+            "atomic { atomic { table extras { id:int key auto }; }; }",
+            &Params::new()).unwrap();
+        assert_eq!(schema.affected, 0);
+        let after_schema = snapshot(&target).unwrap();
+        assert_eq!(after_schema.generation, 2);
+        assert!(after_schema.query("extras get id", &Params::new()).unwrap().rows.is_empty());
+        cleanup(&target);
+    }
+
     #[test]
     fn late_failure_on_private_mutation_does_not_publish() {
         let target = path("uncommitted");

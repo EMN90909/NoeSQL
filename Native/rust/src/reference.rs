@@ -686,7 +686,9 @@ impl Database {
             if let Statement::Get(select) = statement {
                 let current = self.select(select, params)?;
                 report.affected += current.affected;
-                if !current.rows.is_empty() { report.rows = current.rows; }
+                // Each read replaces the previous read result, including an
+                // empty result set. Otherwise a later empty GET leaks stale rows.
+                report.rows = current.rows;
             }
         }
         Ok(report)
@@ -741,9 +743,26 @@ impl Database {
         ))
     }
 
+    // The report contains the *last executed GET*, including zero rows.
+    // Mutations do not produce query rows, and nested atomic blocks can
+    // themselves contain GET statements.
+    fn contains_get(statement: &Statement) -> bool {
+        match statement {
+            Statement::Get(_) => true,
+            Statement::Atomic(body) => body.iter().any(Self::contains_get),
+            _ => false,
+        }
+    }
+
     fn execute_many(&mut self, statements: &[Statement], params: &Params) -> Result<ExecutionReport, ReferenceError> {
         let mut report = ExecutionReport::default();
-        for statement in statements { let current = self.execute_one(statement, params)?; report.affected += current.affected; if !current.rows.is_empty() { report.rows = current.rows; } }
+        for statement in statements {
+            let current = self.execute_one(statement, params)?;
+            report.affected += current.affected;
+            if Self::contains_get(statement) {
+                report.rows = current.rows;
+            }
+        }
         Ok(report)
     }
     fn execute_one(&mut self, statement: &Statement, params: &Params) -> Result<ExecutionReport, ReferenceError> {
@@ -1337,6 +1356,46 @@ pub fn rows_json(rows: &[Row]) -> String {
 mod tests {
     use super::*;
     fn params() -> Params { Params::new() }
+
+    #[test]
+    fn last_read_only_get_wins_even_when_it_matches_no_rows() {
+        let mut db = Database::default();
+        db.execute("table items { id:int key auto\\n value:int required }\\nitems add {value:10}", &params()).unwrap();
+        let parsed = parse("items get id where id == 1; items get id where id == 999").unwrap();
+        let snapshot = db.query_parsed(&parsed, &params()).unwrap();
+        assert!(snapshot.rows.is_empty(), "empty final GET must discard earlier results");
+        assert_eq!(snapshot.affected, 0);
+        let via_execute = db.execute_parsed(&parsed, &params()).unwrap();
+        assert!(via_execute.rows.is_empty());
+        let reversed = db.execute("items get id where id == 999; items get id where id == 1", &params()).unwrap();
+        assert_eq!(reversed.rows.len(), 1);
+    }
+
+    #[test]
+    fn nested_atomic_get_does_not_leak_rows_from_earlier_get() {
+        let mut db = Database::default();
+        db.execute("table items { id:int key auto\\n value:int required }\\nitems add {value:10}", &params()).unwrap();
+        let report = db.execute(
+            "items get id where id == 1; atomic { items get id where id == 999; }",
+            &params(),
+        ).unwrap();
+        assert!(report.rows.is_empty());
+
+        let mixed = db.execute(
+            "atomic { items add {value:20}; atomic { items get id where id == 2; items get id where id == 999; }; }",
+            &params(),
+        ).unwrap();
+        assert_eq!(mixed.affected, 1, "writes must still accumulate affected rows");
+        assert!(mixed.rows.is_empty(), "nested empty GET must replace earlier rows");
+        assert_eq!(db.execute("items get id", &params()).unwrap().rows.len(), 2);
+
+        // A trailing write has no result set and must not erase the last GET.
+        let trailing_write = db.execute(
+            "items get id where id == 1; items where id == 999 delete",
+            &params(),
+        ).unwrap();
+        assert_eq!(trailing_write.rows.len(), 1);
+    }
 
     #[test]
     fn crud_constraints_and_atomic_rollback() {
