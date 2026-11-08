@@ -28,6 +28,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
         .root_module = pages_library_module,
     });
+    pages_library.bundle_compiler_rt = true;
     b.installArtifact(pages_library);
 
     const tests = b.addTest(.{ .root_module = bridge });
