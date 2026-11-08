@@ -5,4 +5,3 @@ table contacts {
   name: text required unique
   city: text
 }
-index by_name on contacts(name)
