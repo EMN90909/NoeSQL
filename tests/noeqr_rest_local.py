@@ -55,10 +55,8 @@ with tempfile.TemporaryDirectory(prefix="noesql-noeqr-http-") as home:
     legacy.write_text("people get id", encoding="utf-8")
 
     assert "ok:" in cli("check", schema)
-    assert "only" in cli("check", legacy, success=False).lower() or \
-           ".noeqr" in cli("check", legacy, success=False)
+    assert ".noeqr" in cli("check", legacy, success=False)
     assert "NQDB0003 created" in cli("v3-create", db, schema)
-    assert "Ada" in cli("query-file", db, query, success=False) or True
     # query-file intentionally requires values for named placeholders; use a
     # parameterless standalone file for CLI verification.
     (scripts / "all.noeqr").write_text(
@@ -135,9 +133,7 @@ with tempfile.TemporaryDirectory(prefix="noesql-noeqr-http-") as home:
         assert request("POST", "/v1/execute",
             {"token": TOKEN, "script": "migration.noeqr"})[0] == 403
         assert request("POST", "/v1/query",
-            {"source": "people get id", "token": "not-authorized"})[0] == 400 or \
-            request("POST", "/v1/query",
-                {"source": "people get id", "token": "not-authorized"})[0] == 401
+            {"source": "people get id", "token": "not-authorized"})[0] == 401
         assert request("POST", "/v1/query",
             {"source": "people get id", "script": "../wrong.noeqr"}, token=TOKEN)[0] == 400
         assert request("POST", "/v1/query",
