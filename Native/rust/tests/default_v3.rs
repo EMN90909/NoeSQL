@@ -27,7 +27,7 @@ fn normal_commands_create_v3_and_keep_v2_explicit() {
     let backup = fixture("backup");
     let old = fixture("v2");
     cleanup(&db); cleanup(&backup); cleanup(&old);
-    let file = db.with_extension("noe");
+    let file = db.with_extension("noeqr");
     fs::write(&file, "table things { id:int key auto\n value:int required }\nthings add {value:4}").unwrap();
     command(&["run", db.to_str().unwrap(), file.to_str().unwrap()], true);
     assert_eq!(&fs::read(&db).unwrap()[..8], b"NQDB0003");
