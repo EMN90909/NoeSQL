@@ -227,6 +227,7 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, Reply> {
     let mut content_type = None;
     let mut origin = false;
     let mut host = false;
+    let mut host_value: Option<String> = None;
     for (i, line) in lines.enumerate() {
         if i >= 48 || line.starts_with(' ') || line.starts_with('\t') {
             return Err(Reply::error(400, "bad_headers", "too many or folded headers"));
@@ -240,7 +241,10 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, Reply> {
             return Err(Reply::error(400, "bad_headers", "invalid header field"));
         }
         match name.to_ascii_lowercase().as_str() {
-            "host" if !host => host = true,
+            "host" if !host => {
+                host = true;
+                host_value = Some(value.to_ascii_lowercase());
+            },
             "host" => return Err(Reply::error(400, "bad_headers", "duplicate Host")),
             "content-length" => {
                 if length.is_some() || value.is_empty() ||
@@ -267,6 +271,24 @@ fn read_request(stream: &mut TcpStream) -> Result<Request, Reply> {
         }
     }
     if !host { return Err(Reply::error(400, "bad_headers", "Host required")); }
+    // The service is deliberately an IPv4 loopback endpoint. Reject Host
+    // values that let an unrelated DNS origin name the local database; this
+    // is defense in depth against DNS rebinding and reverse-proxy mistakes.
+    // Native Noqeri std.http.client sends a normal IPv4 loopback Host.
+    let host_value = host_value.as_deref().unwrap_or("");
+    let approved_host = ["127.0.0.1", "localhost"].iter().any(|hostname| {
+        host_value == *hostname ||
+        host_value.strip_prefix(hostname).is_some_and(|port| {
+            port.strip_prefix(':').is_some_and(|port| {
+                !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) &&
+                port.parse::<u16>().is_ok_and(|number| number > 0)
+            })
+        })
+    });
+    if !approved_host {
+        return Err(Reply::error(400, "invalid_host",
+            "REST Host must be IPv4 loopback or localhost"));
+    }
     let body_length = if method == "POST" {
         length.ok_or_else(|| Reply::error(411, "length_required", "POST requires Content-Length"))?
     } else {

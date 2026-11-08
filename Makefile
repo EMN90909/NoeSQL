@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local test-noeqr-rest-local no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local test-noeqr-rest-local test-noeqr-noqeri-api-local no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -78,6 +78,13 @@ test-noeqr-rest-local: no-js no-c-family
 	cargo test --locked --manifest-path Native/rust/Cargo.toml --lib tests::only_noeqr_script_extension_is_accepted
 	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
 	python3 tests/noeqr_rest_local.py "$(CURDIR)/Native/rust/target/release/noesql"
+
+# Static offline Noqeri native HTTP API compatibility: no compiler or Actions.
+# Use the same Noqeri checkout that the native Noqeri application compiles.
+test-noeqr-noqeri-api-local: no-js no-c-family
+	@test -n "$(NOQERI_REPO)" && test -f "$(NOQERI_REPO)/Lib/std/http/client.noqeri" || \
+		(echo "Set NOQERI_REPO=/absolute/path/to/Noqeri" >&2; exit 2)
+	python3 scripts/check_noeqr_noqeri_http.py "$(NOQERI_REPO)"
 
 # Three independent Rust↔Zig executions; the Zig ABI test binary itself
 # exercises 96 write/reopen/checkpoint cycles and corruption rejection cases.

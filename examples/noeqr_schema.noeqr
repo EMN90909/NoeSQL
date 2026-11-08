@@ -1,0 +1,7 @@
+// NoeSQL schema file: run locally with noesql v3-create or schema-file.
+// DDL is intentionally forbidden through the HTTP /v1/execute endpoint.
+table contacts {
+  id: int key auto
+  name: text required unique
+  city: text
+}

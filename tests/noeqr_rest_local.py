@@ -146,6 +146,20 @@ with tempfile.TemporaryDirectory(prefix="noesql-noeqr-http-") as home:
                 conn.shutdown(socket.SHUT_WR)
                 line = conn.recv(4096).split(b"\r\n", 1)[0].decode("ascii")
                 return int(line.split(" ")[1])
+        # DNS rebinding and arbitrary virtual Host values must not gain
+        # access to the private local REST service, even with a valid token.
+        assert raw_status(
+            "GET /v1/status HTTP/1.1\r\nHost: database.attacker.example\r\n"
+            "Authorization: Bearer " + TOKEN + "\r\n\r\n"
+        ) == 400
+        assert raw_status(
+            "GET /v1/status HTTP/1.1\r\nHost: localhost:99999\r\n"
+            "Authorization: Bearer " + TOKEN + "\r\n\r\n"
+        ) == 400
+        assert raw_status(
+            "GET /v1/status HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            "Authorization: Bearer " + TOKEN + "\r\n\r\n"
+        ) == 200
         assert raw_status(
             "POST /v1/query HTTP/1.1\r\nHost: 127.0.0.1\r\n"
             "Content-Length: 0\r\nContent-Length: 0\r\n\r\n"

@@ -1,0 +1,4 @@
+// NoeSQL read-only query script for local query-file or authorized REST.
+// REST: {"script":"noeqr_query.noeqr","params":{"name":"Ada"}}
+// Place reviewed scripts in an owner-private --scripts-root directory.
+contacts get id,name,city where name == $name sort id
