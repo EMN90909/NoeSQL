@@ -2,6 +2,7 @@ pub mod codec;
 pub mod decimal;
 mod hash256;
 pub mod v3_store;
+mod v3_data_pages;
 mod session_bindings;
 #[cfg(target_os = "linux")]
 pub mod session_provider;

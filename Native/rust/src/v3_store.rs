@@ -7,11 +7,14 @@
 //! generations remain accessible to readers that pinned them. Cross-process
 //! flock serializes writers and allows concurrent snapshot acquisition.
 //!
-//! This does not reclaim old generations, store per-row pages, use the existing
-//! Zig allocator, or upgrade in place. These limitations block release as the
-//! default NoeSQL engine until crash/fault/soak qualification is executed.
+//! New generations reuse identical content-addressed 4 KiB data blocks,
+//! but the logical relational snapshot is still fully serialized on writes.
+//! Historic files are only reclaimed by explicit verified vacuum, and this
+//! is not yet row-level storage, a WAL allocator or production qualification.
 use crate::codec;
 use crate::v3_bplus_disk;
+use crate::v3_data_pages;
+use std::collections::BTreeSet;
 use crate::hash256::{sha256, Sha256};
 use crate::reference::{parse, Database, ExecutionReport, Params, Statement};
 use std::fs::{self, File, OpenOptions};
@@ -24,6 +27,7 @@ pub const PAGE_SIZE: usize = 4096;
 pub const MAX_PAGES: usize = 65_536;
 const HEAD_MAGIC: &[u8; 8] = b"NQDB0003";
 const PAGE_MAGIC: &[u8; 8] = b"NQPG0003";
+const PAGE_MAGIC_COW: &[u8; 8] = b"NQPG0004";
 const HEAD_LEN: usize = 168;
 const PAGE_HEADER: usize = 64;
 const FRAME_LEN: usize = PAGE_SIZE + 32;
@@ -260,12 +264,16 @@ fn write_generation_delta(
     if pages.checked_add(index_pages).is_none_or(|count| count > MAX_PAGES) {
         return Err(invalid("combined data and index manifest exceed 65,536 pages"));
     }
+    // Hash, persist and sync immutable data blocks BEFORE any generation or
+    // HEAD that references them is written. Identical blocks are never rewritten.
+    let data_refs = v3_data_pages::publish_pages(&versions(path), &payload).map_err(invalid)?;
+    if data_refs.len() != pages { return Err(invalid("data page reference count mismatch")); }
     let filename = format!("{generation}-{}.pages", unique_nonce()?);
     let name = versions(path).join(&filename);
     let mut file = private_create_file(&name)?;
     let mut outer = Sha256::default();
     let mut header = [0u8; PAGE_HEADER];
-    header[..8].copy_from_slice(PAGE_MAGIC);
+    header[..8].copy_from_slice(PAGE_MAGIC_COW);
     header[8..16].copy_from_slice(&generation.to_le_bytes());
     header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
     header[24..28].copy_from_slice(&(pages as u32).to_le_bytes());
@@ -275,7 +283,12 @@ fn write_generation_delta(
     header[32..64].copy_from_slice(&sha256(&payload));
     file.write_all(&header)?;
     outer.update(&header);
-    for chunk in payload.chunks(PAGE_SIZE).chain(index_manifest.chunks(PAGE_SIZE)) {
+    for digest in &data_refs {
+        file.write_all(digest)?;
+        outer.update(digest);
+    }
+    // The B+ manifest remains inline and checksummed as in NQPG0003.
+    for chunk in index_manifest.chunks(PAGE_SIZE) {
         let mut block = [0u8; PAGE_SIZE];
         block[..chunk.len()].copy_from_slice(chunk);
         let digest = sha256(&block);
@@ -298,18 +311,23 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
     let mut reader = read_regular_file(&version)?;
     let mut header = [0u8; PAGE_HEADER];
     reader.read_exact(&mut header)?;
+    let cow = &header[..8] == PAGE_MAGIC_COW;
+    if !cow && &header[..8] != PAGE_MAGIC {
+        return Err(invalid("unrecognized v3 generation physical format"));
+    }
     let index_pages = u32::from_le_bytes(header[28..32].try_into().unwrap()) as usize;
     if (head.pages as usize).checked_add(index_pages)
         .is_none_or(|count| count > MAX_PAGES) {
         return Err(invalid("index manifest page count exceeds v3 capacity"));
     }
+    let data_bytes = if cow { head.pages as u64 * 32 }
+        else { head.pages as u64 * FRAME_LEN as u64 };
     let expected_size = PAGE_HEADER as u64 +
-        (head.pages as u64 + index_pages as u64) * FRAME_LEN as u64;
+        data_bytes + index_pages as u64 * FRAME_LEN as u64;
     if reader.metadata()?.len() != expected_size {
         return Err(invalid("generation file length mismatch"));
     }
-    if &header[..8] != PAGE_MAGIC ||
-       u64::from_le_bytes(header[8..16].try_into().unwrap()) != head.generation ||
+    if u64::from_le_bytes(header[8..16].try_into().unwrap()) != head.generation ||
        u64::from_le_bytes(header[16..24].try_into().unwrap()) != head.bytes ||
        u32::from_le_bytes(header[24..28].try_into().unwrap()) != head.pages {
         return Err(invalid("generation header mismatch"));
@@ -320,11 +338,19 @@ fn read_generation(path: &Path, head: &Head) -> V3Result<Database> {
     for page_index in 0..head.pages as usize {
         let mut block = [0u8; PAGE_SIZE];
         let mut digest = [0u8;32];
-        reader.read_exact(&mut block)?;
-        reader.read_exact(&mut digest)?;
-        if sha256(&block) != digest { return Err(invalid(format!("page {page_index} SHA256 mismatch"))); }
-        outer.update(&block);
-        outer.update(&digest);
+        if cow {
+            reader.read_exact(&mut digest)?;
+            block = v3_data_pages::read_page(&versions(path), &digest).map_err(invalid)?;
+            outer.update(&digest);
+        } else {
+            reader.read_exact(&mut block)?;
+            reader.read_exact(&mut digest)?;
+            if sha256(&block) != digest {
+                return Err(invalid(format!("page {page_index} SHA256 mismatch")));
+            }
+            outer.update(&block);
+            outer.update(&digest);
+        }
         let n = (head.bytes as usize - payload.len()).min(PAGE_SIZE);
         if block[n..].iter().any(|c| *c != 0) {
             return Err(invalid("noncanonical final-page padding"));
@@ -369,8 +395,12 @@ fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>
     if pages > MAX_PAGES || (head.pages as usize).saturating_add(pages) > MAX_PAGES {
         return Err(invalid("committed index manifest exceeds v3 capacity"));
     }
+    let cow = &header[..8] == PAGE_MAGIC_COW;
+    if !cow && &header[..8] != PAGE_MAGIC {
+        return Err(invalid("unrecognized committed generation physical format"));
+    }
     file.seek(SeekFrom::Start(PAGE_HEADER as u64 +
-        head.pages as u64 * FRAME_LEN as u64))?;
+        head.pages as u64 * if cow { 32 } else { FRAME_LEN as u64 }))?;
     let mut manifest = Vec::with_capacity(pages * PAGE_SIZE);
     for _ in 0..pages {
         let mut page = [0u8; PAGE_SIZE];
@@ -383,6 +413,25 @@ fn committed_index_manifest(path: &Path, head: &Head) -> V3Result<Option<Vec<u8>
         manifest.extend_from_slice(&page);
     }
     Ok(Some(manifest))
+}
+
+/// Return authenticated data-page hashes referenced by the CURRENT HEAD.
+/// The caller must first fully verify read_generation() under the v3 lock.
+fn committed_data_reachability(path: &Path, head: &Head) -> V3Result<BTreeSet<String>> {
+    let mut file = read_regular_file(&versions(path).join(&head.filename))?;
+    let mut header = [0u8; PAGE_HEADER];
+    file.read_exact(&mut header)?;
+    let mut live = BTreeSet::new();
+    if &header[..8] == PAGE_MAGIC { return Ok(live); }
+    if &header[..8] != PAGE_MAGIC_COW {
+        return Err(invalid("unrecognized generation data-page layout"));
+    }
+    for _ in 0..head.pages {
+        let mut digest = [0u8; 32];
+        file.read_exact(&mut digest)?;
+        live.insert(v3_data_pages::digest_hex(&digest));
+    }
+    Ok(live)
 }
 
 fn stage_head(path: &Path, head: &Head, initial: bool) -> V3Result<()> {
@@ -458,6 +507,8 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
     let mut files = Vec::new();
     let mut index_pages = Vec::new();
     let mut index_directory = None;
+    let mut data_pages = Vec::new();
+    let mut data_directory = None;
     for entry in fs::read_dir(&directory)? {
         let entry = entry?;
         let type_info = entry.file_type()?;
@@ -478,6 +529,21 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
                 index_pages.push(page.path());
             }
             index_directory = Some(entry.path());
+        } else if type_info.is_dir() && file_name == "data-pages" {
+            if data_directory.is_some() {
+                return Err(invalid("duplicate data-pages directory"));
+            }
+            for page in fs::read_dir(entry.path())? {
+                let page = page?;
+                if !page.file_type()?.is_file() ||
+                    !page.file_name().to_str().is_some_and(|name|
+                        v3_data_pages::safe_blob_name(name) ||
+                        v3_data_pages::safe_temp_name(name)) {
+                    return Err(invalid("unexpected file in unpublished data-pages directory"));
+                }
+                data_pages.push(page.path());
+            }
+            data_directory = Some(entry.path());
         } else if type_info.is_file() && safe_generation_filename(file_name) {
             files.push(entry.path());
         } else {
@@ -488,9 +554,14 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
     // can never reach this cleanup path because HEAD existence is checked.
     for file in files { fs::remove_file(file)?; }
     for page in index_pages { fs::remove_file(page)?; }
+    for page in data_pages { fs::remove_file(page)?; }
     if let Some(index_directory) = index_directory {
         sync_directory(&index_directory)?;
         fs::remove_dir(index_directory)?;
+    }
+    if let Some(data_directory) = data_directory {
+        sync_directory(&data_directory)?;
+        fs::remove_dir(data_directory)?;
     }
     sync_directory(&directory)?;
     fs::remove_dir(&directory)?;
@@ -545,12 +616,14 @@ pub(crate) fn verify_embedded_private_store(path: &Path) -> V3Result<()> {
         (lock_name(path), false),
         (versions(path), true),
         (versions(path).join("index-pages"), true),
+        (versions(path).join("data-pages"), true),
     ];
     for (entry, is_directory) in entries {
         let metadata = match fs::symlink_metadata(&entry) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound &&
-                entry.file_name().is_some_and(|name| name == "index-pages") => continue,
+                entry.file_name().is_some_and(|name| name == "index-pages" ||
+                    name == "data-pages") => continue,
             Err(error) => return Err(V3Error::Io(error)),
         };
         let ty = metadata.file_type();
@@ -625,6 +698,8 @@ pub struct VacuumStats {
     pub obsolete_generations: usize,
     pub obsolete_index_blobs: usize,
     pub orphan_index_temporaries: usize,
+    pub obsolete_data_blobs: usize,
+    pub orphan_data_temporaries: usize,
     pub reclaimable_bytes: u64,
     pub applied: bool,
 }
@@ -683,15 +758,20 @@ pub fn vacuum(path: &Path, apply: bool) -> V3Result<VacuumStats> {
     let live_indexes = v3_bplus_disk::committed_blob_reachability(
         &versions(path), manifest.as_deref()
     ).map_err(invalid)?;
+    let live_data = committed_data_reachability(path, &head)?;
 
     let directory = versions(path);
     let index_directory = directory.join("index-pages");
+    let data_directory = directory.join("data-pages");
     let mut obsolete_generations = Vec::<PathBuf>::new();
     let mut obsolete_indexes = Vec::<PathBuf>::new();
     let mut old_temporaries = Vec::<PathBuf>::new();
+    let mut obsolete_data = Vec::<PathBuf>::new();
+    let mut old_data_temporaries = Vec::<PathBuf>::new();
     let mut stats = VacuumStats { generation: head.generation, ..Default::default() };
     let mut checked = 0usize;
     let mut found_indexes = false;
+    let mut found_data = false;
 
     for entry in fs::read_dir(&directory)? {
         let entry = entry?;
@@ -702,6 +782,8 @@ pub fn vacuum(path: &Path, apply: bool) -> V3Result<VacuumStats> {
             .ok_or_else(|| invalid("invalid UTF-8 v3 maintenance entry"))?.to_string();
         if name == "index-pages" && kind.is_dir() {
             found_indexes = true;
+        } else if name == "data-pages" && kind.is_dir() {
+            found_data = true;
         } else if name == head.filename && kind.is_file() {
             // Never remove the authenticated committed generation.
         } else if kind.is_file() && safe_generation_filename(&name) {
@@ -752,9 +834,45 @@ pub fn vacuum(path: &Path, apply: bool) -> V3Result<VacuumStats> {
             }
         }
     }
+    if !found_data && !live_data.is_empty() {
+        return Err(invalid("committed data page graph has no data-pages directory"));
+    }
+    if found_data {
+        for entry in fs::read_dir(&data_directory)? {
+            let entry = entry?;
+            checked += 1;
+            if checked > 1_000_000 {
+                return Err(invalid("v3 maintenance directory exceeds 1,000,000 entries"));
+            }
+            if !entry.file_type()?.is_file() {
+                return Err(invalid("v3 data sidecar is not a regular file"));
+            }
+            let name = entry.file_name().to_str()
+                .ok_or_else(|| invalid("invalid UTF-8 data page filename"))?.to_string();
+            if v3_data_pages::safe_blob_name(&name) {
+                if !live_data.contains(&name[..64]) {
+                    let len = fs::symlink_metadata(entry.path())?.len();
+                    stats.reclaimable_bytes = stats.reclaimable_bytes.checked_add(len)
+                        .ok_or_else(|| invalid("maintenance reclaimed-size counter overflow"))?;
+                    obsolete_data.push(entry.path());
+                }
+            } else if v3_data_pages::safe_temp_name(&name) {
+                let len = fs::symlink_metadata(entry.path())?.len();
+                stats.reclaimable_bytes = stats.reclaimable_bytes.checked_add(len)
+                    .ok_or_else(|| invalid("maintenance reclaimed-size counter overflow"))?;
+                old_data_temporaries.push(entry.path());
+            } else {
+                return Err(invalid(format!(
+                    "unrecognized or unsafe data maintenance entry: {name}"
+                )));
+            }
+        }
+    }
     stats.obsolete_generations = obsolete_generations.len();
     stats.obsolete_index_blobs = obsolete_indexes.len();
     stats.orphan_index_temporaries = old_temporaries.len();
+    stats.obsolete_data_blobs = obsolete_data.len();
+    stats.orphan_data_temporaries = old_data_temporaries.len();
 
     if apply {
         // Important order: no reachable index page can be removed, and old
@@ -765,6 +883,10 @@ pub fn vacuum(path: &Path, apply: bool) -> V3Result<VacuumStats> {
             fs::remove_file(path)?;
         }
         if found_indexes { sync_directory(&index_directory)?; }
+        for path in obsolete_data.into_iter().chain(old_data_temporaries) {
+            fs::remove_file(path)?;
+        }
+        if found_data { sync_directory(&data_directory)?; }
         stats.applied = true;
     }
     Ok(stats)

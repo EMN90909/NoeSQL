@@ -338,11 +338,12 @@ fn main() {
             let result = noesql_runtime::v3_store::vacuum(&target, apply)
                 .unwrap_or_else(|error| fail(error));
             println!(
-                "NQDB0003 vacuum {}: generation={} obsolete_generations={} obsolete_index_blobs={} orphan_index_temporaries={} reclaimable_bytes={}",
+                "NQDB0003 vacuum {}: generation={} obsolete_generations={} obsolete_index_blobs={} orphan_index_temporaries={} obsolete_data_blobs={} orphan_data_temporaries={} reclaimable_bytes={}",
                 if result.applied { "APPLIED" } else { "DRY-RUN" },
                 result.generation, result.obsolete_generations,
                 result.obsolete_index_blobs,
-                result.orphan_index_temporaries, result.reclaimable_bytes,
+                result.orphan_index_temporaries, result.obsolete_data_blobs,
+                result.orphan_data_temporaries, result.reclaimable_bytes,
             );
             if !apply {
                 println!("no files removed; explicitly pass --apply --discard-history to reclaim");
