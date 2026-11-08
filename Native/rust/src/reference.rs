@@ -1433,7 +1433,7 @@ ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
     #[test]
     fn explicit_single_column_integer_index_matches_scan_after_updates() {
         let mut db = Database::default();
-        db.execute("table readings { id:int key auto\\n owner:int required\\n level:int required }\\nindex owner_idx on readings(owner)", &params()).unwrap();
+        db.execute("table readings { id:int key auto\n owner:int required\n level:int required }\nindex owner_idx on readings(owner)", &params()).unwrap();
         for i in 0..550 {
             db.execute(&format!("readings add {{owner:{},level:{i}}}", i % 6), &params()).unwrap();
         }
@@ -1456,7 +1456,7 @@ ledger add {category:"b",amount:-0.000003}"#, &params()).unwrap();
     #[test]
     fn explain_reports_index_only_when_same_access_path_is_eligible() {
         let mut db = Database::default();
-        db.execute("table log { id:int key auto\\n category:int required }\\nindex by_category on log(category)", &params()).unwrap();
+        db.execute("table log { id:int key auto\n category:int required }\nindex by_category on log(category)", &params()).unwrap();
         let pk = db.explain("log get id where id == 7", &params()).unwrap();
         assert!(pk.contains("access=memory_bplus(id)"), "{pk}");
         let secondary = db.explain("log get id where category == 4", &params()).unwrap();

@@ -203,9 +203,7 @@ fn decode_head(bytes: &[u8]) -> V3Result<Head> {
     }
     let filename = std::str::from_utf8(&bytes[40..40+name_len])
         .map_err(|_| invalid("head contains invalid generation name"))?.to_string();
-    if !filename.ends_with(".pages") ||
-       !filename.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'.') ||
-       filename.starts_with('.') || filename.contains("..") {
+    if !safe_obsolete_generation_name(&filename) {
         return Err(invalid("unsafe version filename"));
     }
     let mut digest = [0u8; 32];
@@ -478,10 +476,7 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
                 index_pages.push(page.path());
             }
             index_directory = Some(entry.path());
-        } else if type_info.is_file() &&
-           file_name.ends_with(".pages") &&
-           file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') &&
-           !file_name.starts_with('.') && !file_name.contains("..") {
+        } else if type_info.is_file() && safe_obsolete_generation_name(file_name) {
             files.push(entry.path());
         } else {
             return Err(invalid("unexpected entry in unpublished versions directory"));
