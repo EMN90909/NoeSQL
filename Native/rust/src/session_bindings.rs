@@ -239,6 +239,9 @@ pub(crate) fn parse_bindings(bytes: &[u8]) -> Result<Params, String> {
 pub(crate) struct RestRequest {
     pub source: Option<String>,
     pub script: Option<String>,
+    // Noqeri's current HTTP client lacks arbitrary header support.
+    // Body token is permitted only by our loopback REST server.
+    pub token: Option<String>,
     pub params: Params,
 }
 
@@ -251,6 +254,7 @@ pub(crate) fn parse_rest_request(bytes: &[u8]) -> Result<RestRequest, String> {
     reader.space();
     let mut source: Option<String> = None;
     let mut script: Option<String> = None;
+    let mut token: Option<String> = None;
     let mut params: Option<Params> = None;
     if reader.peek() == Some(b'}') { reader.advance(); }
     else {
@@ -278,6 +282,14 @@ pub(crate) fn parse_rest_request(bytes: &[u8]) -> Result<RestRequest, String> {
                     }
                     script = Some(name);
                 },
+                "token" if token.is_none() => {
+                    let secret = reader.json_string()?;
+                    if secret.len() < 32 || secret.len() > 256 ||
+                       !secret.bytes().all(|c| (33..=126).contains(&c)) {
+                        return Err("REST body token must be 32..256 printable ASCII bytes".into());
+                    }
+                    token = Some(secret);
+                },
                 "params" if params.is_none() => {
                     let before = reader.pos;
                     let parsed = parse_params(&mut reader)?;
@@ -286,7 +298,7 @@ pub(crate) fn parse_rest_request(bytes: &[u8]) -> Result<RestRequest, String> {
                     }
                     params = Some(parsed);
                 },
-                _ => return Err("REST request permits unique source, script, params fields only".into()),
+                _ => return Err("REST request permits unique source, script, token, params fields only".into()),
             }
             reader.space();
             match reader.advance() {
@@ -301,7 +313,7 @@ pub(crate) fn parse_rest_request(bytes: &[u8]) -> Result<RestRequest, String> {
     if source.is_some() == script.is_some() {
         return Err("REST request must supply exactly one of source or script".into());
     }
-    Ok(RestRequest { source, script, params: params.unwrap_or_default() })
+    Ok(RestRequest { source, script, token, params: params.unwrap_or_default() })
 }
 
 #[cfg(test)]
@@ -315,6 +327,7 @@ mod tests {
         ).unwrap();
         assert_eq!(req.source.as_deref(), Some("users get id where id == $id"));
         assert!(req.script.is_none());
+        assert!(req.token.is_none());
         assert_eq!(req.params.get("id"), Some(&Value::Int(7)));
         let req = parse_rest_request(
             br#"{"params":{"a":{"kind":"decimal","value":"1.250000"}},"script":"users.noeqr"}"#
@@ -332,6 +345,8 @@ mod tests {
             r#"{"source":"users get id","params":{"p":1,"p":2}}"#,
             r#"{"source":"users get id","params":{"p":1e20}}"#,
             r#"{"source":"users get id","params":[]}"#,
+            r#"{"source":"users get id","token":"too-short"}"#,
+            r#"{"source":"users get id","token":"01234567890123456789012345678901","token":"01234567890123456789012345678901"}"#,
             r#"{"source":"users get id",}"#,
             r#"{}"#,
         ] {
