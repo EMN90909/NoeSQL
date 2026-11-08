@@ -5,6 +5,8 @@ pub mod v3_store;
 mod session_bindings;
 #[cfg(target_os = "linux")]
 pub mod session_provider;
+#[cfg(target_os = "linux")]
+pub mod rest_server;
 #[cfg(feature = "zig-pager")]
 pub mod relational_abi;
 pub mod planner;
@@ -63,6 +65,7 @@ pub enum Error {
     SourceTooLarge(usize),
     OutputTooLarge(usize),
     InvalidDatabasePath,
+    InvalidScriptPath,
     Provider(i32),
     Io(String),
     Codec(String),
@@ -77,6 +80,7 @@ impl fmt::Display for Error {
             Self::SourceTooLarge(n) => write!(f, "NoeSQL source is {n} bytes; limit is {MAX_SOURCE_BYTES}"),
             Self::OutputTooLarge(n) => write!(f, "provider output exceeded {n} bytes"),
             Self::InvalidDatabasePath => write!(f, "database path must be a non-empty .noedb path without NUL bytes"),
+            Self::InvalidScriptPath => write!(f, "NoeSQL schema and query scripts must be .noeqr files (legacy .noe is not accepted)"),
             Self::Provider(code) => write!(f, "NoeSQL provider returned status {code}"),
             Self::Io(message) => write!(f, "I/O error: {message}"),
             Self::Codec(message) => write!(f, "snapshot codec error: {message}"),
@@ -211,7 +215,16 @@ impl Drop for Statement<'_, '_> {
 /// Read no more than one byte past the source limit. fs::read would allocate
 /// the entire file before checking the 1 MiB input limit, allowing a local
 /// oversized script to exhaust host memory.
+pub fn validate_script_path(path: &Path) -> Result<(), Error> {
+    if path.as_os_str().is_empty() || path.extension() != Some(OsStr::new("noeqr")) ||
+       path.to_str().is_none_or(|p| p.as_bytes().contains(&0)) {
+        return Err(Error::InvalidScriptPath);
+    }
+    Ok(())
+}
+
 pub fn read_source(path: impl AsRef<Path>) -> Result<String, Error> {
+    validate_script_path(path.as_ref())?;
     let file = fs::File::open(path.as_ref()).map_err(|e| Error::Io(e.to_string()))?;
     let mut bytes = Vec::new();
     file.take(MAX_SOURCE_BYTES as u64 + 1)
@@ -288,11 +301,19 @@ mod tests {
         assert!(matches!(validate_source(&source), Err(Error::SourceTooLarge(_))));
     }
     #[test]
+    fn only_noeqr_script_extension_is_accepted() {
+        assert!(validate_script_path(Path::new("users.noeqr")).is_ok());
+        assert_eq!(validate_script_path(Path::new("users.noe")), Err(Error::InvalidScriptPath));
+        assert_eq!(validate_script_path(Path::new("users.noqeri")), Err(Error::InvalidScriptPath));
+        assert_eq!(validate_script_path(Path::new("store.noedb")), Err(Error::InvalidScriptPath));
+    }
+
+    #[test]
     fn reading_a_large_source_is_bounded_before_allocation() {
         use std::time::{SystemTime, UNIX_EPOCH};
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "noesql-source-limit-{}-{nonce}.noe", std::process::id()
+            "noesql-source-limit-{}-{nonce}.noeqr", std::process::id()
         ));
         let file = fs::OpenOptions::new().write(true).create_new(true).open(&path).unwrap();
         file.set_len((MAX_SOURCE_BYTES + 8192) as u64).unwrap();
