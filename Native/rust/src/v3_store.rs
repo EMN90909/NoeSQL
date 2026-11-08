@@ -203,9 +203,7 @@ fn decode_head(bytes: &[u8]) -> V3Result<Head> {
     }
     let filename = std::str::from_utf8(&bytes[40..40+name_len])
         .map_err(|_| invalid("head contains invalid generation name"))?.to_string();
-    if !filename.ends_with(".pages") ||
-       !filename.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'.') ||
-       filename.starts_with('.') || filename.contains("..") {
+    if !safe_generation_filename(&filename) {
         return Err(invalid("unsafe version filename"));
     }
     let mut digest = [0u8; 32];
@@ -213,7 +211,9 @@ fn decode_head(bytes: &[u8]) -> V3Result<Head> {
     Ok(Head { generation, bytes: length, pages, filename, digest })
 }
 fn encode_head(head: &Head) -> V3Result<[u8; HEAD_LEN]> {
-    if head.filename.len() > 64 { return Err(invalid("version file name too long")); }
+    if !safe_generation_filename(&head.filename) {
+        return Err(invalid("unsafe version filename"));
+    }
     let mut bytes = [0u8; HEAD_LEN];
     bytes[..8].copy_from_slice(HEAD_MAGIC);
     bytes[8..12].copy_from_slice(&3u32.to_le_bytes());
@@ -478,10 +478,7 @@ pub fn discard_unpublished(path: &Path) -> V3Result<()> {
                 index_pages.push(page.path());
             }
             index_directory = Some(entry.path());
-        } else if type_info.is_file() &&
-           file_name.ends_with(".pages") &&
-           file_name.bytes().all(|c| c.is_ascii_digit() || c == b'-' || c == b'.') &&
-           !file_name.starts_with('.') && !file_name.contains("..") {
+        } else if type_info.is_file() && safe_generation_filename(file_name) {
             files.push(entry.path());
         } else {
             return Err(invalid("unexpected entry in unpublished versions directory"));
@@ -632,14 +629,23 @@ pub struct VacuumStats {
     pub applied: bool,
 }
 
-fn safe_obsolete_generation_name(name: &str) -> bool {
+// Generated names are <generation>-<pid>-<epoch-nanoseconds>.pages.
+// Validate the numeric stem separately from the fixed alphabetic suffix.
+// The same fail-closed policy applies to HEAD reads and maintenance cleanup.
+fn safe_generation_filename(name: &str) -> bool {
+    if name.len() > 64 { return false; }
     let Some(stem) = name.strip_suffix(".pages") else { return false; };
     let mut parts = stem.split('-');
     let (Some(generation), Some(process), Some(nonce), None) =
         (parts.next(), parts.next(), parts.next(), parts.next()) else {
         return false;
     };
-    generation.parse::<u64>().is_ok() &&
+    if ![generation, process, nonce].iter()
+        .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return false;
+    }
+    matches!(generation.parse::<u64>(), Ok(value) if value > 0) &&
         process.parse::<u32>().is_ok() && nonce.parse::<u128>().is_ok()
 }
 
@@ -698,7 +704,7 @@ pub fn vacuum(path: &Path, apply: bool) -> V3Result<VacuumStats> {
             found_indexes = true;
         } else if name == head.filename && kind.is_file() {
             // Never remove the authenticated committed generation.
-        } else if kind.is_file() && safe_obsolete_generation_name(&name) {
+        } else if kind.is_file() && safe_generation_filename(&name) {
             let metadata = fs::symlink_metadata(entry.path())?;
             let len = metadata.len();
             stats.reclaimable_bytes = stats.reclaimable_bytes.checked_add(len)
@@ -1004,6 +1010,63 @@ mod tests {
         let mut db = Database::default();
         db.execute("table entries { id:int key auto\n owner:int required }\nentries add {owner:1}", &Params::new()).unwrap();
         db
+    }
+
+    #[test]
+    fn generation_filename_validation_accepts_real_names_not_traversal() {
+        for name in ["1-123-456.pages", "42-1-1700000000000000000.pages"] {
+            assert!(safe_generation_filename(name), "valid generated name: {name}");
+        }
+        for name in [
+            ".pages", "0-2-3.pages", "1-2-3.pages.bak",
+            "../1-2-3.pages", "1-2/3.pages", "1-2-+3.pages",
+            "1-2-3..pages", "1-2-3.pages/evil", "1-2-3.PAGES",
+            "1-2-999999999999999999999999999999999999999999.pages",
+        ] {
+            assert!(!safe_generation_filename(name), "unsafe name: {name}");
+        }
+
+        let safe = Head {
+            generation: 1, bytes: 1, pages: 1,
+            filename: "1-123-456.pages".into(), digest: [0; 32],
+        };
+        let encoded = encode_head(&safe).unwrap();
+        assert_eq!(decode_head(&encoded).unwrap().filename, safe.filename);
+        let mut unsafe_head = safe.clone();
+        unsafe_head.filename = "../escape.pages".into();
+        assert!(encode_head(&unsafe_head).is_err());
+
+        // Recalculate checksum to exercise the filename guard, not SHA failure.
+        let attack = b"1-2/3.pages";
+        let mut tampered = encoded;
+        tampered[36..40].copy_from_slice(&(attack.len() as u32).to_le_bytes());
+        tampered[40..104].fill(0);
+        tampered[40..40 + attack.len()].copy_from_slice(attack);
+        let checksum = sha256(&tampered[..136]);
+        tampered[136..168].copy_from_slice(&checksum);
+        assert!(matches!(decode_head(&tampered), Err(V3Error::Invalid(_))));
+    }
+
+    #[test]
+    fn persisted_v3_reopen_inspect_and_logical_backup_roundtrip() {
+        let original = path("persistence-original");
+        let backup = path("persistence-backup");
+        create_new(&original, &db()).unwrap();
+        execute(&original, "entries add {owner:2}", &Params::new()).unwrap();
+        let (generation, bytes, pages) = inspect(&original).unwrap();
+        assert_eq!(generation, 2);
+        assert!(bytes > 0 && pages > 0);
+        let cold = snapshot(&original).unwrap();
+        let original_rows = cold.query("entries get owner sort owner", &Params::new())
+            .unwrap().rows;
+        assert_eq!(original_rows.len(), 2);
+        create_new(&backup, cold.database()).unwrap();
+        assert_eq!(inspect(&backup).unwrap().0, 1);
+        let restored_rows = snapshot(&backup).unwrap()
+            .query("entries get owner sort owner", &Params::new()).unwrap().rows;
+        assert_eq!(restored_rows, original_rows);
+        cleanup(&original);
+        cleanup(&backup);
     }
 
     #[cfg(target_os = "linux")]

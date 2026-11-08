@@ -704,20 +704,20 @@ mod tests {
             db.execute(&format!("logs add {{owner:{},score:{i}}}", i%60), &Params::new()).unwrap();
         }
         let previous = write_index_manifest(&base, &db).unwrap();
-        let before = fs::read_dir(index_dir(&base)).unwrap().count();
+        let page_count_before = fs::read_dir(index_dir(&base)).unwrap().count();
         let statements = parse("logs where id == 10 set score = 999").unwrap();
         let before = capture_dirty_indexes(&db, &statements).unwrap();
         db.execute("logs where id == 10 set score = 999", &Params::new()).unwrap();
         let reused = write_index_manifest_delta(&base, &db, Some(&previous), &statements, Some(&before)).unwrap();
         assert_eq!(previous, reused, "non-indexed update changed index roots");
-        assert_eq!(fs::read_dir(index_dir(&base)).unwrap().count(), before);
+        assert_eq!(fs::read_dir(index_dir(&base)).unwrap().count(), page_count_before);
         load_index_manifest(&base, &db, &reused).unwrap();
         let changed = parse("logs add {owner:3,score:999}").unwrap();
         let before = capture_dirty_indexes(&db, &changed).unwrap();
         db.execute("logs add {owner:3,score:999}", &Params::new()).unwrap();
         let next = write_index_manifest_delta(&base, &db, Some(&reused), &changed, Some(&before)).unwrap();
         assert_ne!(reused, next);
-        assert!(fs::read_dir(index_dir(&base)).unwrap().count() > before);
+        assert!(fs::read_dir(index_dir(&base)).unwrap().count() > page_count_before);
         load_index_manifest(&base, &db, &next).unwrap();
         let _ = fs::remove_dir_all(base);
     }
