@@ -27,8 +27,13 @@ fn normal_commands_create_v3_and_keep_v2_explicit() {
     let backup = fixture("backup");
     let old = fixture("v2");
     cleanup(&db); cleanup(&backup); cleanup(&old);
-    let file = db.with_extension("noe");
+    let file = db.with_extension("noeqr");
     fs::write(&file, "table things { id:int key auto\n value:int required }\nthings add {value:4}").unwrap();
+    // The legacy .noe extension must fail without creating a database.
+    let legacy_script = db.with_extension("noe");
+    fs::copy(&file, &legacy_script).unwrap();
+    command(&["run", db.to_str().unwrap(), legacy_script.to_str().unwrap()], false);
+    assert!(!db.exists());
     command(&["run", db.to_str().unwrap(), file.to_str().unwrap()], true);
     assert_eq!(&fs::read(&db).unwrap()[..8], b"NQDB0003");
     command(&["query", db.to_str().unwrap(), "things add {value:8}"], true);
@@ -47,4 +52,5 @@ fn normal_commands_create_v3_and_keep_v2_explicit() {
     assert_eq!(fs::read(&old).unwrap(), b"NQDB0002");
     cleanup(&db); cleanup(&backup); cleanup(&old);
     let _ = fs::remove_file(file);
+    let _ = fs::remove_file(legacy_script);
 }
