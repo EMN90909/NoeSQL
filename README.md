@@ -4,6 +4,31 @@ NoeSQL is Noethric's native database language and storage engine project for Noq
 
 > Development status: the NoeSQL source stack is now **Noqeri + Rust + Zig**. C and C++ source have been removed from this repository. Noqeri owns database semantics and native execution modules, Rust owns the safe host/runtime and ABI orchestration, and Zig owns durable page/WAL/index storage.
 
+## New .noeqr scripts and local REST API (experimental)
+
+**.noeqr is now the canonical file extension** for NoeSQL query, schema,
+migration and DML scripts. Existing .noe files are rejected by the Rust CLI
+file loaders; rename reviewed source scripts (not .noedb data files).
+Noqeri application source remains .noqeri. The database format remains .noedb.
+
+Use noesql query-file for read-only query scripts, noesql schema-file
+for schema/index/named-query declarations, and noesql run for trusted
+mixed .noeqr batches. An optional native Rust HTTP/1.1 service uses the
+same v3 engine and strict typed parameter parser.
+
+    export NOESQL_API_TOKEN="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
+    noesql serve /private/data/app.noedb 8087 --scripts-root /private/scripts
+    make test-noeqr-rest-local
+
+POST /v1/query is read-only; POST /v1/execute is DML-only; GET /v1/status
+requires authorization. The listener is **127.0.0.1 only**, requires a strong
+token, refuses CORS/remote schema mutations and does not claim public TLS,
+persistent tenant authorization or production readiness. Noqeri's current
+std.http.client can call it with a JSON-body token on loopback.
+
+See [the .noeqr and REST integration guide](Doc/NOEQR_REST_API.md). No
+GitHub Actions are required for its local test target.
+
 ## Native stack
 
 - **Noqeri**: typed IR, policy/auth/limits, row semantics, relational executor modules, Stage-2 qualification code, and the native scalar decision bridge in `Database/*.noqeri`.
