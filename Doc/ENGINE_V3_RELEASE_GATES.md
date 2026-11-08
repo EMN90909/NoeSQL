@@ -1,5 +1,37 @@
 # NoeSQL hardening and v3 acceptance gates
 
+## November 2026: content-addressed physical data-page groundwork
+
+An opt-in, backward-readable NQPG0004 generation layout stores SHA-256 references
+to immutable 4 KiB physical relational-data blocks in each generation file.
+The actual blocks live in the private \`<db>.versions/data-pages/\` directory.
+Existing NQPG0003 inline generation files are accepted and a later mutation
+publishes NQPG0004 without rewriting or deleting the old generation.
+
+Physical page publication is write+fsync -> hardlink under digest -> directory
+fsync -> fsynced generation refs -> versions directory fsync -> atomic HEAD
+rename -> parent directory fsync. Existing digest blobs are verified rather
+than overwritten. The HEAD digest covers all data references, the logical
+payload digest, and the B+ manifest; read verifies each referenced data blob.
+A failed pre-publish mutation cannot change the committed HEAD. After a
+rename with failed directory sync the outcome remains CommitUncertain.
+
+The explicit offline \`v3-vacuum --apply --discard-history\` now also tracks
+and reclaims unreferenced physical-data blobs and failed-publication temps.
+It authenticates the live HEAD and data/index graphs, checks all directory
+entries before deleting anything, and fsyncs history removal *before*
+removing unreachable blobs. Existing snapshots already in memory remain
+readable. External readers that bypass NoeSQL's flock protocol must be
+stopped. Reclaimed old generation history cannot be used for rollback.
+
+**Still P0, not solved by this change:** the entire relational catalog and
+row data are still re-serialized in memory per write. A change that shifts
+the byte layout can still dirty many content-addressed pages. There is not
+yet per-row/record allocation, durable free-space bookkeeping, a data-page
+WAL, online compaction, nor crash/power-cut/disk-full certification. Do NOT
+mark the P0 incremental relational-storage gate complete from this work.
+
+
 Updated: 2026-10-26. **Do not ship this branch as production-ready.** It is a staged patch atop the prior concurrency fixes. Changes marked *prototype* are not wired to the live ABI.
 
 ## Current scope and demonstrated code changes

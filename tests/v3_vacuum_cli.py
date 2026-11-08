@@ -45,6 +45,9 @@ with tempfile.TemporaryDirectory(prefix="noesql-reclaim-test-") as home:
     for count in range(2, 13):
         assert "affected=1" in run("v3-exec", current, f"entries add {{owner:{count}}}")
     assert "generation=12" in run("v3-check", current)
+    data_dir = Path(str(current) + ".versions") / "data-pages"
+    physical_pages = list(data_dir.glob("*.bpd"))
+    assert physical_pages, "new NQPG0004 generations must publish data blobs"
     before = run("v3-query", current, "entries get id,owner sort id")
     assert before.count('"owner":') == 12, before
 
@@ -57,6 +60,7 @@ with tempfile.TemporaryDirectory(prefix="noesql-reclaim-test-") as home:
     plan = run("v3-vacuum", current)
     assert "DRY-RUN" in plan
     assert "obsolete_generations=11" in plan, plan
+    assert "obsolete_data_blobs=" in plan, plan
     assert "generation=12" in run("v3-check", current)
 
     # Any unexpected file must make the destructive command refuse
@@ -77,6 +81,8 @@ with tempfile.TemporaryDirectory(prefix="noesql-reclaim-test-") as home:
     second = run("v3-vacuum", current)
     assert "obsolete_generations=0" in second, second
     assert "obsolete_index_blobs=0" in second, second
+    assert "obsolete_data_blobs=0" in second, second
+    assert "orphan_data_temporaries=0" in second, second
 
     # A new generation can be published against the RECLAIMED index roots.
     run("v3-exec", current, "entries add {owner:13}")

@@ -1371,6 +1371,163 @@ mod tests {
         cleanup(&target);
     }
 
+
+    /// The physical page format is versioned within the existing v3 HEAD.
+    /// A database written before data-page dedup must remain readable, and
+    /// the next write must safely upgrade it to the immutable-reference format.
+    #[test]
+    fn legacy_inline_v3_generation_reopens_then_upgrades_to_data_references() {
+        let target = path("legacy-page-upgrade");
+        let initial = db();
+        create_new(&target, &initial).unwrap();
+        let original_head = read_head(&target).unwrap();
+        let payload = codec::encode(&initial).unwrap();
+        let index_manifest = committed_index_manifest(&target, &original_head)
+            .unwrap().unwrap();
+        let pages = payload.len().div_ceil(PAGE_SIZE);
+        let index_pages = index_manifest.len().div_ceil(PAGE_SIZE);
+        let mut header = [0u8; PAGE_HEADER];
+        header[..8].copy_from_slice(PAGE_MAGIC);
+        header[8..16].copy_from_slice(&original_head.generation.to_le_bytes());
+        header[16..24].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+        header[24..28].copy_from_slice(&(pages as u32).to_le_bytes());
+        header[28..32].copy_from_slice(&(index_pages as u32).to_le_bytes());
+        header[32..64].copy_from_slice(&sha256(&payload));
+        let mut hasher = Sha256::default();
+        hasher.update(&header);
+        let mut old_file = OpenOptions::new().write(true).truncate(true)
+            .open(versions(&target).join(&original_head.filename)).unwrap();
+        old_file.write_all(&header).unwrap();
+        for chunk in payload.chunks(PAGE_SIZE).chain(index_manifest.chunks(PAGE_SIZE)) {
+            let mut block = [0u8; PAGE_SIZE];
+            block[..chunk.len()].copy_from_slice(chunk);
+            let digest = sha256(&block);
+            old_file.write_all(&block).unwrap();
+            old_file.write_all(&digest).unwrap();
+            hasher.update(&block);
+            hasher.update(&digest);
+        }
+        old_file.sync_all().unwrap();
+        drop(old_file);
+        sync_directory(&versions(&target)).unwrap();
+        let mut legacy_head = original_head;
+        legacy_head.digest = hasher.finalize();
+        stage_head(&target, &legacy_head, false).unwrap();
+        assert_eq!(snapshot(&target).unwrap().query("entries get owner", &Params::new())
+            .unwrap().rows.len(), 1);
+
+        execute(&target, "entries add {owner:5}", &Params::new()).unwrap();
+        let next = read_head(&target).unwrap();
+        assert_eq!(next.generation, 2);
+        let raw = fs::read(versions(&target).join(next.filename)).unwrap();
+        assert_eq!(&raw[..8], PAGE_MAGIC_COW);
+        let reopened = snapshot(&target).unwrap();
+        assert_eq!(reopened.query("entries get owner sort id", &Params::new())
+            .unwrap().rows.len(), 2);
+        cleanup(&target);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn identical_data_pages_are_reused_and_vacuum_only_reclaims_unreachable_blobs() {
+        use std::collections::BTreeMap;
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-v3-data-cow-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = directory.join("data.noedb");
+        let mut original = Database::default();
+        original.execute("table archive { id:int key auto\n body:text required }\ntable counters { id:int key auto\n value:int required }",
+            &Params::new()).unwrap();
+        let mut seed = 0x12345678u32;
+        let mut body = String::with_capacity(PAGE_SIZE * 16);
+        for _ in 0..PAGE_SIZE * 16 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            body.push((b'a' + (seed % 26) as u8) as char);
+        }
+        let mut record = BTreeMap::new();
+        record.insert("id".into(), Value::Int(1));
+        record.insert("body".into(), Value::Text(body));
+        let archive = original.tables.get_mut("archive").unwrap();
+        archive.rows.push(record);
+        archive.next_auto = 2;
+        create_new(&target, &original).unwrap();
+        let old_snapshot = snapshot(&target).unwrap();
+        let data_dir = versions(&target).join("data-pages");
+        let before = fs::read_dir(&data_dir).unwrap().count();
+        assert!(before > 8, "expected multiple distinct physical data pages");
+        let first = read_head(&target).unwrap();
+        let physical = fs::metadata(versions(&target).join(&first.filename)).unwrap().len();
+        assert!(physical < first.bytes / 5,
+            "COW generation must contain refs instead of full snapshot frames");
+
+        execute(&target, "counters add {value:7}", &Params::new()).unwrap();
+        let after = fs::read_dir(&data_dir).unwrap().count();
+        assert!(after - before < before / 3,
+            "editing a different table unnecessarily rewrote most physical pages");
+        let new_head = read_head(&target).unwrap();
+        assert_eq!(new_head.generation, 2);
+        assert_eq!(snapshot(&target).unwrap().query("counters get value", &Params::new())
+            .unwrap().rows[0].get("value"), Some(&Value::Int(7)));
+
+        let plan = vacuum(&target, false).unwrap();
+        assert_eq!(plan.obsolete_generations, 1);
+        assert!(plan.obsolete_data_blobs > 0, "changed pages should become obsolete");
+        assert!(!plan.applied);
+        assert_eq!(fs::read_dir(&data_dir).unwrap().count(), after);
+        let applied = vacuum(&target, true).unwrap();
+        assert!(applied.applied);
+        assert_eq!(applied.obsolete_data_blobs, plan.obsolete_data_blobs);
+        assert_eq!(vacuum(&target, false).unwrap().obsolete_data_blobs, 0);
+        assert!(old_snapshot.query("counters get id", &Params::new()).unwrap().rows.is_empty());
+        assert_eq!(snapshot(&target).unwrap().query("counters get id", &Params::new())
+            .unwrap().rows.len(), 1);
+        execute(&target, "counters add {value:8}", &Params::new()).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 3);
+        cleanup(&target);
+        fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn vacuum_rejects_corrupt_and_unexpected_data_sidecars_before_any_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = std::env::temp_dir().join(format!(
+            "noesql-v3-data-failclosed-{}-{}", std::process::id(), unique_nonce().unwrap()
+        ));
+        fs::create_dir(&directory).unwrap();
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        let target = directory.join("data.noedb");
+        create_new(&target, &db()).unwrap();
+        let obsolete = read_head(&target).unwrap().filename;
+        execute(&target, "entries add {owner:2}", &Params::new()).unwrap();
+        let data_dir = versions(&target).join("data-pages");
+        let marker = data_dir.join("owner-backup.txt");
+        fs::write(&marker, b"preserve").unwrap();
+        assert!(vacuum(&target, true).is_err());
+        assert!(versions(&target).join(&obsolete).exists());
+        assert_eq!(fs::read(&marker).unwrap(), b"preserve");
+        fs::remove_file(&marker).unwrap();
+
+        let head = read_head(&target).unwrap();
+        let live = committed_data_reachability(&target, &head).unwrap();
+        let blob = data_dir.join(format!("{}.bpd", live.iter().next().unwrap()));
+        let old = fs::read(&blob).unwrap();
+        fs::write(&blob, b"CORRUPTED").unwrap();
+        assert!(snapshot(&target).is_err());
+        assert!(vacuum(&target, true).is_err());
+        assert!(versions(&target).join(&obsolete).exists());
+        fs::write(&blob, old).unwrap();
+        assert_eq!(snapshot(&target).unwrap().generation, 2);
+        assert!(vacuum(&target, true).unwrap().applied);
+        cleanup(&target);
+        fs::remove_dir(directory).unwrap();
+    }
+
     #[test]
     fn v3_cold_reopen_rejects_corruption_and_supports_large_page_count() {
         let target = path("cold");
