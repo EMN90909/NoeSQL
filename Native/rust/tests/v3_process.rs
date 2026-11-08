@@ -32,7 +32,7 @@ fn opt_in_v3_process_readers_and_writers_never_lose_committed_rows() {
     const PER_WRITER: usize = 8;
     const READERS: usize = 4;
     let path = temp("multi");
-    let schema = path.with_extension("schema.noe");
+    let schema = path.with_extension("schema.noeqr");
     cleanup(&path);
     fs::write(&schema, "table items { id:int key auto\n value:text required unique }").unwrap();
     cli(&["v3-create", path.to_str().unwrap(), schema.to_str().unwrap()]);
