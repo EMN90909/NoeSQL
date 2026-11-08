@@ -37,6 +37,9 @@ jobs:
       - name: Run native session validation
         run: bash scripts/verify-ecosystem-local.sh
 
+      - name: Test .noeqr REST API with real CLI
+        run: make test-noeqr-rest-local
+
       - name: Build Zig storage library
         run: zig build --build-file Native/zig/build.zig --prefix Native/zig/zig-out -Doptimize=ReleaseSafe
 
