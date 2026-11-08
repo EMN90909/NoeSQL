@@ -1,6 +1,6 @@
 AR ?= ar
 
-.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local test-noeqr-rest-local test-noeqr-noqeri-api-local no-js no-c-family clean
+.PHONY: test native native-chain stage2-chain test-zig test-rust test-rust-zig test-v3-fault-local stress benchmark-native-sqlite benchmark-parser-reads test-sqlite test-noqeri-framework-local test-v3-vacuum-local test-noeqr-rest-local test-noeqr-noqeri-api-local no-js no-c-family clean
 
 test: no-js no-c-family test-zig test-rust test-rust-zig
 
@@ -66,6 +66,12 @@ test-v3-vacuum-local: no-js no-c-family
 	cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
 	python3 tests/v3_vacuum_cli.py \
 		"$(CURDIR)/Native/rust/target/release/noesql"
+
+# Real Linux subprocess SIGKILL and per-file write-limit regressions.
+# This is not real power-loss, ENOSPC, or full release qualification.
+test-v3-fault-local: no-js no-c-family
+	@uname -s | grep -qx Linux || (echo "v3 fault tests require Linux" >&2; exit 2)
+	cargo test --locked --manifest-path Native/rust/Cargo.toml --test v3_fault_process
 
 # Real local NoeSQL CLI + IPv4 loopback HTTP/1.1 + NQDB0003 integration.
 # Includes .noeqr source, authenticated JSON binding, REST DML and rejection.

@@ -40,11 +40,13 @@ run() {
 }
 run make test
 run make stress
+run make test-v3-fault-local
 run make test-sqlite
 run make native-chain NOQERI_COMPILER="$NOQERI_COMPILER"
 run make stage2-chain NOQERI_REPO="$NOQERI_REPO" NOQERI_NQRI_VM="$NOQERI_NQRI_VM"
 run make test-noqeri-framework-local NOQERI_REPO="$NOQERI_REPO" NOQERI_WEB="$NOQERI_WEB"
 run make test-noeqr-rest-local
+run cargo build --locked --release --manifest-path Native/rust/Cargo.toml --bin noesql
 run python3 tests/v3_vacuum_cli.py "$PWD/Native/rust/target/release/noesql"
 run make benchmark-parser-reads
 run make benchmark-bplus
