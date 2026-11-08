@@ -7,8 +7,6 @@
 
 use noesql_runtime::reference::{Database, Params};
 use noesql_runtime::v3_store;
-use noesql_runtime::value::Value;
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,8 +30,6 @@ fn private_database(label: &str) -> (PathBuf, PathBuf) {
     ).unwrap();
     // A multi-page immutable relational snapshot makes interruption possible
     // during actual I/O, not just immediately after process startup.
-    let mut row = BTreeMap::new();
-    row.insert("id".into(), Value::Int(1));
     let mut seed = 0xcafe1234u32;
     let mut text = String::with_capacity(4096 * 24);
     for _ in 0..4096 * 24 {
@@ -42,10 +38,7 @@ fn private_database(label: &str) -> (PathBuf, PathBuf) {
         seed ^= seed << 5;
         text.push((b'a' + (seed % 26) as u8) as char);
     }
-    row.insert("body".into(), Value::Text(text));
-    let archive = initial.tables.get_mut("archive").unwrap();
-    archive.rows.push(row);
-    archive.next_auto = 2;
+    initial.execute(&format!("archive add {{body:\"{text}\"}}"), &Params::new()).unwrap();
     v3_store::create_new(&path, &initial).unwrap();
     (home, path)
 }
