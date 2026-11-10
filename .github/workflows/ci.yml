@@ -28,7 +28,7 @@ jobs:
         with:
           repository: EMN90909/Noqeri
           ref: main
-          path: .ci-noqeri
+          path: ${{ runner.temp }}/noqeri
 
       - name: Install Build Tools
         run: |
@@ -37,10 +37,10 @@ jobs:
 
       - name: Build Noqeri Stage-0 Compiler
         run: |
-          cmake -S .ci-noqeri -B .ci-noqeri-build -DCMAKE_BUILD_TYPE=Release
-          cmake --build .ci-noqeri-build --target noqeri --parallel $(nproc)
-          .ci-noqeri-build/noqeri version
-          .ci-noqeri-build/noqeri doctor .ci-noqeri
+          cmake -S ${{ runner.temp }}/noqeri -B ${{ runner.temp }}/noqeri-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build ${{ runner.temp }}/noqeri-build --target noqeri --parallel $(nproc)
+          ${{ runner.temp }}/noqeri-build/noqeri version
+          ${{ runner.temp }}/noqeri-build/noqeri doctor ${{ runner.temp }}/noqeri
 
       - name: Source Tree Invariant Checks (Zero JS, Zero C/C++, Zero Rust/Zig)
         run: |
@@ -48,12 +48,12 @@ jobs:
 
       - name: Execute NoeSQL Pure Noqeri Test Suite
         env:
-          NOQERI: ${{ github.workspace }}/.ci-noqeri-build/noqeri
+          NOQERI: ${{ runner.temp }}/noqeri-build/noqeri
         run: |
           make test
 
       - name: Run Standalone Executable Verification
         env:
-          NOQERI: ${{ github.workspace }}/.ci-noqeri-build/noqeri
+          NOQERI: ${{ runner.temp }}/noqeri-build/noqeri
         run: |
           make run

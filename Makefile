@@ -43,6 +43,8 @@ no-c-family:
 no-rust-zig:
 	@set -eu; found=$$(find . \
 		-path './.git' -prune -o \
+		-path './.ci-noqeri' -prune -o \
+		-path './.ci-noqeri-build' -prune -o \
 		-type f \( -name '*.rs' -o -name '*.zig' \) -print -quit); \
 	if [ -n "$$found" ]; then echo "Rust or Zig file remains in NoeSQL: $$found" >&2; exit 1; fi
 
