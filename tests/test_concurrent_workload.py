@@ -4,8 +4,8 @@ import subprocess
 import sys
 import time
 
-NOQERI_BIN = "/home/antigravity/EMN90909/Noqeri/build/noqeri"
-NOESQL_DIR = "/home/antigravity/EMN90909/NoeSQL"
+NOESQL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+NOQERI_BIN = os.environ.get("NOQERI", os.path.abspath(os.path.join(NOESQL_DIR, "..", "Noqeri", "build", "noqeri")))
 DB_PATH = os.path.join(NOESQL_DIR, "tmp_concurrent_db")
 LOCK_PATH = DB_PATH + ".lck"
 
