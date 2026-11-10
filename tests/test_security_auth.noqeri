@@ -1,4 +1,5 @@
 import "../Database/noesql_auth.noqeri"
+import "../Database/noesql_engine.noqeri"
 
 function assert_true(cond: bool, msg: string): void {
     if !cond {
@@ -13,6 +14,15 @@ function main(): void {
 
     let tenant1: u64 = 1001 as u64
     let tenant2: u64 = 2002 as u64
+
+    // Initialize secured database state
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "secure_vault")
+    let tIdx: isize = noeCreateTable(&db, "accounts")
+    assert_true(tIdx >= 0 as isize, "create accounts table")
+    noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, tIdx as usize, "owner", noeTypeText(), true, false, false, false, "")
+    noeAddField(&db, tIdx as usize, "balance", noeTypeInt(), true, false, false, false, "")
 
     // 1. Unauthenticated or disabled principal must always be denied
     let guest: NoePrincipal
@@ -39,15 +49,7 @@ function main(): void {
     reader.scope = tenant1
     reader.roles = noeRoleRead()
 
-    assert_true(noeOperationPermit(&reader, 1, tenant1), "reader permitted to SELECT in tenant 1")
-    assert_true(!noeOperationPermit(&reader, 2, tenant1), "reader DENIED INSERT")
-    assert_true(!noeOperationPermit(&reader, 3, tenant1), "reader DENIED UPDATE")
-    assert_true(!noeOperationPermit(&reader, 4, tenant1), "reader DENIED DELETE")
-
-    // 3. Multi-Tenant Isolation: Reader in Tenant 1 cannot access Tenant 2
-    assert_true(!noeOperationPermit(&reader, 1, tenant2), "Tenant 1 reader strictly BLOCKED from accessing Tenant 2 (multi-tenant boundary)")
-
-    // 4. Writer Principal in Tenant 1 with Combined Roles (Read + Insert + Update)
+    // 3. Writer Principal in Tenant 1 with Combined Roles (Read + Insert + Update)
     let writerRoles: u32 = noeRoleCombine(noeRoleRead(), noeRoleInsert())
     writerRoles = noeRoleCombine(writerRoles, noeRoleUpdate())
 
@@ -58,26 +60,77 @@ function main(): void {
     writer.scope = tenant1
     writer.roles = writerRoles
 
-    assert_true(noeOperationPermit(&writer, 1, tenant1), "writer permitted to SELECT")
-    assert_true(noeOperationPermit(&writer, 2, tenant1), "writer permitted to INSERT")
-    assert_true(noeOperationPermit(&writer, 3, tenant1), "writer permitted to UPDATE")
-    assert_true(!noeOperationPermit(&writer, 4, tenant1), "writer without DELETE role is DENIED DELETE")
+    // 4. Admin Principal in Tenant 1
+    let adminT1: NoePrincipal
+    adminT1.userId = 888 as u64
+    adminT1.authenticated = true
+    adminT1.disabled = false
+    adminT1.scope = tenant1
+    adminT1.roles = noeRoleAdmin()
 
     // 5. Admin Principal in Tenant 2
-    let admin: NoePrincipal
-    admin.userId = 999 as u64
-    admin.authenticated = true
-    admin.disabled = false
-    admin.scope = tenant2
-    admin.roles = noeRoleAdmin()
+    let adminT2: NoePrincipal
+    adminT2.userId = 999 as u64
+    adminT2.authenticated = true
+    adminT2.disabled = false
+    adminT2.scope = tenant2
+    adminT2.roles = noeRoleAdmin()
 
-    assert_true(noeOperationPermit(&admin, 1, tenant2), "admin permitted to SELECT in tenant 2")
-    assert_true(noeOperationPermit(&admin, 2, tenant2), "admin permitted to INSERT in tenant 2")
-    assert_true(noeOperationPermit(&admin, 3, tenant2), "admin permitted to UPDATE in tenant 2")
-    assert_true(noeOperationPermit(&admin, 4, tenant2), "admin permitted to DELETE in tenant 2")
+    // --- Database CRUD Operation Security Enforcement ---
 
-    // Tenant 2 admin cannot touch Tenant 1
-    assert_true(!noeOperationPermit(&admin, 1, tenant1), "Tenant 2 admin BLOCKED from Tenant 1 (strict scope confinement)")
+    let testRow: [NoeRowCell; 3]
+    testRow[0].isNull = true // auto id
+    testRow[1].isNull = false
+    testRow[1].textVal = "Alice"
+    testRow[2].isNull = false
+    testRow[2].intVal = 5000 as i64
+
+    // Test A: Unauthenticated guest cannot insert
+    let guestIns: isize = noeSecuredInsertRow(&db, &guest, tenant1, tIdx as usize, slice(testRow))
+    assert_true(guestIns == -401 as isize, "guest INSERT fails with 401 Unauthorized")
+
+    // Test B: Read-only principal cannot insert
+    let readerIns: isize = noeSecuredInsertRow(&db, &reader, tenant1, tIdx as usize, slice(testRow))
+    assert_true(readerIns == -403 as isize, "reader INSERT fails with 403 Forbidden")
+
+    // Test C: Writer in tenant 1 cannot insert into tenant 2
+    let crossTenantIns: isize = noeSecuredInsertRow(&db, &writer, tenant2, tIdx as usize, slice(testRow))
+    assert_true(crossTenantIns == -403 as isize, "writer cross-tenant INSERT blocked with 403")
+
+    // Test D: Writer in tenant 1 can insert into tenant 1
+    let writerIns: isize = noeSecuredInsertRow(&db, &writer, tenant1, tIdx as usize, slice(testRow))
+    assert_true(writerIns == 0 as isize, "writer INSERT in tenant 1 succeeds")
+    assert_true(db.tables[tIdx as usize].rowCount == 1 as usize, "row exists in table")
+
+    // Test E: Reader in tenant 1 can read cell in tenant 1
+    let cellRef: *NoeRowCell = noeSecuredSelectCell(&db, &reader, tenant1, tIdx as usize, 0 as usize, 2 as usize)
+    assert_true(cellRef != null, "reader SELECT succeeds")
+    assert_true(cellRef.intVal == 5000 as i64, "reader receives correct balance 5000")
+
+    // Test F: Tenant 2 admin cannot read tenant 1 data (multi-tenant confinement)
+    let crossRead: *NoeRowCell = noeSecuredSelectCell(&db, &adminT2, tenant1, tIdx as usize, 0 as usize, 2 as usize)
+    assert_true(crossRead == null, "cross-tenant SELECT strictly blocked (returns null)")
+
+    // Test G: Reader cannot update cell
+    let newBal: NoeRowCell
+    newBal.isNull = false
+    newBal.intVal = 9999 as i64
+    let readerUpd: isize = noeSecuredUpdateCell(&db, &reader, tenant1, tIdx as usize, 0 as usize, 2 as usize, newBal)
+    assert_true(readerUpd == -403 as isize, "reader UPDATE blocked with 403")
+
+    // Test H: Writer can update cell in tenant 1
+    let writerUpd: isize = noeSecuredUpdateCell(&db, &writer, tenant1, tIdx as usize, 0 as usize, 2 as usize, newBal)
+    assert_true(writerUpd == 0 as isize, "writer UPDATE succeeds")
+    assert_true(db.tables[tIdx as usize].cells[2].intVal == 9999 as i64, "balance updated to 9999")
+
+    // Test I: Writer cannot delete row (lacks DELETE role)
+    let writerDel: isize = noeSecuredDeleteRow(&db, &writer, tenant1, tIdx as usize, 0 as usize)
+    assert_true(writerDel == -403 as isize, "writer DELETE blocked with 403 (lacks delete role)")
+
+    // Test J: Tenant 1 Admin can delete row
+    let adminDel: isize = noeSecuredDeleteRow(&db, &adminT1, tenant1, tIdx as usize, 0 as usize)
+    assert_true(adminDel == 0 as isize, "admin DELETE succeeds")
+    assert_true(db.tables[tIdx as usize].rowCount == 0 as usize, "table now empty after authorized delete")
 
     print("Authentication, RBAC Authorization & Multi-Tenant Security: ALL PASSED")
 }

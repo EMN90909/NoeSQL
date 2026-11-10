@@ -83,7 +83,7 @@ function main(): void {
     assert_true(noeDbCheckV3(&db, dbPath) == 0 as isize, "clean base database validates")
 
     // Mutation 1: Corrupt Magic Bytes in generation pages file
-    let genFile: string = dbPath + "/versions/generation-fuzz_target.pages"
+    let genFile: string = dbPath + "/versions/generation-1.pages"
     let h: isize = file_open_replace(genFile)
     assert_true(h >= 0 as isize, "open gen file for corruption")
     // Write corrupted magic: "BADMAGIC"
@@ -91,9 +91,11 @@ function main(): void {
     file_write_all(h as usize, slice(badMagic))
     file_close(h as usize)
 
-    // noeDbCheckV3 MUST reject this corruption
+    // noeDbCheckV3 and noeDbOpenV3 MUST reject this corruption
     let checkCorruptMagic: isize = noeDbCheckV3(&db, dbPath)
     assert_true(checkCorruptMagic < 0 as isize, "corrupted magic bytes rejected by noeDbCheckV3")
+    let coldDb: NoeDatabaseState
+    assert_true(noeDbOpenV3(&coldDb, dbPath) < 0 as isize, "corrupted magic bytes rejected by noeDbOpenV3")
 
     // Mutation 2: Truncated pages file (< 8 bytes)
     h = file_open_replace(genFile)
@@ -103,21 +105,38 @@ function main(): void {
 
     let checkTruncated: isize = noeDbCheckV3(&db, dbPath)
     assert_true(checkTruncated < 0 as isize, "truncated pages file rejected by noeDbCheckV3")
+    assert_true(noeDbOpenV3(&coldDb, dbPath) < 0 as isize, "truncated pages file rejected by noeDbOpenV3")
 
     // Mutation 3: Missing HEAD file
     fs_remove(dbPath + "/HEAD")
     let checkMissingHead: isize = noeDbCheckV3(&db, dbPath)
     assert_true(checkMissingHead == -1 as isize, "missing HEAD fails closed with -1")
+    assert_true(noeDbOpenV3(&coldDb, dbPath) == -1 as isize, "missing HEAD rejected by noeDbOpenV3")
 
     // Restore HEAD for Mutation 4: Missing generation pages file
     let headH: isize = file_open_replace(dbPath + "/HEAD")
-    let headGen: [u8; 2] = [50 as u8, 10 as u8]
+    let headGen: [u8; 2] = [49 as u8, 10 as u8]
     file_write_all(headH as usize, slice(headGen))
     file_close(headH as usize)
 
     fs_remove(genFile)
     let checkMissingGen: isize = noeDbCheckV3(&db, dbPath)
     assert_true(checkMissingGen == -2 as isize, "missing generation pages fails closed with -2")
+    assert_true(noeDbOpenV3(&coldDb, dbPath) == -2 as isize, "missing generation rejected by noeDbOpenV3")
+
+    // Mutation 5: Corrupted table count (> 16)
+    let corruptH: isize = file_open_replace(genFile)
+    let goodMagic: [u8; 8] = [78 as u8, 81 as u8, 68 as u8, 66 as u8, 48 as u8, 48 as u8, 48 as u8, 51 as u8]
+    file_write_all(corruptH as usize, slice(goodMagic))
+    let dummyGen: [u8; 8] = [1 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    file_write_all(corruptH as usize, slice(dummyGen))
+    // 999 tables (exceeds max 16 tables)
+    let badTableCount: [u8; 4] = [231 as u8, 3 as u8, 0 as u8, 0 as u8]
+    file_write_all(corruptH as usize, slice(badTableCount))
+    file_close(corruptH as usize)
+
+    let checkBadTableCount: isize = noeDbOpenV3(&coldDb, dbPath)
+    assert_true(checkBadTableCount == -6 as isize, "corrupted table count rejected with -6 by noeDbOpenV3")
 
     // Clean up
     fs_remove_tree(dbPath)

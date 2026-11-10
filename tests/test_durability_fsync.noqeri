@@ -14,10 +14,10 @@ function main(): void {
     print("=== Testing Power-loss Durability, fsync, and Cold Recovery ===")
 
     let dbPath: string = "tmp_durability_test_db"
-    // Clean up any prior test artifacts
     fs_remove_tree(dbPath)
     fs_remove(dbPath + ".lck")
 
+    // Generation 1: Initialize accounts table with balance=1000
     let db: NoeDatabaseState
     noeEngineInit(&db, "durability_test")
 
@@ -26,54 +26,49 @@ function main(): void {
     noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
     noeAddField(&db, tIdx as usize, "balance", noeTypeInt(), true, false, false, false, "")
 
-    // Insert 2 rows
     let r1: [NoeRowCell; 2]
     r1[0].isNull = true // auto
     r1[1].isNull = false
     r1[1].intVal = 1000 as i64
     assert_true(noeInsertRow(&db, tIdx as usize, slice(r1)) == 0 as isize, "insert row 1")
 
+    assert_true(noeDbSaveV3(&db, dbPath) == 0 as isize, "commit generation 1")
+    assert_true(fs_exists(dbPath + "/versions/generation-1.pages"), "immutable generation-1.pages exists")
+
+    // Generation 2: Insert second row with balance=2500
     let r2: [NoeRowCell; 2]
     r2[0].isNull = true // auto
     r2[1].isNull = false
     r2[1].intVal = 2500 as i64
     assert_true(noeInsertRow(&db, tIdx as usize, slice(r2)) == 0 as isize, "insert row 2")
 
-    // Commit Generation 2 to disk via v3 persistence (fsync + atomic rename + directory sync)
-    let saveOk: isize = noeDbSaveV3(&db, dbPath)
-    assert_true(saveOk == 0 as isize, "v3 durable commit (fsync + rename + directory sync)")
+    assert_true(noeDbSaveV3(&db, dbPath) == 0 as isize, "commit generation 2")
+    assert_true(fs_exists(dbPath + "/versions/generation-2.pages"), "immutable generation-2.pages exists")
+    // Invariant: generation-1.pages MUST still exist (immutable snapshots)
+    assert_true(fs_exists(dbPath + "/versions/generation-1.pages"), "generation-1.pages preserved immutably")
 
-    // Verify database on disk
-    assert_true(fs_exists(dbPath + "/HEAD"), "HEAD exists")
-    assert_true(fs_exists(dbPath + "/versions/generation-durability_test.pages"), "generation pages exist")
-    assert_true(noeDbCheckV3(&db, dbPath) == 0 as isize, "cold check v3 on verified generation")
+    // Cold Reopening into a completely fresh uninitialized memory state
+    let coldDb: NoeDatabaseState
+    assert_true(noeDbOpenV3(&coldDb, dbPath) == 0 as isize, "cold reopen generation 2 from disk")
+    assert_true(coldDb.generation == 2 as u64, "active generation is 2")
+    assert_true(coldDb.tables[0].rowCount == 2 as usize, "reconstructed 2 accounts")
+    assert_true(coldDb.tables[0].cells[0 * 16 as usize + 1 as usize].intVal == 1000 as i64, "row 1 balance is 1000")
+    assert_true(coldDb.tables[0].cells[1 * 16 as usize + 1 as usize].intVal == 2500 as i64, "row 2 balance is 2500")
 
-    // Read and verify HEAD content
-    let headH: isize = file_open_read(dbPath + "/HEAD")
-    assert_true(headH >= 0 as isize, "open HEAD")
-    let headBuf: [u8; 8] = [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
-    let readBytes: isize = file_read_exact(headH as usize, slice(headBuf))
-    file_close(headH as usize)
-    assert_true(readBytes > 0 as isize, "read HEAD")
-    assert_true(headBuf[0] == (48 as u8 + 2 as u8), "HEAD points to generation 2")
-
-    // SIMULATED POWER LOSS / MID-TRANSACTION CRASH:
-    // Create an uncommitted partial HEAD.tmp representing a crash right before atomic commit
+    // SIMULATE POWER LOSS / PARTIAL COMMIT INTERRUPT:
+    // Create an uncommitted partial HEAD.tmp representing a crash before atomic commit
     let crashTmp: string = dbPath + "/HEAD.tmp"
     let tmpH: isize = file_open_replace(crashTmp)
-    let garbage: [u8; 4] = [255 as u8, 255 as u8, 255 as u8, 255 as u8]
+    let garbage: [u8; 8] = [255 as u8, 255 as u8, 255 as u8, 255 as u8, 255 as u8, 255 as u8, 255 as u8, 255 as u8]
     file_write_all(tmpH as usize, slice(garbage))
     file_close(tmpH as usize)
 
-    // Cold reopen / recovery check:
-    // Even though HEAD.tmp exists (interrupted transaction), the database MUST still verify against HEAD!
-    assert_true(noeDbCheckV3(&db, dbPath) == 0 as isize, "recovery verifies existing durable HEAD despite crash marker")
-
-    // Verify HEAD content was untouched
-    let headH2: isize = file_open_read(dbPath + "/HEAD")
-    let readBytes2: isize = file_read_exact(headH2 as usize, slice(headBuf))
-    file_close(headH2 as usize)
-    assert_true(headBuf[0] == (48 as u8 + 2 as u8), "HEAD still points to generation 2")
+    // Cold recovery check:
+    // Database must fail-closed back to the verified durable Generation 2 and reconstruct exact data
+    let recoveredDb: NoeDatabaseState
+    assert_true(noeDbOpenV3(&recoveredDb, dbPath) == 0 as isize, "recovery verifies existing durable HEAD despite crash marker")
+    assert_true(recoveredDb.tables[0].cells[0 * 16 as usize + 1 as usize].intVal == 1000 as i64, "recovered row 1 intact")
+    assert_true(recoveredDb.tables[0].cells[1 * 16 as usize + 1 as usize].intVal == 2500 as i64, "recovered row 2 intact")
 
     // Clean up
     fs_remove_tree(dbPath)

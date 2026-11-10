@@ -1,0 +1,59 @@
+name: NoeSQL Pure Noqeri CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: noesql-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Pure Noqeri Validation & Test Suite
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout NoeSQL
+        uses: actions/checkout@v4
+
+      - name: Checkout Noqeri Compiler
+        uses: actions/checkout@v4
+        with:
+          repository: EMN90909/Noqeri
+          ref: main
+          path: .ci-noqeri
+
+      - name: Install Build Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential cmake python3
+
+      - name: Build Noqeri Stage-0 Compiler
+        run: |
+          cmake -S .ci-noqeri -B .ci-noqeri-build -DCMAKE_BUILD_TYPE=Release
+          cmake --build .ci-noqeri-build --target noqeri --parallel $(nproc)
+          .ci-noqeri-build/noqeri version
+          .ci-noqeri-build/noqeri doctor .ci-noqeri
+
+      - name: Source Tree Invariant Checks (Zero JS, Zero C/C++, Zero Rust/Zig)
+        run: |
+          make no-js no-c-family no-rust-zig
+
+      - name: Execute NoeSQL Pure Noqeri Test Suite
+        env:
+          NOQERI: ${{ github.workspace }}/.ci-noqeri-build/noqeri
+        run: |
+          make test
+
+      - name: Run Standalone Executable Verification
+        env:
+          NOQERI: ${{ github.workspace }}/.ci-noqeri-build/noqeri
+        run: |
+          make run

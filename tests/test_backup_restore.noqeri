@@ -55,7 +55,7 @@ function main(): void {
 
     // Verify backup archive has HEAD and generation pages
     assert_true(fs_exists(backupDbPath + "/HEAD"), "backup HEAD exists")
-    assert_true(fs_exists(backupDbPath + "/versions/generation-prod_store.pages"), "backup generation pages exist")
+    assert_true(fs_exists(backupDbPath + "/versions/generation-1.pages"), "backup generation pages exist")
     assert_true(noeDbCheckV3(&db, backupDbPath) == 0 as isize, "backup passes integrity check")
 
     // 3. Disaster Simulation: Corrupt or delete primary database
@@ -63,22 +63,23 @@ function main(): void {
     assert_true(!fs_exists(primaryDbPath + "/HEAD"), "primary database destroyed")
 
     // 4. Point-in-time Restore from backup
-    let restoreRes: isize = noeDbRestore(&db, backupDbPath, restoredDbPath)
+    let restoredDb: NoeDatabaseState
+    let restoreRes: isize = noeDbRestore(&restoredDb, backupDbPath, restoredDbPath)
     assert_true(restoreRes == 0 as isize, "restoration from backup archive successful")
 
     // 5. Verify restored database
     assert_true(fs_exists(restoredDbPath + "/HEAD"), "restored HEAD exists")
-    assert_true(fs_exists(restoredDbPath + "/versions/generation-prod_store.pages"), "restored generation pages exist")
-    assert_true(noeDbCheckV3(&db, restoredDbPath) == 0 as isize, "restored database passes v3 check")
+    assert_true(fs_exists(restoredDbPath + "/versions/generation-1.pages"), "restored generation pages exist")
+    assert_true(noeDbCheckV3(&restoredDb, restoredDbPath) == 0 as isize, "restored database passes v3 check")
 
-    // Read and verify restored HEAD content
-    let h: isize = file_open_read(restoredDbPath + "/HEAD")
-    assert_true(h >= 0 as isize, "open restored HEAD")
-    let headBuf: [u8; 8] = [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
-    let n: isize = file_read_exact(h as usize, slice(headBuf))
-    file_close(h as usize)
-    assert_true(n > 0 as isize, "read restored HEAD")
-    assert_true(headBuf[0] == (48 as u8 + 2 as u8), "restored HEAD points to generation 2")
+    // Verify deserialized row data in restoredDb
+    assert_true(restoredDb.tableCount == 1 as usize, "restored 1 table")
+    assert_true(restoredDb.tables[0].name == "inventory", "restored table name is inventory")
+    assert_true(restoredDb.tables[0].rowCount == 2 as usize, "restored 2 rows")
+    assert_true(restoredDb.tables[0].cells[0].intVal == 1 as i64, "item 1 sku is 1")
+    assert_true(restoredDb.tables[0].cells[1].intVal == 500 as i64, "item 1 qty is 500")
+    assert_true(restoredDb.tables[0].cells[16].intVal == 2 as i64, "item 2 sku is 2")
+    assert_true(restoredDb.tables[0].cells[17].intVal == 1200 as i64, "item 2 qty is 1200")
 
     // Clean up
     fs_remove_tree(primaryDbPath)

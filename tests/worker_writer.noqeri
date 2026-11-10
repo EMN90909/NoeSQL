@@ -2,24 +2,46 @@ import "../Database/noesql_engine.noqeri"
 
 function main(): void {
     let dbPath: string = "tmp_concurrent_db"
-    let db: NoeDatabaseState
-    noeEngineInit(&db, "concurrent_test")
 
-    let tIdx: isize = noeCreateTable(&db, "events")
-    noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
-    noeAddField(&db, tIdx as usize, "data", noeTypeInt(), true, false, false, false, "")
-
-    // Perform repeated write transactions under advisory file locking
     let i: usize = 0 as usize
-    while i < 10 as usize {
+    while i < 5 as usize {
+        let db: NoeDatabaseState
+        let openRes: isize = noeDbOpenV3(&db, dbPath)
+        let tIdx: isize = -1 as isize
+
+        if openRes < 0 as isize {
+            noeEngineInit(&db, "concurrent_test")
+            tIdx = noeCreateTable(&db, "events")
+            noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+            noeAddField(&db, tIdx as usize, "data", noeTypeInt(), true, false, false, false, "")
+        } else {
+            tIdx = noeFindTable(&db, "events")
+            if tIdx < 0 as isize {
+                tIdx = noeCreateTable(&db, "events")
+                noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+                noeAddField(&db, tIdx as usize, "data", noeTypeInt(), true, false, false, false, "")
+            }
+        }
+
         let r: [NoeRowCell; 2]
-        r[0].isNull = true
+        r[0].isNull = true // auto id
         r[1].isNull = false
-        r[1].intVal = (i * 10 as usize) as i64
-        noeInsertRow(&db, tIdx as usize, slice(r))
-        noeDbSaveV3(&db, dbPath)
+        r[1].intVal = (100 as i64) + (i as i64)
+        let insOk: isize = noeInsertRow(&db, tIdx as usize, slice(r))
+        if insOk < 0 as isize {
+            print("INSERT_FAILED")
+            return
+        }
+
+        let saveOk: isize = noeDbSaveV3(&db, dbPath)
+        if saveOk < 0 as isize {
+            print("SAVE_FAILED")
+            return
+        }
+
         i = i + 1 as usize
     }
+
     print("WRITER_COMPLETE")
 }
 

@@ -2,19 +2,50 @@ import "../Database/noesql_engine.noqeri"
 
 function main(): void {
     let dbPath: string = "tmp_concurrent_db"
-    let db: NoeDatabaseState
-    noeEngineInit(&db, "concurrent_test")
 
     let i: usize = 0 as usize
-    while i < 15 as usize {
-        let check: isize = noeDbCheckV3(&db, dbPath)
-        // Check must either be OK (0) or if DB hasn't been created yet (-1 or -2), but never corrupted magic (-5)
-        if check == -5 as isize {
-            print("READER_CORRUPTION_DETECTED")
+    while i < 10 as usize {
+        let db: NoeDatabaseState
+        let openRes: isize = noeDbOpenV3(&db, dbPath)
+
+        if openRes == 0 as isize {
+            let tIdx: isize = noeFindTable(&db, "events")
+            if tIdx >= 0 as isize {
+                let rowCount: usize = db.tables[tIdx as usize].rowCount
+                if rowCount > 0 as usize {
+                    // Invariant 1: autoSequence must be at least rowCount
+                    if db.tables[tIdx as usize].autoSequence < (rowCount as i64) {
+                        print("CORRUPTION_DETECTED_SEQUENCE")
+                        return
+                    }
+
+                    // Invariant 2: Check row data integrity
+                    let r: usize = 0 as usize
+                    while r < rowCount {
+                        let idCell: *NoeRowCell = &db.tables[tIdx as usize].cells[r * 16 as usize + 0 as usize]
+                        let dataCell: *NoeRowCell = &db.tables[tIdx as usize].cells[r * 16 as usize + 1 as usize]
+
+                        if idCell.isNull || idCell.intVal <= 0 as i64 {
+                            print("CORRUPTION_DETECTED_ID")
+                            return
+                        }
+                        if dataCell.isNull || dataCell.intVal < 100 as i64 {
+                            print("CORRUPTION_DETECTED_DATA")
+                            return
+                        }
+                        r = r + 1 as usize
+                    }
+                }
+            }
+        } else if openRes < -2 as isize {
+            // Bad magic or corrupt structure
+            print("CORRUPTION_DETECTED_OPEN")
             return
         }
+
         i = i + 1 as usize
     }
+
     print("READER_COMPLETE")
 }
 

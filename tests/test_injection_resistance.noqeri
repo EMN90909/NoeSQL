@@ -14,89 +14,46 @@ function main(): void {
     let db: NoeDatabaseState
     noeEngineInit(&db, "injection_test")
 
-    let tIdx: isize = noeCreateTable(&db, "users")
-    assert_true(tIdx >= 0 as isize, "create users table")
-    noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
-    noeAddField(&db, tIdx as usize, "username", noeTypeText(), true, true, false, false, "")
-    noeAddField(&db, tIdx as usize, "role", noeTypeText(), true, false, false, false, "")
+    // 1. Create table via statement execution
+    let ddlRes: isize = noeExecuteStatement(&db, "table users { id: int key auto, username: text required unique, role: text }")
+    assert_true(ddlRes == 0 as isize, "DDL statement execution creates users table")
 
-    // Insert legitimate user
-    let user1: [NoeRowCell; 3]
-    user1[0].isNull = true // auto
-    user1[1].isNull = false
-    user1[1].textVal = "alice"
-    user1[2].isNull = false
-    user1[2].textVal = "user"
-    assert_true(noeInsertRow(&db, tIdx as usize, slice(user1)) == 0 as isize, "insert alice")
+    // 2. Insert legitimate user via statement execution
+    let ins1: isize = noeExecuteStatement(&db, "users add { username: \"alice\", role: \"user\" }")
+    assert_true(ins1 == 0 as isize, "insert alice via statement")
 
-    // Insert hostile SQL injection payloads as values
-    // Payload 1: Classic tautology: ' OR '1'='1
-    let user2: [NoeRowCell; 3]
-    user2[0].isNull = true // auto
-    user2[1].isNull = false
-    user2[1].textVal = "' OR '1'='1"
-    user2[2].isNull = false
-    user2[2].textVal = "guest"
-    assert_true(noeInsertRow(&db, tIdx as usize, slice(user2)) == 0 as isize, "insert tautology payload")
+    // 3. Insert hostile SQL injection payloads via statement execution
+    // Payload A: Classic tautology: ' OR '1'='1
+    let ins2: isize = noeExecuteStatement(&db, "users add { username: \"' OR '1'='1\", role: \"guest\" }")
+    assert_true(ins2 == 0 as isize, "insert tautology payload via statement")
 
-    // Payload 2: Stacked statement drop: '; DROP TABLE users; --
-    let user3: [NoeRowCell; 3]
-    user3[0].isNull = true // auto
-    user3[1].isNull = false
-    user3[1].textVal = "hacker'; DROP TABLE users; --"
-    user3[2].isNull = false
-    user3[2].textVal = "attacker"
-    assert_true(noeInsertRow(&db, tIdx as usize, slice(user3)) == 0 as isize, "insert drop-table payload")
+    // Payload B: Stacked statement drop: '; DROP TABLE users; --
+    let ins3: isize = noeExecuteStatement(&db, "users add { username: \"hacker'; DROP TABLE users; --\", role: \"attacker\" }")
+    assert_true(ins3 == 0 as isize, "insert drop-table payload via statement")
 
-    // Payload 3: Union injection: ' UNION SELECT * FROM users --
-    let user4: [NoeRowCell; 3]
-    user4[0].isNull = true // auto
-    user4[1].isNull = false
-    user4[1].textVal = "admin' --"
-    user4[2].isNull = false
-    user4[2].textVal = "probe"
-    assert_true(noeInsertRow(&db, tIdx as usize, slice(user4)) == 0 as isize, "insert comment payload")
+    // Payload C: Union comment injection: admin' --
+    let ins4: isize = noeExecuteStatement(&db, "users add { username: \"admin' --\", role: \"probe\" }")
+    assert_true(ins4 == 0 as isize, "insert comment payload via statement")
 
-    // 1. Verify table still exists and wasn't dropped by '; DROP TABLE users; --'
+    // 4. Verify table still exists and wasn't dropped by '; DROP TABLE users; --'
     assert_true(noeFindTable(&db, "users") == 0 as isize, "table 'users' remains intact and was not dropped")
-    assert_true(db.tables[0].rowCount == 4 as usize, "all 4 rows stored safely")
+    assert_true(db.tables[0].rowCount == 4 as usize, "all 4 rows parsed and stored safely as literals")
 
-    // 2. Query for exact string "alice": must ONLY match alice, never tautology row
-    let t: *NoeTableData = &db.tables[tIdx as usize]
-    let aliceMatches: usize = 0 as usize
-    let r: usize = 0 as usize
-    while r < t.rowCount {
-        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
-        if !cell.isNull && cell.textVal == "alice" {
-            aliceMatches = aliceMatches + 1 as usize
-        }
-        r = r + 1 as usize
-    }
-    assert_true(aliceMatches == 1 as usize, "exact match on 'alice' produces exactly 1 record, ignoring tautology")
+    // 5. Query execution injection test: Targeted deletion using exact literal equality
+    // Delete specifically the tautology row
+    let delRes: isize = noeExecuteStatement(&db, "users where username == \"' OR '1'='1\" delete")
+    assert_true(delRes == 0 as isize, "delete tautology row statement")
+    assert_true(db.tables[0].rowCount == 3 as usize, "only the single tautology row was deleted")
 
-    // 3. Query for literal string "' OR '1'='1": must ONLY match payload row 2, NOT row 1
-    let tautologyMatches: usize = 0 as usize
-    r = 0 as usize
-    while r < t.rowCount {
-        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
-        if !cell.isNull && cell.textVal == "' OR '1'='1" {
-            tautologyMatches = tautologyMatches + 1 as usize
-        }
-        r = r + 1 as usize
-    }
-    assert_true(tautologyMatches == 1 as usize, "tautology payload matches only its exact literal record")
+    // 6. Verify remaining rows were NOT deleted by tautology
+    assert_true(db.tables[0].cells[1].textVal == "alice", "alice remains untouched")
+    assert_true(db.tables[0].cells[16 + 1].textVal == "hacker'; DROP TABLE users; --", "drop table payload remains literal")
+    assert_true(db.tables[0].cells[32 + 1].textVal == "admin' --", "admin comment remains literal")
 
-    // 4. Query for "admin": must NOT match "admin' --"
-    let adminMatches: usize = 0 as usize
-    r = 0 as usize
-    while r < t.rowCount {
-        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
-        if !cell.isNull && cell.textVal == "admin" {
-            adminMatches = adminMatches + 1 as usize
-        }
-        r = r + 1 as usize
-    }
-    assert_true(adminMatches == 0 as usize, "'admin' query does not match 'admin\' --'")
+    // 7. Targeted update using statement execution
+    let updRes: isize = noeExecuteStatement(&db, "users where username == \"alice\" set role = \"superadmin\"")
+    assert_true(updRes == 0 as isize, "update alice role via statement")
+    assert_true(db.tables[0].cells[2].textVal == "superadmin", "alice role successfully updated to superadmin")
 
     print("Query Injection Resistance (Bound Parameters & Literal Typing): ALL PASSED")
 }
