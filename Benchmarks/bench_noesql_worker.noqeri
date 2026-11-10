@@ -1,0 +1,62 @@
+import "../Database/noesql_engine.noqeri"
+import "../../Noqeri/Lib/std/file.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function main(): void {
+    let dbPath: string = "/tmp/bench_noesql.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "bench")
+    let tIdx: isize = noeCreateTable(&db, "records")
+    noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, tIdx as usize, "val", noeTypeInt(), true, false, false, false, "")
+    noeAddField(&db, tIdx as usize, "name", noeTypeText(), true, false, false, false, "")
+
+    // Insert 50 rows
+    let i: usize = 0 as usize
+    while i < 50 as usize {
+        let r: [NoeRowCell; 3]
+        r[0].isNull = true // auto id
+        r[1].isNull = false
+        r[1].intVal = (i * 10 as usize) as i64
+        r[2].isNull = false
+        r[2].textVal = "test_record"
+        let insOk: isize = noeInsertRow(&db, tIdx as usize, slice(r))
+        if insOk < 0 as isize {
+            print("INSERT_FAILED")
+            return
+        }
+        i = i + 1 as usize
+    }
+
+    let saveRes: isize = noeDbSaveV3(&db, dbPath)
+    if saveRes < 0 as isize {
+        print("SAVE_FAILED")
+        return
+    }
+
+    // Cold Reopen & point query
+    let coldDb: NoeDatabaseState
+    let openRes: isize = noeDbOpenV3(&coldDb, dbPath)
+    if openRes != 0 as isize {
+        print("COLD_REOPEN_FAILED")
+        return
+    }
+
+    // Verify row scan / query
+    let count: usize = 0 as usize
+    let rIdx: usize = 0 as usize
+    while rIdx < coldDb.tables[0].rowCount {
+        let cell: *NoeRowCell = &coldDb.tables[0].cells[rIdx * 16 as usize + 1 as usize]
+        if !cell.isNull && cell.intVal >= 250 as i64 {
+            count = count + 1 as usize
+        }
+        rIdx = rIdx + 1 as usize
+    }
+
+    print("NOESQL_BENCH_OK:rows=" + intToString(coldDb.tables[0].rowCount as i64) + ":matched=" + intToString(count as i64))
+}
+
+main()
