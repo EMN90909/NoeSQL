@@ -30,6 +30,10 @@ jobs:
           ref: main
           path: .ci-noqeri
 
+      - name: Link Noqeri for Ecosystem Path Resolution
+        run: |
+          ln -s "${{ github.workspace }}/.ci-noqeri" "${{ github.workspace }}/../Noqeri"
+
       - name: Install Build Tools
         run: |
           sudo apt-get update
