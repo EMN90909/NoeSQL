@@ -1,0 +1,85 @@
+import "../Database/noesql_auth.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("ASSERTION FAILED: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Authentication, RBAC Authorization & Multi-Tenant Security ===")
+
+    let tenant1: u64 = 1001 as u64
+    let tenant2: u64 = 2002 as u64
+
+    // 1. Unauthenticated or disabled principal must always be denied
+    let guest: NoePrincipal
+    guest.userId = 0 as u64
+    guest.authenticated = false
+    guest.disabled = false
+    guest.scope = tenant1
+    guest.roles = noeRoleRead()
+    assert_true(!noePermit(&guest, noeRoleRead(), tenant1), "unauthenticated guest denied")
+
+    let disabledUser: NoePrincipal
+    disabledUser.userId = 42 as u64
+    disabledUser.authenticated = true
+    disabledUser.disabled = true
+    disabledUser.scope = tenant1
+    disabledUser.roles = noeRoleAdmin()
+    assert_true(!noePermit(&disabledUser, noeRoleAdmin(), tenant1), "disabled admin denied")
+
+    // 2. Read-Only principal in Tenant 1
+    let reader: NoePrincipal
+    reader.userId = 101 as u64
+    reader.authenticated = true
+    reader.disabled = false
+    reader.scope = tenant1
+    reader.roles = noeRoleRead()
+
+    assert_true(noeOperationPermit(&reader, 1, tenant1), "reader permitted to SELECT in tenant 1")
+    assert_true(!noeOperationPermit(&reader, 2, tenant1), "reader DENIED INSERT")
+    assert_true(!noeOperationPermit(&reader, 3, tenant1), "reader DENIED UPDATE")
+    assert_true(!noeOperationPermit(&reader, 4, tenant1), "reader DENIED DELETE")
+
+    // 3. Multi-Tenant Isolation: Reader in Tenant 1 cannot access Tenant 2
+    assert_true(!noeOperationPermit(&reader, 1, tenant2), "Tenant 1 reader strictly BLOCKED from accessing Tenant 2 (multi-tenant boundary)")
+
+    // 4. Writer Principal in Tenant 1 with Combined Roles (Read + Insert + Update)
+    let writerRoles: u32 = noeRoleCombine(noeRoleRead(), noeRoleInsert())
+    writerRoles = noeRoleCombine(writerRoles, noeRoleUpdate())
+
+    let writer: NoePrincipal
+    writer.userId = 102 as u64
+    writer.authenticated = true
+    writer.disabled = false
+    writer.scope = tenant1
+    writer.roles = writerRoles
+
+    assert_true(noeOperationPermit(&writer, 1, tenant1), "writer permitted to SELECT")
+    assert_true(noeOperationPermit(&writer, 2, tenant1), "writer permitted to INSERT")
+    assert_true(noeOperationPermit(&writer, 3, tenant1), "writer permitted to UPDATE")
+    assert_true(!noeOperationPermit(&writer, 4, tenant1), "writer without DELETE role is DENIED DELETE")
+
+    // 5. Admin Principal in Tenant 2
+    let admin: NoePrincipal
+    admin.userId = 999 as u64
+    admin.authenticated = true
+    admin.disabled = false
+    admin.scope = tenant2
+    admin.roles = noeRoleAdmin()
+
+    assert_true(noeOperationPermit(&admin, 1, tenant2), "admin permitted to SELECT in tenant 2")
+    assert_true(noeOperationPermit(&admin, 2, tenant2), "admin permitted to INSERT in tenant 2")
+    assert_true(noeOperationPermit(&admin, 3, tenant2), "admin permitted to UPDATE in tenant 2")
+    assert_true(noeOperationPermit(&admin, 4, tenant2), "admin permitted to DELETE in tenant 2")
+
+    // Tenant 2 admin cannot touch Tenant 1
+    assert_true(!noeOperationPermit(&admin, 1, tenant1), "Tenant 2 admin BLOCKED from Tenant 1 (strict scope confinement)")
+
+    print("Authentication, RBAC Authorization & Multi-Tenant Security: ALL PASSED")
+}
+
+main()

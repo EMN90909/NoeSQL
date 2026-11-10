@@ -25,7 +25,7 @@ p.userId = 17 as u64
 p.authenticated = true
 p.disabled = false
 p.scope = 5 as u64
-p.roles = noeRoleRead() | noeRoleInsert()
+p.roles = noeRoleCombine(noeRoleRead(), noeRoleInsert())
 require(noeOperationPermit(&p, 1, 5 as u64))
 require(!noeOperationPermit(&p, 4, 5 as u64))
 require(!noeOperationPermit(&p, 1, 6 as u64))

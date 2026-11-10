@@ -1,0 +1,21 @@
+import "../Database/noesql_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_concurrent_db"
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "concurrent_test")
+
+    let i: usize = 0 as usize
+    while i < 15 as usize {
+        let check: isize = noeDbCheckV3(&db, dbPath)
+        // Check must either be OK (0) or if DB hasn't been created yet (-1 or -2), but never corrupted magic (-5)
+        if check == -5 as isize {
+            print("READER_CORRUPTION_DETECTED")
+            return
+        }
+        i = i + 1 as usize
+    }
+    print("READER_COMPLETE")
+}
+
+main()

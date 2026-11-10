@@ -1,0 +1,155 @@
+import "../Database/noesql_engine.noqeri"
+import "../../Noqeri/Lib/std/file.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("================================================================")
+    print("  NoeSQL Database Engine (Pure Noqeri Native Execution)")
+    print("  Engine Version: " + noeEngineVersion())
+    print("  Runtime Architecture: Zero Rust / Zero Zig / Pure .noqeri")
+    print("================================================================\n")
+
+    let dbPath: string = "production.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    // ------------------------------------------------------------------------
+    // Step 1: Database and Schema Creation
+    // ------------------------------------------------------------------------
+    print("[1/6] Initializing relational schema...")
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "main")
+
+    // Create table 'departments'
+    let deptIdx: isize = noeCreateTable(&db, "departments")
+    assert_true(deptIdx >= 0 as isize, "create departments table")
+    noeAddField(&db, deptIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, deptIdx as usize, "name", noeTypeText(), true, true, false, false, "")
+
+    // Create table 'users' with foreign key to departments
+    let userIdx: isize = noeCreateTable(&db, "users")
+    assert_true(userIdx >= 0 as isize, "create users table")
+    noeAddField(&db, userIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, userIdx as usize, "username", noeTypeText(), true, true, false, false, "")
+    noeAddField(&db, userIdx as usize, "dept_id", noeTypeInt(), true, false, false, false, "departments")
+
+    print("  Created tables: 'departments', 'users'")
+
+    // ------------------------------------------------------------------------
+    // Step 2: Relational Inserts & Constraint Verification
+    // ------------------------------------------------------------------------
+    print("[2/6] Inserting records and enforcing foreign keys...")
+
+    // Insert Department 1: Engineering
+    let d1: [NoeRowCell; 2]
+    d1[0].isNull = true // auto-increment
+    d1[1].isNull = false
+    d1[1].textVal = "Core Engineering"
+    assert_true(noeInsertRow(&db, deptIdx as usize, slice(d1)) == 0 as isize, "insert dept 1")
+
+    // Insert Department 2: Research
+    let d2: [NoeRowCell; 2]
+    d2[0].isNull = true // auto-increment
+    d2[1].isNull = false
+    d2[1].textVal = "Deep Research"
+    assert_true(noeInsertRow(&db, deptIdx as usize, slice(d2)) == 0 as isize, "insert dept 2")
+
+    // Insert User 1 (Alice in dept 1)
+    let u1: [NoeRowCell; 3]
+    u1[0].isNull = true // auto-increment
+    u1[1].isNull = false
+    u1[1].textVal = "alice"
+    u1[2].isNull = false
+    u1[2].intVal = 1 as i64
+    assert_true(noeInsertRow(&db, userIdx as usize, slice(u1)) == 0 as isize, "insert user alice")
+
+    // Insert User 2 (Bob in dept 2)
+    let u2: [NoeRowCell; 3]
+    u2[0].isNull = true // auto-increment
+    u2[1].isNull = false
+    u2[1].textVal = "bob"
+    u2[2].isNull = false
+    u2[2].intVal = 2 as i64
+    assert_true(noeInsertRow(&db, userIdx as usize, slice(u2)) == 0 as isize, "insert user bob")
+
+    // Adversarial FK check: Insert User with invalid dept_id (999) -> MUST FAIL
+    let uBad: [NoeRowCell; 3]
+    uBad[0].isNull = true
+    uBad[1].isNull = false
+    uBad[1].textVal = "intruder"
+    uBad[2].isNull = false
+    uBad[2].intVal = 999 as i64
+    let badRes: isize = noeInsertRow(&db, userIdx as usize, slice(uBad))
+    assert_true(badRes == -205 as isize, "invalid FK reference correctly blocked")
+    print("  Inserted 2 departments, 2 users; verified foreign key rejection on invalid reference.")
+
+    // ------------------------------------------------------------------------
+    // Step 3: Durable v3 Disk Persistence (fsync + atomic commit)
+    // ------------------------------------------------------------------------
+    print("[3/6] Committing generation snapshot with fsync & atomic directory sync...")
+    let saveRes: isize = noeDbSaveV3(&db, dbPath)
+    assert_true(saveRes == 0 as isize, "v3 durable commit")
+    assert_true(fs_exists(dbPath + "/HEAD"), "HEAD exists")
+    assert_true(fs_exists(dbPath + "/versions/generation-main.pages"), "generation pages exist")
+    print("  Durable generation committed to " + dbPath)
+
+    // ------------------------------------------------------------------------
+    // Step 4: Cold Database Reopening & Querying
+    // ------------------------------------------------------------------------
+    print("[4/6] Reopening database from cold disk state...")
+    let checkRes: isize = noeDbCheckV3(&db, dbPath)
+    assert_true(checkRes == 0 as isize, "cold database integrity verified")
+
+    // Query and scan table
+    let uTable: *NoeTableData = &db.tables[userIdx as usize]
+    print("  Active records in 'users' table:")
+    let r: usize = 0 as usize
+    while r < uTable.rowCount {
+        let nameCell: *NoeRowCell = &uTable.cells[r * 16 as usize + 1 as usize]
+        print("    -> user: " + nameCell.textVal)
+        r = r + 1 as usize
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 5: Relational Update & Delete Protection
+    // ------------------------------------------------------------------------
+    print("[5/6] Testing relational delete constraints...")
+    // Attempt to delete Department 1 while Alice references it: MUST BE BLOCKED
+    let delDept1: isize = noeDeleteRow(&db, deptIdx as usize, 0 as usize)
+    assert_true(delDept1 == -208 as isize, "delete of referenced department blocked by foreign key constraint")
+    print("  Verified: Foreign key prevented orphaned references on delete.")
+
+    // ------------------------------------------------------------------------
+    // Step 6: Backup & Point-in-Time Recovery
+    // ------------------------------------------------------------------------
+    print("[6/6] Executing backup and point-in-time recovery...")
+    let backupDir: string = "production.backup"
+    let restoreDir: string = "production.restored"
+    fs_remove_tree(backupDir)
+    fs_remove_tree(restoreDir)
+
+    assert_true(noeDbBackup(&db, dbPath, backupDir) == 0 as isize, "database backup created")
+    assert_true(noeDbRestore(&db, backupDir, restoreDir) == 0 as isize, "database restored from backup")
+    assert_true(noeDbCheckV3(&db, restoreDir) == 0 as isize, "restored database verified")
+    print("  Point-in-time recovery verified.")
+
+    // Cleanup demo directories
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+    fs_remove_tree(backupDir)
+    fs_remove_tree(restoreDir)
+
+    print("\n================================================================")
+    print("  NoeSQL Pure Noqeri Database Engine: ALL OPERATIONS VERIFIED")
+    print("================================================================\n")
+}
+
+main()

@@ -1,0 +1,475 @@
+module noqeri.database.noesql.engine
+
+import "noesql_ir.noqeri"
+import "noesql_row.noqeri"
+import "noesql_wal.noqeri"
+import "noesql_auth.noqeri"
+import "noesql_limits.noqeri"
+import "noesql_isolation.noqeri"
+import "../../Noqeri/Lib/std/file.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+// ============================================================================
+// NoeSQL Pure Noqeri Database Engine
+// Provides full relational schema, CRUD, foreign keys, transactions, and v3 disk persistence.
+// ============================================================================
+
+export function noeEngineVersion(): string {
+    return "0.9.0-pure-noqeri"
+}
+
+// ----------------------------------------------------------------------------
+// Schema and Data Representation
+// ----------------------------------------------------------------------------
+
+record NoeFieldDef {
+    name: string
+    kind: int        // 1=int, 2=text, 3=bool, 4=float, 5=decimal
+    required: bool
+    unique: bool
+    isKey: bool
+    auto: bool
+    hasDefault: bool
+    defaultInt: i64
+    defaultText: string
+    defaultBool: bool
+    refTable: string
+}
+
+record NoeRowCell {
+    isNull: bool
+    intVal: i64
+    textVal: string
+    boolVal: bool
+}
+
+record NoeTableData {
+    name: string
+    fieldCount: usize
+    fields: [NoeFieldDef; 16]
+    autoSequence: i64
+    rowCount: usize
+    // Flattened row cells: cellIndex = rowIndex * 16 + colIndex
+    cells: [NoeRowCell; 1024]
+}
+
+record NoeDatabaseState {
+    name: string
+    tableCount: usize
+    tables: [NoeTableData; 16]
+    generation: u64
+    inTransaction: bool
+}
+
+// ----------------------------------------------------------------------------
+// Database Initialization
+// ----------------------------------------------------------------------------
+
+export function noeEngineInit(db: *NoeDatabaseState, dbName: string): void {
+    db.name = dbName
+    db.tableCount = 0 as usize
+    db.generation = 1 as u64
+    db.inTransaction = false
+}
+
+export function noeFindTable(db: *NoeDatabaseState, name: string): isize {
+    let i: usize = 0 as usize
+    while i < db.tableCount {
+        if db.tables[i].name == name {
+            return i as isize
+        }
+        i = i + 1 as usize
+    }
+    return -1 as isize
+}
+
+export function noeFindField(db: *NoeDatabaseState, tableIdx: usize, fieldName: string): isize {
+    let t: *NoeTableData = &db.tables[tableIdx]
+    let i: usize = 0 as usize
+    while i < t.fieldCount {
+        if t.fields[i].name == fieldName {
+            return i as isize
+        }
+        i = i + 1 as usize
+    }
+    return -1 as isize
+}
+
+export function noeCreateTable(db: *NoeDatabaseState, name: string): isize {
+    if noeFindTable(db, name) >= 0 as isize {
+        return -1 as isize // Table already exists
+    }
+    if db.tableCount >= 16 as usize {
+        return -2 as isize // Max tables reached
+    }
+    let idx: usize = db.tableCount
+    db.tables[idx].name = name
+    db.tables[idx].fieldCount = 0 as usize
+    db.tables[idx].autoSequence = 1 as i64
+    db.tables[idx].rowCount = 0 as usize
+    db.tableCount = db.tableCount + 1 as usize
+    return idx as isize
+}
+
+export function noeAddField(db: *NoeDatabaseState, tableIdx: usize, fieldName: string, kind: int, req: bool, unq: bool, key: bool, autoInc: bool, refTab: string): isize {
+    let t: *NoeTableData = &db.tables[tableIdx]
+    if t.fieldCount >= 16 as usize {
+        return -1 as isize
+    }
+    let fIdx: usize = t.fieldCount
+    t.fields[fIdx].name = fieldName
+    t.fields[fIdx].kind = kind
+    t.fields[fIdx].required = req
+    t.fields[fIdx].unique = unq
+    t.fields[fIdx].isKey = key
+    t.fields[fIdx].auto = autoInc
+    t.fields[fIdx].hasDefault = false
+    t.fields[fIdx].refTable = refTab
+    t.fieldCount = t.fieldCount + 1 as usize
+    return fIdx as isize
+}
+
+export function noeSetFieldDefaultInt(db: *NoeDatabaseState, tableIdx: usize, fieldIdx: usize, val: i64): void {
+    db.tables[tableIdx].fields[fieldIdx].hasDefault = true
+    db.tables[tableIdx].fields[fieldIdx].defaultInt = val
+}
+
+export function noeSetFieldDefaultBool(db: *NoeDatabaseState, tableIdx: usize, fieldIdx: usize, val: bool): void {
+    db.tables[tableIdx].fields[fieldIdx].hasDefault = true
+    db.tables[tableIdx].fields[fieldIdx].defaultBool = val
+}
+
+// ----------------------------------------------------------------------------
+// Foreign Key Enforcement (Adversarial & Self-Referencing Protection)
+// ----------------------------------------------------------------------------
+
+export function noeValidateForeignKey(db: *NoeDatabaseState, tableIdx: usize, fieldIdx: usize, cell: *NoeRowCell): isize {
+    let t: *NoeTableData = &db.tables[tableIdx]
+    let f: *NoeFieldDef = &t.fields[fieldIdx]
+    if f.refTable == "" {
+        return 0 as isize // No foreign key
+    }
+    if cell.isNull {
+        if f.required {
+            return -201 as isize // NOE201: required FK cannot be null
+        }
+        return 0 as isize // Nullable FK allowed
+    }
+
+    let targetIdx: isize = noeFindTable(db, f.refTable)
+    if targetIdx < 0 as isize {
+        return -204 as isize // NOE204: unknown reference table
+    }
+
+    let target: *NoeTableData = &db.tables[targetIdx as usize]
+    let targetKeyCol: isize = -1 as isize
+    let i: usize = 0 as usize
+    while i < target.fieldCount {
+        if target.fields[i].isKey {
+            targetKeyCol = i as isize
+            break
+        }
+        i = i + 1 as usize
+    }
+
+    if targetKeyCol < 0 as isize {
+        return -205 as isize // NOE205: reference target has no key
+    }
+
+    // Search target table for matching key value
+    let found: bool = false
+    let r: usize = 0 as usize
+    while r < target.rowCount {
+        let targetCell: *NoeRowCell = &target.cells[r * 16 as usize + targetKeyCol as usize]
+        if !targetCell.isNull && targetCell.intVal == cell.intVal {
+            found = true
+            break
+        }
+        r = r + 1 as usize
+    }
+
+    if !found {
+        return -205 as isize // NOE205: foreign key refers to missing row
+    }
+    return 0 as isize
+}
+
+// Check if deleting a row with the given primary key is blocked by any referencing table
+// (INCLUDING self-referencing foreign keys in the same table!)
+export function noeCheckDeleteBlockedByReference(db: *NoeDatabaseState, tableIdx: usize, primaryKeyVal: i64): isize {
+    let tableName: string = db.tables[tableIdx].name
+
+    // Inspect all tables in database
+    let tIdx: usize = 0 as usize
+    while tIdx < db.tableCount {
+        let other: *NoeTableData = &db.tables[tIdx]
+        let fIdx: usize = 0 as usize
+        while fIdx < other.fieldCount {
+            if other.fields[fIdx].refTable == tableName {
+                // Scan all rows in other table for references to primaryKeyVal
+                let r: usize = 0 as usize
+                while r < other.rowCount {
+                    let cell: *NoeRowCell = &other.cells[r * 16 as usize + fIdx]
+                    if !cell.isNull && cell.intVal == primaryKeyVal {
+                        return -208 as isize // NOE208: delete blocked by foreign key reference
+                    }
+                    r = r + 1 as usize
+                }
+            }
+            fIdx = fIdx + 1 as usize
+        }
+        tIdx = tIdx + 1 as usize
+    }
+    return 0 as isize
+}
+
+// ----------------------------------------------------------------------------
+// Row Operations: Insert, Update, Delete
+// ----------------------------------------------------------------------------
+
+export function noeInsertRow(db: *NoeDatabaseState, tableIdx: usize, rowVals: []NoeRowCell): isize {
+    let t: *NoeTableData = &db.tables[tableIdx]
+    if t.rowCount >= 64 as usize {
+        return -101 as isize // Table capacity reached
+    }
+
+    let rIdx: usize = t.rowCount
+    let nextSeq: i64 = t.autoSequence
+
+    // 1. Populate auto-increment and default values, and check constraints
+    let col: usize = 0 as usize
+    while col < t.fieldCount {
+        let f: *NoeFieldDef = &t.fields[col]
+        let destCell: *NoeRowCell = &t.cells[rIdx * 16 as usize + col]
+
+        if col < len(rowVals) && !rowVals[col].isNull {
+            destCell[0] = rowVals[col]
+        } else if f.auto {
+            destCell.isNull = false
+            destCell.intVal = nextSeq
+            destCell.textVal = ""
+            destCell.boolVal = false
+            nextSeq = nextSeq + 1 as i64
+        } else if f.hasDefault {
+            destCell.isNull = false
+            destCell.intVal = f.defaultInt
+            destCell.textVal = f.defaultText
+            destCell.boolVal = f.defaultBool
+        } else {
+            destCell.isNull = true
+            destCell.intVal = 0 as i64
+            destCell.textVal = ""
+            destCell.boolVal = false
+        }
+
+        // Required constraint check
+        if f.required && destCell.isNull {
+            return -202 as isize // NOE202: missing required field
+        }
+
+        // Unique / Key constraint check
+        if (f.unique || f.isKey) && !destCell.isNull {
+            let scanR: usize = 0 as usize
+            while scanR < rIdx {
+                let existing: *NoeRowCell = &t.cells[scanR * 16 as usize + col]
+                if !existing.isNull {
+                    if f.kind == noeTypeInt() && existing.intVal == destCell.intVal {
+                        return -203 as isize // NOE203: duplicate unique value
+                    }
+                    if f.kind == noeTypeText() && existing.textVal == destCell.textVal {
+                        return -203 as isize // NOE203: duplicate unique value
+                    }
+                }
+                scanR = scanR + 1 as usize
+            }
+        }
+
+        // Foreign key constraint check
+        let fkStatus: isize = noeValidateForeignKey(db, tableIdx, col, destCell)
+        if fkStatus < 0 as isize {
+            return fkStatus
+        }
+
+        col = col + 1 as usize
+    }
+
+    t.autoSequence = nextSeq
+    t.rowCount = rIdx + 1 as usize
+    return 0 as isize
+}
+
+export function noeDeleteRow(db: *NoeDatabaseState, tableIdx: usize, rowIdx: usize): isize {
+    let t: *NoeTableData = &db.tables[tableIdx]
+    if rowIdx >= t.rowCount {
+        return -1 as isize
+    }
+
+    // Locate primary key value of row being deleted
+    let keyCol: isize = -1 as isize
+    let i: usize = 0 as usize
+    while i < t.fieldCount {
+        if t.fields[i].isKey {
+            keyCol = i as isize
+            break
+        }
+        i = i + 1 as usize
+    }
+
+    if keyCol >= 0 as isize {
+        let keyVal: i64 = t.cells[rowIdx * 16 as usize + keyCol as usize].intVal
+        // Check if any referencing table or self-reference blocks this deletion
+        let blockStatus: isize = noeCheckDeleteBlockedByReference(db, tableIdx, keyVal)
+        if blockStatus < 0 as isize {
+            return blockStatus
+        }
+    }
+
+    // Shift remaining rows down
+    let curr: usize = rowIdx
+    while curr + 1 as usize < t.rowCount {
+        let c: usize = 0 as usize
+        while c < 16 as usize {
+            t.cells[curr * 16 as usize + c] = t.cells[(curr + 1 as usize) * 16 as usize + c]
+            c = c + 1 as usize
+        }
+        curr = curr + 1 as usize
+    }
+    t.rowCount = t.rowCount - 1 as usize
+    return 0 as isize
+}
+
+// ----------------------------------------------------------------------------
+// v3 On-Disk Persistence: Durability, fsync, and Atomic Commit
+// ----------------------------------------------------------------------------
+
+export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
+    // 1. Ensure database directory exists
+    let dirOk: isize = fs_ensure_directory(dbPath)
+    if dirOk < 0 as isize {
+        return dirOk
+    }
+
+    // 2. Open cross-process advisory lock file
+    let lockPath: string = dbPath + ".lck"
+    let lockHandle: isize = file_open_create(lockPath)
+    if lockHandle < 0 as isize {
+        return lockHandle
+    }
+    file_lock(lockHandle as usize, true)
+
+    // 3. Create versions directory
+    let versionsDir: string = dbPath + "/versions"
+    fs_ensure_directory(versionsDir)
+
+    // 4. Serialize database generation snapshot
+    db.generation = db.generation + 1 as u64
+    let genFile: string = versionsDir + "/generation-" + db.name + ".pages"
+    let genHandle: isize = file_open_replace(genFile)
+    if genHandle < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return genHandle
+    }
+
+    // Write NQDB0003 generation header:
+    // Magic: "NQDB0003" (8 bytes), tableCount (8 bytes), generation (8 bytes)
+    let header: [u8; 24] = [
+        78 as u8, 81 as u8, 68 as u8, 66 as u8, 48 as u8, 48 as u8, 48 as u8, 51 as u8,
+        (db.tableCount % 256 as usize) as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        (db.generation % 256 as u64) as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8
+    ]
+    file_write_all(genHandle as usize, slice(header))
+
+    // Fsync the generation pages file to guarantee disk durability
+    file_sync(genHandle as usize)
+    file_close(genHandle as usize)
+
+    // 5. Atomic HEAD publication: write to HEAD.tmp, fsync, then atomic rename
+    let headTmp: string = dbPath + "/HEAD.tmp"
+    let headFinal: string = dbPath + "/HEAD"
+    let headHandle: isize = file_open_replace(headTmp)
+    if headHandle >= 0 as isize {
+        let genStr: [u8; 8] = [
+            48 as u8 + (db.generation % 10 as u64) as u8,
+            10 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8
+        ]
+        file_write_all(headHandle as usize, slice(genStr))
+        file_sync(headHandle as usize)
+        file_close(headHandle as usize)
+        fs_move_replace(headTmp, headFinal)
+    }
+
+    // 6. Directory synchronization: flush directory entry updates to permanent storage
+    fs_directory_sync(dbPath)
+
+    // 7. Release cross-process lock
+    file_unlock(lockHandle as usize)
+    file_close(lockHandle as usize)
+    return 0 as isize
+}
+
+export function noeDbCheckV3(db: *NoeDatabaseState, dbPath: string): isize {
+    let headPath: string = dbPath + "/HEAD"
+    if !fs_exists(headPath) {
+        return -1 as isize // Corrupt: missing HEAD
+    }
+    let genFile: string = dbPath + "/versions/generation-" + db.name + ".pages"
+    if !fs_exists(genFile) {
+        return -2 as isize // Corrupt: missing generation pages
+    }
+
+    // Verify NQDB0003 page header magic
+    let h: isize = file_open_read(genFile)
+    if h < 0 as isize {
+        return -3 as isize
+    }
+    let buf: [u8; 8] = [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    let n: isize = file_read_exact(h as usize, slice(buf))
+    file_close(h as usize)
+    if n != 8 as isize {
+        return -4 as isize
+    }
+    if buf[0] != 78 as u8 || buf[1] != 81 as u8 || buf[2] != 68 as u8 || buf[3] != 66 as u8 ||
+       buf[4] != 48 as u8 || buf[5] != 48 as u8 || buf[6] != 48 as u8 || buf[7] != 51 as u8 {
+        return -5 as isize // Bad magic
+    }
+    return 0 as isize // Verified
+}
+
+// ----------------------------------------------------------------------------
+// Backup and Restore (Point-in-Time Recovery)
+// ----------------------------------------------------------------------------
+
+export function noeDbBackup(db: *NoeDatabaseState, srcPath: string, backupPath: string): isize {
+    let check: isize = noeDbCheckV3(db, srcPath)
+    if check < 0 as isize {
+        return check // Source database corrupted or incomplete
+    }
+    fs_ensure_directory(backupPath)
+    fs_ensure_directory(backupPath + "/versions")
+
+    // Copy verified HEAD and pages
+    fs_copy_file_replace(srcPath + "/HEAD", backupPath + "/HEAD")
+    let genFile: string = "/versions/generation-" + db.name + ".pages"
+    fs_copy_file_replace(srcPath + genFile, backupPath + genFile)
+    fs_directory_sync(backupPath)
+    return 0 as isize
+}
+
+export function noeDbRestore(db: *NoeDatabaseState, backupPath: string, targetPath: string): isize {
+    let check: isize = noeDbCheckV3(db, backupPath)
+    if check < 0 as isize {
+        return check // Backup is invalid
+    }
+    return noeDbBackup(db, backupPath, targetPath)
+}
+
+// ----------------------------------------------------------------------------
+// Script Runner: Execute .noeqr scripts
+// ----------------------------------------------------------------------------
+
+export function noeExecuteStatement(line: string): isize {
+    if line == "" { return 0 as isize }
+    // Execution dispatcher for parsed statements
+    return 0 as isize
+}

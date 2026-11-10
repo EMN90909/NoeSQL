@@ -15,13 +15,30 @@ export function noeRoleUpdate(): u32 { return 4 as u32 }
 export function noeRoleDelete(): u32 { return 8 as u32 }
 export function noeRoleSchema(): u32 { return 16 as u32 }
 export function noeRoleAdmin(): u32 { return 32 as u32 }
+export function noeRoleCombine(a: u32, b: u32): u32 {
+    let result: u32 = 0 as u32
+    let bit: u32 = 1 as u32
+    while bit <= 32 as u32 {
+        let hasA: bool = (a / bit) % 2 as u32 == 1 as u32
+        let hasB: bool = (b / bit) % 2 as u32 == 1 as u32
+        if hasA || hasB {
+            result = result + bit
+        }
+        bit = bit * 2 as u32
+    }
+    return result
+}
+export function noeRoleHas(roles: u32, required: u32): bool {
+    if required == 0 as u32 { return false }
+    return (roles / required) % 2 as u32 == 1 as u32
+}
 export function noeAuthenticated(p: *NoePrincipal): bool {
     return p != null && p.authenticated && !p.disabled && p.userId != 0 as u64
 }
 export function noePermit(p: *NoePrincipal, required: u32, scope: u64): bool {
     if !noeAuthenticated(p) || scope == 0 as u64 || p.scope != scope || required == 0 as u32 { return false }
-    if (p.roles & noeRoleAdmin()) != 0 as u32 { return true }
-    return (p.roles & required) == required
+    if noeRoleHas(p.roles, noeRoleAdmin()) { return true }
+    return noeRoleHas(p.roles, required)
 }
 export function noeOperationPermit(p: *NoePrincipal, operation: int, scope: u64): bool {
     if operation == 1 { return noePermit(p, noeRoleRead(), scope) }

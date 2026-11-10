@@ -1,0 +1,129 @@
+import "../Database/noesql_engine.noqeri"
+import "../Database/noesql_lexer.noqeri"
+import "../../Noqeri/Lib/std/file.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("ASSERTION FAILED: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+// Simple deterministic LCG random generator
+record LcgRng {
+    seed: u64
+}
+
+function rngNext(rng: *LcgRng): u8 {
+    rng.seed = (rng.seed * (6364136223846793005 as u64) + (1442695040888963407 as u64))
+    let upper: u64 = rng.seed / (4294967296 as u64)
+    return (upper % (256 as u64)) as u8
+}
+
+function main(): void {
+    print("=== Fuzz Testing Parser & Storage (Corrupted Mutations & Invariants) ===")
+
+    let rng: LcgRng
+    rng.seed = 123456789 as u64
+
+    // ------------------------------------------------------------------------
+    // Part 1: Lexer / Parser Fuzzing
+    // ------------------------------------------------------------------------
+    print("Fuzzing lexer with randomized and adversarial byte streams...")
+    let fuzzedBuf: [u8; 128]
+    let iter: usize = 0 as usize
+    while iter < 200 as usize {
+        let len: usize = (rngNext(&rng) % 120 as u8) as usize
+        let b: usize = 0 as usize
+        while b < len {
+            fuzzedBuf[b] = rngNext(&rng)
+            b = b + 1 as usize
+        }
+
+        // Run scanner on random buffer
+        let cur: NoeCursor
+        noeCursorInit(&cur)
+        let tok: NoeToken
+        let step: usize = 0 as usize
+        while step < 100 as usize {
+            let kind: int = noeNextToken(slice(fuzzedBuf, len), &cur, &tok)
+            if kind == noeTokenEof() || kind == noeTokenInvalid() {
+                break
+            }
+            step = step + 1 as usize
+        }
+        iter = iter + 1 as usize
+    }
+    print("Lexer fuzzer completed 200 adversarial iterations without crashing.")
+
+    // ------------------------------------------------------------------------
+    // Part 2: Storage Fuzzing & Corruption Injection
+    // ------------------------------------------------------------------------
+    print("Fuzzing v3 storage format with byte mutations...")
+    let dbPath: string = "tmp_fuzz_db"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "fuzz_target")
+    let tIdx: isize = noeCreateTable(&db, "metrics")
+    noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, tIdx as usize, "val", noeTypeInt(), true, false, false, false, "")
+
+    let r: [NoeRowCell; 2]
+    r[0].isNull = true
+    r[1].isNull = false
+    r[1].intVal = 42 as i64
+    noeInsertRow(&db, tIdx as usize, slice(r))
+    noeDbSaveV3(&db, dbPath)
+
+    // Base database is valid
+    assert_true(noeDbCheckV3(&db, dbPath) == 0 as isize, "clean base database validates")
+
+    // Mutation 1: Corrupt Magic Bytes in generation pages file
+    let genFile: string = dbPath + "/versions/generation-fuzz_target.pages"
+    let h: isize = file_open_replace(genFile)
+    assert_true(h >= 0 as isize, "open gen file for corruption")
+    // Write corrupted magic: "BADMAGIC"
+    let badMagic: [u8; 8] = [66 as u8, 65 as u8, 68 as u8, 77 as u8, 65 as u8, 71 as u8, 73 as u8, 67 as u8]
+    file_write_all(h as usize, slice(badMagic))
+    file_close(h as usize)
+
+    // noeDbCheckV3 MUST reject this corruption
+    let checkCorruptMagic: isize = noeDbCheckV3(&db, dbPath)
+    assert_true(checkCorruptMagic < 0 as isize, "corrupted magic bytes rejected by noeDbCheckV3")
+
+    // Mutation 2: Truncated pages file (< 8 bytes)
+    h = file_open_replace(genFile)
+    let shortBuf: [u8; 3] = [78 as u8, 81 as u8, 68 as u8]
+    file_write_all(h as usize, slice(shortBuf))
+    file_close(h as usize)
+
+    let checkTruncated: isize = noeDbCheckV3(&db, dbPath)
+    assert_true(checkTruncated < 0 as isize, "truncated pages file rejected by noeDbCheckV3")
+
+    // Mutation 3: Missing HEAD file
+    fs_remove(dbPath + "/HEAD")
+    let checkMissingHead: isize = noeDbCheckV3(&db, dbPath)
+    assert_true(checkMissingHead == -1 as isize, "missing HEAD fails closed with -1")
+
+    // Restore HEAD for Mutation 4: Missing generation pages file
+    let headH: isize = file_open_replace(dbPath + "/HEAD")
+    let headGen: [u8; 2] = [50 as u8, 10 as u8]
+    file_write_all(headH as usize, slice(headGen))
+    file_close(headH as usize)
+
+    fs_remove(genFile)
+    let checkMissingGen: isize = noeDbCheckV3(&db, dbPath)
+    assert_true(checkMissingGen == -2 as isize, "missing generation pages fails closed with -2")
+
+    // Clean up
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("Fuzz Testing of Parser and Storage: ALL PASSED")
+}
+
+main()

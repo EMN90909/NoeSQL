@@ -1,0 +1,91 @@
+import "../Database/noesql_engine.noqeri"
+import "../../Noqeri/Lib/std/file.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("ASSERTION FAILED: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Backup and Point-in-Time Recovery ===")
+
+    let primaryDbPath: string = "tmp_primary_db"
+    let backupDbPath: string = "tmp_backup_archive"
+    let restoredDbPath: string = "tmp_restored_db"
+
+    // Clean up paths
+    fs_remove_tree(primaryDbPath)
+    fs_remove(primaryDbPath + ".lck")
+    fs_remove_tree(backupDbPath)
+    fs_remove_tree(restoredDbPath)
+
+    // 1. Initialize primary database
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "prod_store")
+
+    let tIdx: isize = noeCreateTable(&db, "inventory")
+    assert_true(tIdx >= 0 as isize, "create inventory table")
+    noeAddField(&db, tIdx as usize, "sku", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, tIdx as usize, "qty", noeTypeInt(), true, false, false, false, "")
+
+    // Insert inventory items
+    let item1: [NoeRowCell; 2]
+    item1[0].isNull = true // auto
+    item1[1].isNull = false
+    item1[1].intVal = 500 as i64
+    assert_true(noeInsertRow(&db, tIdx as usize, slice(item1)) == 0 as isize, "insert item 1")
+
+    let item2: [NoeRowCell; 2]
+    item2[0].isNull = true // auto
+    item2[1].isNull = false
+    item2[1].intVal = 1200 as i64
+    assert_true(noeInsertRow(&db, tIdx as usize, slice(item2)) == 0 as isize, "insert item 2")
+
+    // Durable commit
+    assert_true(noeDbSaveV3(&db, primaryDbPath) == 0 as isize, "primary durable save")
+    assert_true(noeDbCheckV3(&db, primaryDbPath) == 0 as isize, "primary check ok")
+
+    // 2. Perform database backup
+    let backupRes: isize = noeDbBackup(&db, primaryDbPath, backupDbPath)
+    assert_true(backupRes == 0 as isize, "backup generation snapshot created")
+
+    // Verify backup archive has HEAD and generation pages
+    assert_true(fs_exists(backupDbPath + "/HEAD"), "backup HEAD exists")
+    assert_true(fs_exists(backupDbPath + "/versions/generation-prod_store.pages"), "backup generation pages exist")
+    assert_true(noeDbCheckV3(&db, backupDbPath) == 0 as isize, "backup passes integrity check")
+
+    // 3. Disaster Simulation: Corrupt or delete primary database
+    fs_remove_tree(primaryDbPath)
+    assert_true(!fs_exists(primaryDbPath + "/HEAD"), "primary database destroyed")
+
+    // 4. Point-in-time Restore from backup
+    let restoreRes: isize = noeDbRestore(&db, backupDbPath, restoredDbPath)
+    assert_true(restoreRes == 0 as isize, "restoration from backup archive successful")
+
+    // 5. Verify restored database
+    assert_true(fs_exists(restoredDbPath + "/HEAD"), "restored HEAD exists")
+    assert_true(fs_exists(restoredDbPath + "/versions/generation-prod_store.pages"), "restored generation pages exist")
+    assert_true(noeDbCheckV3(&db, restoredDbPath) == 0 as isize, "restored database passes v3 check")
+
+    // Read and verify restored HEAD content
+    let h: isize = file_open_read(restoredDbPath + "/HEAD")
+    assert_true(h >= 0 as isize, "open restored HEAD")
+    let headBuf: [u8; 8] = [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
+    let n: isize = file_read_exact(h as usize, slice(headBuf))
+    file_close(h as usize)
+    assert_true(n > 0 as isize, "read restored HEAD")
+    assert_true(headBuf[0] == (48 as u8 + 2 as u8), "restored HEAD points to generation 2")
+
+    // Clean up
+    fs_remove_tree(primaryDbPath)
+    fs_remove_tree(backupDbPath)
+    fs_remove_tree(restoredDbPath)
+
+    print("Backup and Point-in-Time Recovery: ALL PASSED")
+}
+
+main()

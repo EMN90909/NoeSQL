@@ -1,0 +1,104 @@
+import "../Database/noesql_engine.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("ASSERTION FAILED: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Query Injection Resistance (Bound Parameters & Literal Typing) ===")
+
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "injection_test")
+
+    let tIdx: isize = noeCreateTable(&db, "users")
+    assert_true(tIdx >= 0 as isize, "create users table")
+    noeAddField(&db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, tIdx as usize, "username", noeTypeText(), true, true, false, false, "")
+    noeAddField(&db, tIdx as usize, "role", noeTypeText(), true, false, false, false, "")
+
+    // Insert legitimate user
+    let user1: [NoeRowCell; 3]
+    user1[0].isNull = true // auto
+    user1[1].isNull = false
+    user1[1].textVal = "alice"
+    user1[2].isNull = false
+    user1[2].textVal = "user"
+    assert_true(noeInsertRow(&db, tIdx as usize, slice(user1)) == 0 as isize, "insert alice")
+
+    // Insert hostile SQL injection payloads as values
+    // Payload 1: Classic tautology: ' OR '1'='1
+    let user2: [NoeRowCell; 3]
+    user2[0].isNull = true // auto
+    user2[1].isNull = false
+    user2[1].textVal = "' OR '1'='1"
+    user2[2].isNull = false
+    user2[2].textVal = "guest"
+    assert_true(noeInsertRow(&db, tIdx as usize, slice(user2)) == 0 as isize, "insert tautology payload")
+
+    // Payload 2: Stacked statement drop: '; DROP TABLE users; --
+    let user3: [NoeRowCell; 3]
+    user3[0].isNull = true // auto
+    user3[1].isNull = false
+    user3[1].textVal = "hacker'; DROP TABLE users; --"
+    user3[2].isNull = false
+    user3[2].textVal = "attacker"
+    assert_true(noeInsertRow(&db, tIdx as usize, slice(user3)) == 0 as isize, "insert drop-table payload")
+
+    // Payload 3: Union injection: ' UNION SELECT * FROM users --
+    let user4: [NoeRowCell; 3]
+    user4[0].isNull = true // auto
+    user4[1].isNull = false
+    user4[1].textVal = "admin' --"
+    user4[2].isNull = false
+    user4[2].textVal = "probe"
+    assert_true(noeInsertRow(&db, tIdx as usize, slice(user4)) == 0 as isize, "insert comment payload")
+
+    // 1. Verify table still exists and wasn't dropped by '; DROP TABLE users; --'
+    assert_true(noeFindTable(&db, "users") == 0 as isize, "table 'users' remains intact and was not dropped")
+    assert_true(db.tables[0].rowCount == 4 as usize, "all 4 rows stored safely")
+
+    // 2. Query for exact string "alice": must ONLY match alice, never tautology row
+    let t: *NoeTableData = &db.tables[tIdx as usize]
+    let aliceMatches: usize = 0 as usize
+    let r: usize = 0 as usize
+    while r < t.rowCount {
+        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
+        if !cell.isNull && cell.textVal == "alice" {
+            aliceMatches = aliceMatches + 1 as usize
+        }
+        r = r + 1 as usize
+    }
+    assert_true(aliceMatches == 1 as usize, "exact match on 'alice' produces exactly 1 record, ignoring tautology")
+
+    // 3. Query for literal string "' OR '1'='1": must ONLY match payload row 2, NOT row 1
+    let tautologyMatches: usize = 0 as usize
+    r = 0 as usize
+    while r < t.rowCount {
+        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
+        if !cell.isNull && cell.textVal == "' OR '1'='1" {
+            tautologyMatches = tautologyMatches + 1 as usize
+        }
+        r = r + 1 as usize
+    }
+    assert_true(tautologyMatches == 1 as usize, "tautology payload matches only its exact literal record")
+
+    // 4. Query for "admin": must NOT match "admin' --"
+    let adminMatches: usize = 0 as usize
+    r = 0 as usize
+    while r < t.rowCount {
+        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
+        if !cell.isNull && cell.textVal == "admin" {
+            adminMatches = adminMatches + 1 as usize
+        }
+        r = r + 1 as usize
+    }
+    assert_true(adminMatches == 0 as usize, "'admin' query does not match 'admin\' --'")
+
+    print("Query Injection Resistance (Bound Parameters & Literal Typing): ALL PASSED")
+}
+
+main()

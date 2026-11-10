@@ -1,0 +1,20 @@
+import "../Database/noesql_wal.noqeri"
+
+function main(): void {
+    let target: [u8; 128]
+    let scratch: [u8; 128]
+    let payload: [u8; 4] = [1 as u8, 2 as u8, 3 as u8, 4 as u8]
+    let encodedLen: isize = noeWalEncodeFrame(slice(target), slice(scratch), noeWalImage(), 42 as u64, 1 as u32, slice(payload))
+    if encodedLen <= 0 as isize {
+        print("WAL encode failed")
+        return
+    }
+    let frame: NoeWalFrame
+    let decodeStatus: isize = noeWalDecodeFrame(slice(target), 0 as usize, slice(scratch), &frame)
+    if decodeStatus == 0 as isize && frame.transaction == 42 as u64 && frame.payloadSize == 4 as usize {
+        print("NoeSQL WAL Frame encode/decode round-trip: VERIFIED OK")
+    } else {
+        print("WAL decode failed")
+    }
+}
+main()

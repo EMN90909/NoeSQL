@@ -1,0 +1,101 @@
+import "../Database/noesql_engine.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("ASSERTION FAILED: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Foreign Key Enforcement (Adversarial & Edge Cases) ===")
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "fk_test")
+
+    // 1. Create table 'departments' (id key auto, name text required)
+    let deptIdx: isize = noeCreateTable(&db, "departments")
+    assert_true(deptIdx >= 0 as isize, "create departments table")
+    noeAddField(&db, deptIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, deptIdx as usize, "name", noeTypeText(), true, false, false, false, "")
+
+    // 2. Create table 'employees' with BOTH cross-table FK AND self-referencing FK
+    // id: int key auto
+    // name: text required
+    // dept_id: int ref departments
+    // manager_id: int ref employees (SELF-REFERENCING!)
+    let empIdx: isize = noeCreateTable(&db, "employees")
+    assert_true(empIdx >= 0 as isize, "create employees table")
+    noeAddField(&db, empIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&db, empIdx as usize, "name", noeTypeText(), true, false, false, false, "")
+    noeAddField(&db, empIdx as usize, "dept_id", noeTypeInt(), false, false, false, false, "departments")
+    noeAddField(&db, empIdx as usize, "manager_id", noeTypeInt(), false, false, false, false, "employees")
+
+    // Insert departments: 1 = Engineering, 2 = Marketing
+    let d1: [NoeRowCell; 2]
+    d1[0].isNull = true // auto
+    d1[1].isNull = false
+    d1[1].textVal = "Engineering"
+    assert_true(noeInsertRow(&db, deptIdx as usize, slice(d1)) == 0 as isize, "insert dept 1")
+
+    let d2: [NoeRowCell; 2]
+    d2[0].isNull = true // auto
+    d2[1].isNull = false
+    d2[1].textVal = "Marketing"
+    assert_true(noeInsertRow(&db, deptIdx as usize, slice(d2)) == 0 as isize, "insert dept 2")
+
+    // Case A: Adversarial FK - Insert employee referencing non-existent department (999)
+    let badEmp: [NoeRowCell; 4]
+    badEmp[0].isNull = true // auto
+    badEmp[1].isNull = false
+    badEmp[1].textVal = "Intruder"
+    badEmp[2].isNull = false
+    badEmp[2].intVal = 999 as i64 // Missing dept!
+    badEmp[3].isNull = true
+    let badRes: isize = noeInsertRow(&db, empIdx as usize, slice(badEmp))
+    assert_true(badRes == -205 as isize, "Insert referencing non-existent department must fail with NOE205")
+
+    // Case B: Insert Root Manager (Alice, dept=1, manager=null)
+    let alice: [NoeRowCell; 4]
+    alice[0].isNull = true // auto
+    alice[1].isNull = false
+    alice[1].textVal = "Alice"
+    alice[2].isNull = false
+    alice[2].intVal = 1 as i64 // Engineering
+    alice[3].isNull = true     // Nullable manager (root)
+    assert_true(noeInsertRow(&db, empIdx as usize, slice(alice)) == 0 as isize, "insert root manager Alice")
+
+    // Case C: Insert Subordinate (Bob, dept=1, manager=1 [Alice])
+    let bob: [NoeRowCell; 4]
+    bob[0].isNull = true // auto
+    bob[1].isNull = false
+    bob[1].textVal = "Bob"
+    bob[2].isNull = false
+    bob[2].intVal = 1 as i64
+    bob[3].isNull = false
+    bob[3].intVal = 1 as i64 // Points to Alice
+    assert_true(noeInsertRow(&db, empIdx as usize, slice(bob)) == 0 as isize, "insert subordinate Bob referencing Alice")
+
+    // Case D: Adversarial Self-Referencing Delete
+    // Attempt to delete Alice (id=1) while Bob (id=2) still references Alice!
+    let deleteAliceStatus: isize = noeDeleteRow(&db, empIdx as usize, 0 as usize)
+    assert_true(deleteAliceStatus == -208 as isize, "Deleting manager Alice must be BLOCKED by self-reference from Bob (NOE208)")
+
+    // Case E: Adversarial Cross-Table Delete
+    // Attempt to delete Department 1 (Engineering) while Alice and Bob still belong to it!
+    let deleteDeptStatus: isize = noeDeleteRow(&db, deptIdx as usize, 0 as usize)
+    assert_true(deleteDeptStatus == -208 as isize, "Deleting Department 1 must be BLOCKED by foreign key reference from employees (NOE208)")
+
+    // Case F: Delete dependent Bob first
+    assert_true(noeDeleteRow(&db, empIdx as usize, 1 as usize) == 0 as isize, "Delete Bob (no subordinates reference him)")
+
+    // Now Alice has no subordinates referencing her, so she can be safely deleted!
+    assert_true(noeDeleteRow(&db, empIdx as usize, 0 as usize) == 0 as isize, "Delete Alice (now unreferenced)")
+
+    // Now Department 1 has no employees referencing it, so it can be safely deleted!
+    assert_true(noeDeleteRow(&db, deptIdx as usize, 0 as usize) == 0 as isize, "Delete Department 1 (now unreferenced)")
+
+    print("Foreign Key Enforcement (Adversarial, Self-Referencing & Cascades): ALL PASSED")
+}
+
+main()
