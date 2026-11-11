@@ -11,6 +11,8 @@ test: no-js no-c-family no-rust-zig
 	          tests/noesql_native_security.noqeri \
 	          tests/noesql_zig_relational.noqeri \
 	          tests/test_wal_noqeri.noqeri \
+	          tests/test_btree_noqeri.noqeri \
+	          tests/test_wal_engine_lifecycle.noqeri \
 	          tests/test_adversarial_fk.noqeri \
 	          tests/test_durability_fsync.noqeri \
 	          tests/test_injection_resistance.noqeri \

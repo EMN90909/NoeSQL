@@ -1,0 +1,39 @@
+import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_concurrent_wal_db"
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize {
+        print("OPEN_FAILED")
+        return
+    }
+
+    let tIdx: isize = noeFindTable(&engine.db, "events")
+    if tIdx < 0 as isize {
+        noeWalEngineClose(&engine)
+        print("TABLE_NOT_FOUND")
+        return
+    }
+
+    let t: *NoeTableData = &engine.db.tables[tIdx as usize]
+    if t.rowCount == 0 as usize {
+        noeWalEngineClose(&engine)
+        print("CORRUPTION:zero_rows")
+        return
+    }
+
+    // Verify primary key B-Tree index lookup
+    let rowIdx: isize = noeBTreeSearch(&engine.primaryIndex, 1 as i64)
+    if rowIdx < 0 as isize {
+        noeWalEngineClose(&engine)
+        print("CORRUPTION:btree_miss")
+        return
+    }
+
+    noeWalEngineClose(&engine)
+    print("WAL_READER_COMPLETE")
+}
+
+main()

@@ -1,0 +1,48 @@
+import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "/tmp/bench_wal.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize {
+        print("OPEN_FAILED")
+        return
+    }
+
+    let tIdx: isize = noeCreateTable(&engine.db, "records")
+    noeAddField(&engine.db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&engine.db, tIdx as usize, "val", noeTypeInt(), true, false, false, false, "")
+    noeAddField(&engine.db, tIdx as usize, "name", noeTypeText(), true, false, false, false, "")
+
+    // Perform 50 durable transactions via WAL
+    let i: usize = 0 as usize
+    while i < 50 as usize {
+        let tx: NoeWalTx
+        let bRes: isize = noeWalEngineBegin(&engine, &tx)
+        if bRes != 0 as isize { print("TX_BEGIN_FAILED") return }
+
+        let stmt: string = "records add { val: " + intToString((i * 10 as usize) as i64) + ", name: \"test_record\" }"
+        let eRes: isize = noeWalEngineExecute(&engine, &tx, stmt)
+        if eRes != 0 as isize { print("TX_EXEC_FAILED") return }
+
+        let cRes: isize = noeWalEngineCommit(&engine, &tx)
+        if cRes != 0 as isize { print("TX_COMMIT_FAILED") return }
+
+        i = i + 1 as usize
+    }
+
+    // Point lookup using B-Tree index
+    let hitRow: isize = noeBTreeSearch(&engine.primaryIndex, 25 as i64)
+
+    // Range scan
+    let outRows: [usize; 64]
+    let rangeCount: usize = noeBTreeRangeScan(&engine.primaryIndex, 25 as i64, 50 as i64, slice(outRows))
+
+    noeWalEngineClose(&engine)
+    print("NOESQL_WAL_BENCH_OK:rows=50:hit=" + intToString(hitRow as i64) + ":range=" + intToString(rangeCount as i64))
+}
+
+main()

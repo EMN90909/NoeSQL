@@ -9,6 +9,15 @@
 *.noedb
 *.noedb.wal
 *.noedb.lck
+*.lck
+tmp_*
+.ci-noqeri-build/
+*.backup
+*.restored
+Benchmarks/stress_cap.noqeri
+Benchmarks/stress_gen.noqeri
+Benchmarks/verify_contention.noqeri
+Benchmarks/worker_*.noqeri
 *.env
 .env.*
 !*.env.example

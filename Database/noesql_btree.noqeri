@@ -1,0 +1,192 @@
+module noqeri.database.noesql.btree
+
+// NoeSQL Pure Noqeri B-Tree Index Groundwork
+// High-performance, zero dynamic heap allocation B-Tree index
+// Providing O(log N) search, insertion, and range scans for relational indexing.
+
+record NoeBTreeNode {
+    isLeaf: bool
+    keyCount: usize
+    keys: [i64; 16]
+    rowIndices: [usize; 16]
+    children: [usize; 17]
+}
+
+record NoeBTree {
+    root: usize
+    nodeCount: usize
+    nodes: [NoeBTreeNode; 64]
+}
+
+export function noeBTreeMaxKeys(): usize {
+    return 16 as usize
+}
+
+export function noeBTreeMaxNodes(): usize {
+    return 64 as usize
+}
+
+export function noeBTreeInit(tree: *NoeBTree): void {
+    if tree == null { return }
+    tree.root = 0 as usize
+    tree.nodeCount = 1 as usize
+    tree.nodes[0].isLeaf = true
+    tree.nodes[0].keyCount = 0 as usize
+    let i: usize = 0 as usize
+    while i < 16 as usize {
+        tree.nodes[0].keys[i] = 0 as i64
+        tree.nodes[0].rowIndices[i] = 0 as usize
+        tree.nodes[0].children[i] = 0 as usize
+        i = i + 1 as usize
+    }
+    tree.nodes[0].children[16 as usize] = 0 as usize
+}
+
+export function noeBTreeSearch(tree: *NoeBTree, key: i64): isize {
+    if tree == null || tree.nodeCount == 0 as usize { return -1 as isize }
+    let currIdx: usize = tree.root
+    while currIdx < tree.nodeCount {
+        let node: *NoeBTreeNode = &tree.nodes[currIdx]
+        let i: usize = 0 as usize
+        while i < node.keyCount && key > node.keys[i] {
+            i = i + 1 as usize
+        }
+        if i < node.keyCount && node.keys[i] == key {
+            return node.rowIndices[i] as isize
+        }
+        if node.isLeaf {
+            return -1 as isize
+        }
+        currIdx = node.children[i]
+    }
+    return -1 as isize
+}
+
+export function noeBTreeInsert(tree: *NoeBTree, key: i64, rowIndex: usize): isize {
+    if tree == null { return -1 as isize }
+    let rootNode: *NoeBTreeNode = &tree.nodes[tree.root]
+
+    // If root is full, split root
+    if rootNode.keyCount >= 15 as usize {
+        if tree.nodeCount + 2 as usize > 64 as usize { return -2 as isize } // capacity limit
+        let newRootIdx: usize = tree.nodeCount
+        tree.nodeCount = tree.nodeCount + 1 as usize
+        let newRoot: *NoeBTreeNode = &tree.nodes[newRootIdx]
+        newRoot.isLeaf = false
+        newRoot.keyCount = 0 as usize
+        newRoot.children[0] = tree.root
+
+        let oldRootIdx: usize = tree.root
+        tree.root = newRootIdx
+
+        noeBTreeSplitChild(tree, newRootIdx, 0 as usize, oldRootIdx)
+        return noeBTreeInsertNonFull(tree, newRootIdx, key, rowIndex)
+    } else {
+        return noeBTreeInsertNonFull(tree, tree.root, key, rowIndex)
+    }
+}
+
+function noeBTreeSplitChild(tree: *NoeBTree, parentIdx: usize, childPos: usize, childIdx: usize): void {
+    let newChildIdx: usize = tree.nodeCount
+    tree.nodeCount = tree.nodeCount + 1 as usize
+
+    let child: *NoeBTreeNode = &tree.nodes[childIdx]
+    let newChild: *NoeBTreeNode = &tree.nodes[newChildIdx]
+    let parent: *NoeBTreeNode = &tree.nodes[parentIdx]
+
+    newChild.isLeaf = child.isLeaf
+    newChild.keyCount = 7 as usize
+
+    let j: usize = 0 as usize
+    while j < 7 as usize {
+        newChild.keys[j] = child.keys[j + 8 as usize]
+        newChild.rowIndices[j] = child.rowIndices[j + 8 as usize]
+        j = j + 1 as usize
+    }
+
+    if !child.isLeaf {
+        j = 0 as usize
+        while j < 8 as usize {
+            newChild.children[j] = child.children[j + 8 as usize]
+            j = j + 1 as usize
+        }
+    }
+
+    let midKey: i64 = child.keys[7 as usize]
+    let midRow: usize = child.rowIndices[7 as usize]
+    child.keyCount = 7 as usize
+
+    // Shift parent children
+    j = parent.keyCount + 1 as usize
+    while j > childPos + 1 as usize {
+        parent.children[j] = parent.children[j - 1 as usize]
+        j = j - 1 as usize
+    }
+    parent.children[childPos + 1 as usize] = newChildIdx
+
+    // Shift parent keys
+    j = parent.keyCount
+    while j > childPos {
+        parent.keys[j] = parent.keys[j - 1 as usize]
+        parent.rowIndices[j] = parent.rowIndices[j - 1 as usize]
+        j = j - 1 as usize
+    }
+    parent.keys[childPos] = midKey
+    parent.rowIndices[childPos] = midRow
+    parent.keyCount = parent.keyCount + 1 as usize
+}
+
+function noeBTreeInsertNonFull(tree: *NoeBTree, nodeIdx: usize, key: i64, rowIndex: usize): isize {
+    let node: *NoeBTreeNode = &tree.nodes[nodeIdx]
+    if node.isLeaf {
+        let i: usize = node.keyCount
+        while i > 0 as usize && node.keys[i - 1 as usize] > key {
+            node.keys[i] = node.keys[i - 1 as usize]
+            node.rowIndices[i] = node.rowIndices[i - 1 as usize]
+            i = i - 1 as usize
+        }
+        node.keys[i] = key
+        node.rowIndices[i] = rowIndex
+        node.keyCount = node.keyCount + 1 as usize
+        return 0 as isize
+    } else {
+        let i: usize = node.keyCount
+        while i > 0 as usize && key < node.keys[i - 1 as usize] {
+            i = i - 1 as usize
+        }
+        let childIdx: usize = node.children[i]
+        if tree.nodes[childIdx].keyCount >= 15 as usize {
+            noeBTreeSplitChild(tree, nodeIdx, i, childIdx)
+            if key > tree.nodes[nodeIdx].keys[i] {
+                childIdx = tree.nodes[nodeIdx].children[i + 1 as usize]
+            }
+        }
+        return noeBTreeInsertNonFull(tree, childIdx, key, rowIndex)
+    }
+}
+
+export function noeBTreeRangeScan(tree: *NoeBTree, minKey: i64, maxKey: i64, outRows: []usize): usize {
+    if tree == null || len(outRows) == 0 as usize { return 0 as usize }
+    let count: usize = 0 as usize
+    noeBTreeScanNode(tree, tree.root, minKey, maxKey, outRows, &count)
+    return count
+}
+
+function noeBTreeScanNode(tree: *NoeBTree, nodeIdx: usize, minKey: i64, maxKey: i64, outRows: []usize, count: *usize): void {
+    if nodeIdx >= tree.nodeCount || count[0] >= len(outRows) { return }
+    let node: *NoeBTreeNode = &tree.nodes[nodeIdx]
+    let i: usize = 0 as usize
+    while i < node.keyCount && count[0] < len(outRows) {
+        if !node.isLeaf {
+            noeBTreeScanNode(tree, node.children[i], minKey, maxKey, outRows, count)
+        }
+        if node.keys[i] >= minKey && node.keys[i] <= maxKey && count[0] < len(outRows) {
+            outRows[count[0]] = node.rowIndices[i]
+            count[0] = count[0] + 1 as usize
+        }
+        i = i + 1 as usize
+    }
+    if !node.isLeaf && count[0] < len(outRows) {
+        noeBTreeScanNode(tree, node.children[node.keyCount], minKey, maxKey, outRows, count)
+    }
+}

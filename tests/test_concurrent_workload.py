@@ -80,7 +80,49 @@ def main():
         sys.exit(1)
 
     cleanup()
-    print("Long-Running Concurrent Workload (Multi-Process Readers & Writers): ALL PASSED (Zero Corruption, 100% Consistency)")
+
+    # Step 4: WAL Multi-Process Concurrency Test
+    print("Testing Concurrent WAL Workload (Multi-Process WAL Writers & Readers)...")
+    wal_db = os.path.join(NOESQL_DIR, "tmp_concurrent_wal_db")
+    if os.path.exists(wal_db):
+        shutil.rmtree(wal_db, ignore_errors=True)
+    if os.path.exists(wal_db + ".lck"):
+        try: os.remove(wal_db + ".lck")
+        except OSError: pass
+
+    # Pre-init
+    init_wal = subprocess.run([NOQERI_BIN, "run", "tests/worker_wal_writer.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)
+    if init_wal.returncode != 0 or "WAL_WRITER_COMPLETE" not in init_wal.stdout:
+        print(f"Failed to pre-init WAL database:\n{init_wal.stdout}\n{init_wal.stderr}")
+        sys.exit(1)
+
+    wal_procs = []
+    for i in range(4):
+        p = subprocess.Popen([NOQERI_BIN, "run", "tests/worker_wal_writer.noqeri"], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wal_procs.append(("wal_writer", i, p))
+    for j in range(4):
+        p = subprocess.Popen([NOQERI_BIN, "run", "tests/worker_wal_reader.noqeri"], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        wal_procs.append(("wal_reader", j, p))
+
+    for role, idx, p in wal_procs:
+        stdout, stderr = p.communicate(timeout=60)
+        if p.returncode != 0:
+            print(f"WAL process {role} #{idx} FAILED with code {p.returncode}: {stderr}")
+            all_ok = False
+        elif "CORRUPTION" in stdout:
+            print(f"WAL process {role} #{idx} reported corruption: {stdout}")
+            all_ok = False
+
+    if os.path.exists(wal_db):
+        shutil.rmtree(wal_db, ignore_errors=True)
+    if os.path.exists(wal_db + ".lck"):
+        try: os.remove(wal_db + ".lck")
+        except OSError: pass
+
+    if not all_ok:
+        sys.exit(1)
+
+    print("Long-Running Concurrent Workload (Multi-Process Readers & Writers, COW + WAL): ALL PASSED (Zero Corruption, 100% Consistency)")
 
 if __name__ == "__main__":
     main()

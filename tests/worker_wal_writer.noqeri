@@ -1,0 +1,40 @@
+import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_concurrent_wal_db"
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize {
+        print("OPEN_FAILED")
+        return
+    }
+
+    let tIdx: isize = noeFindTable(&engine.db, "events")
+    if tIdx < 0 as isize {
+        tIdx = noeCreateTable(&engine.db, "events")
+        noeAddField(&engine.db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+        noeAddField(&engine.db, tIdx as usize, "data", noeTypeInt(), true, false, false, false, "")
+    }
+
+    let i: usize = 0 as usize
+    while i < 5 as usize {
+        let tx: NoeWalTx
+        let bRes: isize = noeWalEngineBegin(&engine, &tx)
+        if bRes != 0 as isize { print("BEGIN_FAILED") return }
+
+        let stmt: string = "events add { data: " + intToString((200 + i as int) as i64) + " }"
+        let eRes: isize = noeWalEngineExecute(&engine, &tx, stmt)
+        if eRes != 0 as isize { print("EXEC_FAILED") return }
+
+        let cRes: isize = noeWalEngineCommit(&engine, &tx)
+        if cRes != 0 as isize { print("COMMIT_FAILED") return }
+
+        i = i + 1 as usize
+    }
+
+    noeWalEngineClose(&engine)
+    print("WAL_WRITER_COMPLETE")
+}
+
+main()

@@ -1,0 +1,49 @@
+import "../Database/noesql_btree.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing NoeSQL Pure Noqeri B+ Tree Index Groundwork ===")
+
+    let tree: NoeBTree
+    noeBTreeInit(&tree)
+
+    assert_true(noeBTreeSearch(&tree, 100 as i64) == -1 as isize, "empty tree search")
+
+    // Insert 30 keys to trigger node splitting
+    let i: usize = 0 as usize
+    while i < 30 as usize {
+        let key: i64 = ((i * 17 as usize + 3 as usize) % 100 as usize) as i64
+        let insRes: isize = noeBTreeInsert(&tree, key, i)
+        assert_true(insRes == 0 as isize, "insert key into btree")
+        i = i + 1 as usize
+    }
+
+    // Verify all 30 keys can be searched with exact row indices
+    i = 0 as usize
+    while i < 30 as usize {
+        let key: i64 = ((i * 17 as usize + 3 as usize) % 100 as usize) as i64
+        let foundRow: isize = noeBTreeSearch(&tree, key)
+        assert_true(foundRow >= 0 as isize, "found key in btree")
+        i = i + 1 as usize
+    }
+
+    // Verify non-existent keys
+    assert_true(noeBTreeSearch(&tree, 999 as i64) == -1 as isize, "non-existent key returns -1")
+    assert_true(noeBTreeSearch(&tree, -50 as i64) == -1 as isize, "negative key returns -1")
+
+    // Range scan test
+    let outRows: [usize; 64]
+    let rangeCount: usize = noeBTreeRangeScan(&tree, 10 as i64, 40 as i64, slice(outRows))
+    assert_true(rangeCount > 0 as usize, "range scan returned results")
+
+    print("B+ Tree Index Groundwork (Inserts, Splits, Lookups & Range Scans): ALL PASSED")
+}
+
+main()

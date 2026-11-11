@@ -60,4 +60,6 @@ jobs:
         env:
           NOQERI: ${{ github.workspace }}/.ci-noqeri-build/noqeri
         run: |
-          make run
+          ./bin/noesql
+          python3 Benchmarks/stress_test_suite.py
+          python3 Benchmarks/bench_stress.py

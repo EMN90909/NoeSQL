@@ -5,8 +5,8 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-NOQERI_BIN = "/home/antigravity/EMN90909/Noqeri/build/noqeri"
-NOESQL_DIR = "/home/antigravity/EMN90909/NoeSQL"
+NOESQL_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+NOQERI_BIN = os.environ.get("NOQERI", os.path.abspath(os.path.join(NOESQL_DIR, "..", "Noqeri", "build", "noqeri")))
 
 print("================================================================================")
 print("  NOESQL DEEP STRESS & ADVERSARIAL CAPACITY SUITE")
@@ -44,7 +44,7 @@ function main(): void {
 }
 main()
 """
-with open("/home/antigravity/EMN90909/NoeSQL/Benchmarks/stress_cap.noqeri", "w") as f:
+with open(os.path.join(NOESQL_DIR, "Benchmarks", "stress_cap.noqeri"), "w") as f:
     f.write(script_capacity)
 
 res = subprocess.run([NOQERI_BIN, "run", "Benchmarks/stress_cap.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)
@@ -92,7 +92,7 @@ function main(): void {
 }
 main()
 """
-with open("/home/antigravity/EMN90909/NoeSQL/Benchmarks/stress_gen.noqeri", "w") as f:
+with open(os.path.join(NOESQL_DIR, "Benchmarks", "stress_gen.noqeri"), "w") as f:
     f.write(script_gen_rollover)
 
 t0 = time.perf_counter()
@@ -154,7 +154,7 @@ function main(): void {{
 }}
 main()
 """
-    script_path = f"/home/antigravity/EMN90909/NoeSQL/Benchmarks/worker_{worker_id}.noqeri"
+    script_path = os.path.join(NOESQL_DIR, "Benchmarks", f"worker_{worker_id}.noqeri")
     with open(script_path, "w") as f:
         f.write(worker_script)
     r = subprocess.run([NOQERI_BIN, "run", script_path], cwd=NOESQL_DIR, capture_output=True, text=True)
@@ -196,7 +196,7 @@ function main(): void {
 }
 main()
 """
-with open("/home/antigravity/EMN90909/NoeSQL/Benchmarks/verify_contention.noqeri", "w") as f:
+with open(os.path.join(NOESQL_DIR, "Benchmarks", "verify_contention.noqeri"), "w") as f:
     f.write(verify_script)
 
 final_res = subprocess.run([NOQERI_BIN, "run", "Benchmarks/verify_contention.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)

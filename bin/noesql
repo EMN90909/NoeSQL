@@ -1,0 +1,17 @@
+#!/bin/bash
+set -euo pipefail
+
+# NoeSQL Standalone Native Execution Runner
+if [ -n "${NOQERI:-}" ] && [ -x "$NOQERI" ]; then
+    NOQERI_BIN="$NOQERI"
+elif [ -x "/home/antigravity/EMN90909/Noqeri/build/noqeri" ]; then
+    NOQERI_BIN="/home/antigravity/EMN90909/Noqeri/build/noqeri"
+elif command -v noqeri >/dev/null 2>&1; then
+    NOQERI_BIN="$(command -v noqeri)"
+else
+    echo "Error: noqeri runtime executable not found" >&2
+    exit 1
+fi
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$NOQERI_BIN" run "$SCRIPT_DIR/Programs/noesql.noqeri" "$@"

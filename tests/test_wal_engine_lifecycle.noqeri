@@ -1,0 +1,70 @@
+import "../Database/noesql_wal_engine.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing NoeSQL Multi-Process Daemon & Client-Server WAL Storage Engine ===")
+
+    let dbPath: string = "/tmp/test_wal_engine.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    // 1. Open engine
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    assert_true(openRes == 0 as isize, "open wal engine")
+    assert_true(fs_exists(dbPath + "/HEAD"), "HEAD exists")
+    assert_true(fs_exists(dbPath + "/WAL.log"), "WAL.log exists")
+
+    // 2. Define schema
+    let tIdx: isize = noeCreateTable(&engine.db, "inventory")
+    assert_true(tIdx >= 0 as isize, "create table inventory")
+    noeAddField(&engine.db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&engine.db, tIdx as usize, "sku", noeTypeText(), true, false, false, false, "")
+    noeAddField(&engine.db, tIdx as usize, "qty", noeTypeInt(), true, false, false, false, "")
+
+    // 3. Perform 20 WAL transactions
+    let i: usize = 0 as usize
+    while i < 20 as usize {
+        let tx: NoeWalTx
+        assert_true(noeWalEngineBegin(&engine, &tx) == 0 as isize, "wal begin tx")
+        let stmt: string = "inventory add { sku: \"item_" + intToString(i as i64) + "\", qty: " + intToString((i * 5 as usize) as i64) + " }"
+        assert_true(noeWalEngineExecute(&engine, &tx, stmt) == 0 as isize, "wal execute tx")
+        assert_true(noeWalEngineCommit(&engine, &tx) == 0 as isize, "wal commit tx")
+        i = i + 1 as usize
+    }
+
+    assert_true(engine.db.tables[0].rowCount == 20 as usize, "20 rows inserted into inventory")
+
+    // 4. Test B-tree lookup
+    let btreeRow: isize = noeBTreeSearch(&engine.primaryIndex, 5 as i64)
+    assert_true(btreeRow >= 0 as isize, "btree index lookup succeeded")
+
+    // 5. Test Daemon Request Handling
+    let resp: string = noeDaemonHandleRequest(&engine, "inventory add { sku: \"daemon_item\", qty: 999 }")
+    assert_true(engine.db.tables[0].rowCount == 21 as usize, "daemon request executed")
+
+    // 6. Checkpoint
+    assert_true(noeWalEngineCheckpoint(&engine) == 0 as isize, "wal checkpoint succeeded")
+
+    // 7. Test Durability & Reopen
+    assert_true(noeWalEngineClose(&engine) == 0 as isize, "wal engine close")
+
+    let reopened: NoeWalEngine
+    assert_true(noeWalEngineOpen(&reopened, dbPath) == 0 as isize, "wal engine reopen from disk")
+    assert_true(reopened.db.tables[0].rowCount == 21 as usize, "reopened engine has all 21 rows")
+
+    // Clean up
+    noeWalEngineClose(&reopened)
+    fs_remove_tree(dbPath)
+
+    print("Multi-Process Daemon & Client-Server WAL Storage Engine: ALL PASSED")
+}
+
+main()

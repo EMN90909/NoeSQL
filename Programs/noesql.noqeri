@@ -1,4 +1,5 @@
 import "../Database/noesql_engine.noqeri"
+import "../Database/noesql_wal_engine.noqeri"
 import "../../Noqeri/Lib/std/file.noqeri"
 import "../../Noqeri/Lib/std/fs.noqeri"
 
@@ -28,7 +29,7 @@ function main(): void {
         assert_true(openStatus == 0 as isize, "cold reopen existing database")
         print("  Reopened generation " + intToString(db.generation as i64) + " with " + intToString(db.tableCount as i64) + " tables.")
     } else {
-        print("[1/6] Initializing relational schema...")
+        print("[1/7] Initializing relational schema...")
         noeEngineInit(&db, "main")
 
         let deptIdx: isize = noeCreateTable(&db, "departments")
@@ -44,7 +45,7 @@ function main(): void {
 
         print("  Created tables: 'departments', 'users'")
 
-        print("[2/6] Inserting records and enforcing foreign keys...")
+        print("[2/7] Inserting records and enforcing foreign keys...")
         let d1: [NoeRowCell; 2]
         d1[0].isNull = true // auto
         d1[1].isNull = false
@@ -75,7 +76,7 @@ function main(): void {
 
         print("  Inserted departments and users with verified foreign-key constraints.")
 
-        print("[3/6] Persisting database generation to disk (fsync + atomic commit)...")
+        print("[3/7] Persisting database generation to disk (fsync + atomic commit)...")
         let saveRes: isize = noeDbSaveV3(&db, dbPath)
         assert_true(saveRes == 0 as isize, "v3 durable commit")
         print("  Committed generation snapshot to " + dbPath)
@@ -84,7 +85,7 @@ function main(): void {
     // ------------------------------------------------------------------------
     // Step 4: Genuine Cold Reopening into a completely fresh uninitialized state
     // ------------------------------------------------------------------------
-    print("[4/6] Verifying genuine cold reopen (disk-to-memory reconstruction)...")
+    print("[4/7] Verifying genuine cold reopen (disk-to-memory reconstruction)...")
     let coldDb: NoeDatabaseState
     let coldStatus: isize = noeDbOpenV3(&coldDb, dbPath)
     print("coldStatus: " + intToString(coldStatus as i64))
@@ -107,7 +108,7 @@ function main(): void {
     // ------------------------------------------------------------------------
     // Step 5: Relational Foreign Key Constraint Verification
     // ------------------------------------------------------------------------
-    print("[5/6] Verifying relational delete protection on reconstructed data...")
+    print("[5/7] Verifying relational delete protection on reconstructed data...")
     let delDept1: isize = noeDeleteRow(&coldDb, 0 as usize, 0 as usize)
     assert_true(delDept1 == -208 as isize, "delete of referenced department blocked by foreign key constraint")
     print("  Verified: Foreign key prevented orphaned references on delete.")
@@ -115,7 +116,7 @@ function main(): void {
     // ------------------------------------------------------------------------
     // Step 6: Backup and Point-in-Time Recovery
     // ------------------------------------------------------------------------
-    print("[6/6] Verifying backup and point-in-time recovery...")
+    print("[6/7] Verifying backup and point-in-time recovery...")
     let backupDir: string = "production.backup"
     let restoreDir: string = "production.restored"
     fs_remove_tree(backupDir)
@@ -135,6 +136,34 @@ function main(): void {
     // Clean up temporary backup/restore test directories
     fs_remove_tree(backupDir)
     fs_remove_tree(restoreDir)
+
+    // ------------------------------------------------------------------------
+    // Step 7: Client-Server WAL Engine & B-Tree Groundwork
+    // ------------------------------------------------------------------------
+    print("[7/7] Verifying Client-Server WAL Engine, sequential sync & B-Tree indexing...")
+    let walDbPath: string = "production.wal.noedb"
+    fs_remove_tree(walDbPath)
+    fs_remove(walDbPath + ".lck")
+
+    let walEngine: NoeWalEngine
+    assert_true(noeWalEngineOpen(&walEngine, walDbPath) == 0 as isize, "open wal engine")
+
+    let wTbl: isize = noeCreateTable(&walEngine.db, "orders")
+    assert_true(wTbl >= 0 as isize, "create orders table")
+    noeAddField(&walEngine.db, wTbl as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&walEngine.db, wTbl as usize, "amount", noeTypeInt(), true, false, false, false, "")
+
+    let tx: NoeWalTx
+    assert_true(noeWalEngineBegin(&walEngine, &tx) == 0 as isize, "begin wal tx")
+    assert_true(noeWalEngineExecute(&walEngine, &tx, "orders add { amount: 150 }") == 0 as isize, "exec wal tx")
+    assert_true(noeWalEngineCommit(&walEngine, &tx) == 0 as isize, "commit wal tx")
+
+    // B-Tree search
+    assert_true(noeBTreeSearch(&walEngine.primaryIndex, 1 as i64) >= 0 as isize, "btree index verified")
+
+    assert_true(noeWalEngineClose(&walEngine) == 0 as isize, "wal checkpoint & close")
+    fs_remove_tree(walDbPath)
+    print("  Client-Server WAL and B-Tree indexing verified.")
 
     print("\n================================================================")
     print("  NoeSQL Pure Noqeri Database Engine: ALL OPERATIONS VERIFIED")
