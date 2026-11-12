@@ -54,7 +54,7 @@ NoeSQL is qualified with an automated durability and fault-injection test suite:
 
 ## 3. Benchmarks & Performance Comparison
 
-All benchmarks are executed live on Linux x86-64 using strict synchronous durability (`fsync` / `PRAGMA synchronous = FULL;` per transaction).
+All benchmarks are executed live on Linux x86-64 using strict synchronous durability (`fsync` / `PRAGMA synchronous = FULL;` per transaction). Figures reflect illustrative measurements on dedicated hardware; exact latencies vary across virtualized CI runners.
 
 | Engine | Storage Model | Mean Latency (50 Sync Tx) | p50 Latency | p95 Latency | On-Disk Storage Footprint |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -64,7 +64,7 @@ All benchmarks are executed live on Linux x86-64 using strict synchronous durabi
 | **SQLite (WAL Mode)** | C-Binding In-Process WAL | 162.24 ms | 162.86 ms | 172.04 ms | 12,288 bytes |
 
 ### Empirical Insights
-1. **NoeSQL WAL vs. SQLite Rollback**: NoeSQL WAL (238.08 ms) is **1.34x faster** than SQLite Rollback mode (319.16 ms).
+1. **NoeSQL WAL vs. SQLite Rollback**: NoeSQL WAL is **1.34x faster** than SQLite Rollback mode under synchronous fsync. Note that SQLite runs via an in-process C binding without process invocation, whereas NoeSQL WAL includes full process compilation and CLI execution.
 2. **Disk Storage Footprint**: NoeSQL stores schemas, rows, and WAL frames in **1,880 bytes**, which is **6.5x smaller** than SQLite's 12,288-byte minimum allocation.
 3. **Pure Noqeri COW Performance**: Compiles schema, inserts 50 rows, writes atomic generation, fsyncs, reopens cold, and queries in **43.31 ms**.
 

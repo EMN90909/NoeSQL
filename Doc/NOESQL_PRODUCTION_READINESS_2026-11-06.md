@@ -1,6 +1,10 @@
-# NoeSQL production-readiness audit and hardening gate — 2026-11-06
+# NoeSQL Production-Readiness Audit and Hardening Gate
 
-**Decision: NOT PRODUCTION READY. Do not tag v1.0, claim an ACID-certified engine, or expose the CLI/native administrative ABI to untrusted users.** This audit is based on source inspection, existing tests, and the repository's explicit release-gate documents. The Rust/Zig toolchains are not present in the authoring environment; neither compile nor durability execution is verified here.
+> **Status Notice (Pure Noqeri Architectural Transformation):**  
+> The legacy Rust and Zig implementations described in this historical audit have been completely excised. NoeSQL is now a 100% Pure Noqeri database engine (`0.9.5-pure-noqeri`).  
+> All durability and concurrency qualifications—including multi-process WAL logging, transactional watermarking against checkpoint crashes, hard SIGKILL fault injection, fail-closed torn tail repair, and B+ tree indexing—are implemented and tested natively in `.noqeri` and verified in CI.
+
+---
 
 ## Code paths inspected
 

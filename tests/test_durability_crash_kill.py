@@ -189,9 +189,9 @@ if os.path.exists(reader_path): os.remove(reader_path)
 if os.path.exists(resume_path): os.remove(resume_path)
 
 # -----------------------------------------------------------------------------
-# Test 3: SIGKILL Precisely After Checkpoint Snapshot Publication But Before WAL Truncation
+# Test 3: SIGKILL Inside Real noeWalEngineCheckpoint Function
 # -----------------------------------------------------------------------------
-print("\n[CRASH TEST 3] SIGKILL After Snapshot Publication But Before WAL Truncation")
+print("\n[CRASH TEST 3] SIGKILL Inside Real noeWalEngineCheckpoint Function (After Snapshot Publication)")
 CKPT_DB = os.path.join(NOESQL_DIR, "tmp_ckpt_crash.noedb")
 if os.path.exists(CKPT_DB):
     shutil.rmtree(CKPT_DB, ignore_errors=True)
@@ -200,7 +200,6 @@ if os.path.exists(CKPT_DB + ".lck"):
     except OSError: pass
 
 ckpt_worker_code = """import "../Database/noesql_wal_engine.noqeri"
-import "../../Noqeri/Lib/std/thread.noqeri"
 
 function main(): void {
     let dbPath: string = "tmp_ckpt_crash.noedb"
@@ -225,18 +224,9 @@ function main(): void {
         i = i + 1 as usize
     }
 
-    // Now execute checkpoint step 1-4 (save snapshot and publish HEAD with lastTxId)
-    // Acquire lock
-    file_lock(engine.lockFd, true)
-    engine.db.lastTxId = engine.lastTxId
-    let saveRes: isize = noeDbSaveV3(&engine.db, engine.dbPath)
-    if saveRes != 0 as isize { print("SAVE_FAILED") return }
-
-    // Signal Python that snapshot is published and HEAD is updated, but WAL is NOT yet truncated!
-    print("SNAPSHOT_PUBLISHED_PRE_TRUNCATE")
-
-    // Sleep to give Python time to inject SIGKILL
-    thread_sleep_millis(5000 as i64)
+    // Call REAL noeWalEngineCheckpoint function with fault-injection environment active!
+    // Inside noeWalEngineCheckpoint, it will publish snapshot, update HEAD, and trigger fault termination before WAL truncation.
+    noeWalEngineCheckpoint(&engine)
 }
 main()
 """
@@ -244,17 +234,16 @@ ckpt_worker_path = os.path.join(NOESQL_DIR, "tests", "tmp_ckpt_crash_worker.noqe
 with open(ckpt_worker_path, "w") as f:
     f.write(ckpt_worker_code)
 
-p_ckpt = subprocess.Popen([NOQERI_BIN, "run", ckpt_worker_path], cwd=NOESQL_DIR, stdout=subprocess.PIPE, text=True)
+os.makedirs(CKPT_DB, exist_ok=True)
+ckpt_kill_flag = os.path.join(CKPT_DB, "FAULT_CHECKPOINT_KILL.flag")
+open(ckpt_kill_flag, "w").close()
 
-# Wait for SNAPSHOT_PUBLISHED_PRE_TRUNCATE signal
-for line in p_ckpt.stdout:
-    if "SNAPSHOT_PUBLISHED_PRE_TRUNCATE" in line:
-        # Injected hard SIGKILL precisely between snapshot publication and WAL truncation!
-        os.kill(p_ckpt.pid, signal.SIGKILL)
-        break
-
-p_ckpt.communicate()
-print("Injected SIGKILL precisely after snapshot publication and before WAL truncation.")
+p_ckpt = subprocess.run([NOQERI_BIN, "run", ckpt_worker_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+if os.path.exists(ckpt_kill_flag):
+    os.remove(ckpt_kill_flag)
+print("Output from checkpoint worker:\n", p_ckpt.stdout.strip())
+assert "FAULT_INJECTED_CHECKPOINT_KILL" in p_ckpt.stdout, "Fault hook inside noeWalEngineCheckpoint was not hit"
+print("Injected crash inside real noeWalEngineCheckpoint after snapshot publication and before WAL truncation.")
 
 # Verify WAL.log still exists and has not been truncated
 wal_file = os.path.join(CKPT_DB, "WAL.log")
@@ -320,12 +309,12 @@ assert "AFTER_ADD_ROW_COUNT:11" in res_ckpt.stdout, "Failed to resume writes and
 # Second cold reopen to verify that 11th row also persists cleanly!
 res_ckpt2 = subprocess.run([NOQERI_BIN, "run", ckpt_reader_path], cwd=NOESQL_DIR, capture_output=True, text=True)
 assert "REOPEN_ROW_COUNT:11" in res_ckpt2.stdout, "Failed second cold reopen after resume"
-print("=> PASS: 100% duplicate-free recovery after SIGKILL between snapshot publication and WAL truncation!")
+print("=> PASS: 100% duplicate-free recovery after crash inside real noeWalEngineCheckpoint!")
 
 # -----------------------------------------------------------------------------
-# Test 4: Physical Torn-Tail Repair Fail-Closed Fault Injection
+# Test 4: Physical Torn-Tail Repair & Checkpoint Fail-Closed Fault Injections
 # -----------------------------------------------------------------------------
-print("\n[FAULT INJECTION TEST 4] Physical Torn-Tail Repair Fail-Closed")
+print("\n[FAULT INJECTION TEST 4] Physical Torn-Tail Repair & Checkpoint Fail-Closed Fault Injections")
 FAIL_DB = os.path.join(NOESQL_DIR, "tmp_fail_repair.noedb")
 if os.path.exists(FAIL_DB):
     shutil.rmtree(FAIL_DB, ignore_errors=True)
@@ -358,9 +347,6 @@ fail_wal = os.path.join(FAIL_DB, "WAL.log")
 with open(fail_wal, "ab") as f:
     f.write(b"CORRUPTED_INCOMPLETE_TAIL")
 
-# Inject fault: Remove write permission from WAL.log
-os.chmod(fail_wal, 0o444)
-
 test_fail_code = """import "../Database/noesql_wal_engine.noqeri"
 
 function main(): void {
@@ -375,17 +361,67 @@ test_fail_path = os.path.join(NOESQL_DIR, "tests", "tmp_fail_repair_test.noqeri"
 with open(test_fail_path, "w") as f:
     f.write(test_fail_code)
 
-res_fail = subprocess.run([NOQERI_BIN, "run", test_fail_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+# 4A. Injected file_truncate failure -> returns -11
+trunc_flag = os.path.join(FAIL_DB, "FAULT_TRUNCATE_FAIL.flag")
+open(trunc_flag, "w").close()
+res_trunc = subprocess.run([NOQERI_BIN, "run", test_fail_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+if os.path.exists(trunc_flag): os.remove(trunc_flag)
+print("Truncate fault output:", res_trunc.stdout.strip())
+assert "FAIL_CLOSED_RES:-11" in res_trunc.stdout, f"Expected -11 truncate failure, got: {res_trunc.stdout}"
+print("=> PASS 4A: Injected file_truncate failure fails closed with -11.")
+
+# 4B. Injected file_sync failure during torn-tail repair -> returns -12
+sync_flag = os.path.join(FAIL_DB, "FAULT_SYNC_FAIL.flag")
+open(sync_flag, "w").close()
+res_sync = subprocess.run([NOQERI_BIN, "run", test_fail_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+if os.path.exists(sync_flag): os.remove(sync_flag)
+print("Sync fault output:", res_sync.stdout.strip())
+assert "FAIL_CLOSED_RES:-12" in res_sync.stdout, f"Expected -12 sync failure, got: {res_sync.stdout}"
+print("=> PASS 4B: Injected file_sync repair failure fails closed with -12.")
+
+# 4C. Injected checkpoint WAL sync failure -> returns -13
+ckpt_fail_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_fail_repair.noedb"
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize { print("REOPEN_FOR_CKPT_FAILED:" + intToString(openRes as i64)) return }
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    print("CKPT_SYNC_FAIL_RES:" + intToString(cpRes as i64))
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+}
+main()
+"""
+ckpt_fail_path = os.path.join(NOESQL_DIR, "tests", "tmp_fail_ckpt_test.noqeri")
+with open(ckpt_fail_path, "w") as f:
+    f.write(ckpt_fail_code)
+
+ckpt_sync_flag = os.path.join(FAIL_DB, "FAULT_CHECKPOINT_SYNC_FAIL.flag")
+open(ckpt_sync_flag, "w").close()
+res_ckpt_sync = subprocess.run([NOQERI_BIN, "run", ckpt_fail_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+if os.path.exists(ckpt_sync_flag): os.remove(ckpt_sync_flag)
+print("Checkpoint sync fault output:", res_ckpt_sync.stdout.strip())
+assert "CKPT_SYNC_FAIL_RES:-13" in res_ckpt_sync.stdout, f"Expected -13 checkpoint sync failure, got: {res_ckpt_sync.stdout}"
+print("=> PASS 4C: Injected checkpoint file_sync failure fails closed with -13.")
+
+# 4D. Blocked file write permission (chmod 0444) -> returns -10
+with open(fail_wal, "ab") as f:
+    f.write(b"ANOTHER_TORN_TAIL_FOR_PERM")
+os.chmod(fail_wal, 0o444)
+res_perm = subprocess.run([NOQERI_BIN, "run", test_fail_path], cwd=NOESQL_DIR, capture_output=True, text=True)
 os.chmod(fail_wal, 0o644)  # Restore permissions for cleanup
-print("Output:", res_fail.stdout.strip())
-assert "FAIL_CLOSED_RES:-10" in res_fail.stdout, f"Expected -10 fail-closed result, got:\n{res_fail.stdout}"
-print("=> PASS: Successfully failed closed with -10 when torn-tail repair was blocked!")
+print("Permission fault output:", res_perm.stdout.strip())
+assert "FAIL_CLOSED_RES:-10" in res_perm.stdout, f"Expected -10 permission failure, got: {res_perm.stdout}"
+print("=> PASS 4D: Blocked WAL write permissions fails closed with -10.")
 
 # Clean up temporary test files
 if os.path.exists(ckpt_worker_path): os.remove(ckpt_worker_path)
 if os.path.exists(ckpt_reader_path): os.remove(ckpt_reader_path)
 if os.path.exists(init_path): os.remove(init_path)
 if os.path.exists(test_fail_path): os.remove(test_fail_path)
+if os.path.exists(ckpt_fail_path): os.remove(ckpt_fail_path)
 if os.path.exists(CKPT_DB): shutil.rmtree(CKPT_DB, ignore_errors=True)
 if os.path.exists(FAIL_DB): shutil.rmtree(FAIL_DB, ignore_errors=True)
 if os.path.exists(FAIL_DB + ".lck"):

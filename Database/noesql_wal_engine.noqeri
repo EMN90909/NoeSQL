@@ -253,6 +253,7 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
     if engine.walFd != 0 as usize {
         let curSizeIs: isize = file_size(engine.walFd)
         if curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset {
+            engine.walBytesWritten = engine.walCommittedOffset
             return 0 as isize // Fast-path: no external writes, avoid open/close syscalls
         }
     }
@@ -282,6 +283,8 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
         }
     }
 
+    // Always synchronize walBytesWritten with verified committed offset
+    engine.walBytesWritten = engine.walCommittedOffset
     return 0 as isize
 }
 
@@ -315,10 +318,29 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
     noeWalEngineInit(engine)
     engine.dbPath = path
 
-    // 1. If base database exists, perform genuine cold load
+    // 1. Ensure directory exists
+    fs_ensure_directory(path)
+
+    // 2. Open cross-process lock descriptor and ACQUIRE LOCK BEFORE ANY SNAPSHOT OR WAL READS!
+    let lockPath: string = path + "/WAL.lck"
+    let lFd: isize = file_open_create(lockPath)
+    if !file_handle_valid(lFd) {
+        return -2 as isize
+    }
+    engine.lockFd = lFd as usize
+
+    let lockRes: isize = file_lock(engine.lockFd, true)
+    if lockRes < 0 as isize {
+        file_close(engine.lockFd)
+        return lockRes
+    }
+
+    // 3. Under exclusive lock: load base database snapshot
     if fs_exists(path + "/HEAD") {
         let openStatus: isize = noeDbOpenV3(&engine.db, path)
         if openStatus != 0 as isize {
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
             return openStatus
         }
         engine.baseGeneration = engine.db.generation
@@ -327,28 +349,15 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
         noeEngineInit(&engine.db, "main")
         let initSave: isize = noeDbSaveV3(&engine.db, path)
         if initSave != 0 as isize {
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
             return initSave
         }
         engine.baseGeneration = 1 as u64
         engine.lastTxId = 0 as u64
     }
 
-    // 2. Open cross-process lock descriptor for strict single-writer transaction protocol
-    let lockPath: string = path + "/WAL.lck"
-    let lFd: isize = file_open_create(lockPath)
-    if !file_handle_valid(lFd) {
-        return -2 as isize
-    }
-    engine.lockFd = lFd as usize
-
-    // Acquire lock during recovery and repair
-    let lockRes: isize = file_lock(engine.lockFd, true)
-    if lockRes < 0 as isize {
-        file_close(engine.lockFd)
-        return lockRes
-    }
-
-    // 3. Crash Recovery: Check if WAL.log exists and replay ALL committed frames via streaming recovery
+    // 4. Under exclusive lock: replay WAL
     let walPath: string = path + "/WAL.log"
     let initialWalSize: usize = 0 as usize
     if fs_exists(walPath) {
@@ -377,12 +386,24 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
             file_close(engine.lockFd)
             return -10 as isize // Failed to open WAL for physical repair
         }
+        if fs_exists(path + "/FAULT_TRUNCATE_FAIL.flag") {
+            file_close(truncHandle as usize)
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
+            return -11 as isize // Injected truncate failure
+        }
         let tRes: isize = file_truncate(truncHandle as usize, engine.walCommittedOffset as u64)
         if tRes < 0 as isize {
             file_close(truncHandle as usize)
             file_unlock(engine.lockFd)
             file_close(engine.lockFd)
             return tRes // Failed to truncate torn tail
+        }
+        if fs_exists(path + "/FAULT_SYNC_FAIL.flag") {
+            file_close(truncHandle as usize)
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
+            return -12 as isize // Injected sync failure
         }
         let sRes: isize = file_sync(truncHandle as usize)
         file_close(truncHandle as usize)
@@ -436,6 +457,13 @@ export function noeWalEngineBegin(engine: *NoeWalEngine, tx: *NoeWalTx): isize {
         file_unlock(engine.lockFd)
         return refRes
     }
+
+    // Synchronize physical file pointer and verified position under exclusive lock
+    let endPos: isize = file_seek(engine.walFd, 0 as i64, file_seek_end())
+    if endPos >= 0 as isize {
+        engine.walCommittedOffset = endPos as usize
+    }
+    engine.walBytesWritten = engine.walCommittedOffset
 
     engine.lastTxId = engine.lastTxId + 1 as u64
     tx.txId = engine.lastTxId
@@ -554,8 +582,14 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
     // Durability sync barrier: sequential fsync on WAL log file descriptor
     let syncRes: isize = file_sync(engine.walFd)
 
-    // Update committed offset directly without redundant lseek/fstat syscalls
-    engine.walCommittedOffset = engine.walBytesWritten
+    // Derive committed offset directly from verified physical position under lock
+    let commitEnd: isize = file_position(engine.walFd)
+    if commitEnd >= 0 as isize {
+        engine.walCommittedOffset = commitEnd as usize
+        engine.walBytesWritten = commitEnd as usize
+    } else {
+        engine.walCommittedOffset = engine.walBytesWritten
+    }
 
     // Release cross-process single-writer exclusive lock
     file_unlock(engine.lockFd)
@@ -565,7 +599,8 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
 
     // Auto-checkpoint when WAL reaches threshold
     if engine.walBytesWritten >= engine.checkpointThreshold {
-        noeWalEngineCheckpoint(engine)
+        let cpRes: isize = noeWalEngineCheckpoint(engine)
+        if cpRes < 0 as isize { return cpRes }
     }
 
     return 0 as isize
@@ -604,6 +639,14 @@ export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
     }
     engine.baseGeneration = engine.db.generation
 
+    // Fault-Injection Hook: crash inside noeWalEngineCheckpoint between snapshot publication and WAL truncation
+    if fs_exists(engine.dbPath + "/FAULT_CHECKPOINT_KILL.flag") {
+        print("FAULT_INJECTED_CHECKPOINT_KILL")
+        file_flush(1 as usize)
+        let trap: *u8 = 0 as *u8
+        print(trap[0]) // Crash immediately
+    }
+
     // 5. Truncate WAL file to 0 bytes
     file_close(engine.walFd)
     let walPath: string = engine.dbPath + "/WAL.log"
@@ -612,8 +655,17 @@ export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
         file_unlock(engine.lockFd)
         return -3 as isize
     }
-    file_sync(repHandle as usize)
+    if fs_exists(engine.dbPath + "/FAULT_CHECKPOINT_SYNC_FAIL.flag") {
+        file_close(repHandle as usize)
+        file_unlock(engine.lockFd)
+        return -13 as isize // Injected sync failure on checkpoint WAL truncation
+    }
+    let syncTruncRes: isize = file_sync(repHandle as usize)
     file_close(repHandle as usize)
+    if syncTruncRes < 0 as isize {
+        file_unlock(engine.lockFd)
+        return syncTruncRes
+    }
 
     // 6. Re-open WAL in append mode
     let appHandle: isize = file_open_append(walPath)
