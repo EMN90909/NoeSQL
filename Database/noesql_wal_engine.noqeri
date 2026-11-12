@@ -436,14 +436,160 @@ export function noeWalEngineRevert(engine: *NoeWalEngine): isize {
 // ----------------------------------------------------------------------------
 
 // Durable Transaction Outcome Ledger (survives checkpointing and WAL truncation)
-// Header: 16 bytes: "NQTL0001" (8 bytes) + 8 bytes reserved zeros
+// Header: 32 bytes: "NQTL0002" (8 bytes) + 24 bytes reserved zeros
 // Entries: 32 bytes: txId (u64, 8 bytes) + status (u32, 4 bytes) + flags (u32, 4 bytes) + sha256 (16 bytes)
 // status: 1 = COMMITTED, 2 = ABORTED
+
+export function noeWalLedgerEnsureV2(dbPath: string): isize {
+    if dbPath == "" { return -1 as isize }
+    let ledgerPath: string = dbPath + "/tx_outcomes.log"
+    if !fs_exists(ledgerPath) {
+        return 0 as isize // No ledger file to migrate
+    }
+
+    let h: isize = file_open_read(ledgerPath)
+    if !file_handle_valid(h) { return -1 as isize }
+
+    let fSizeIs: isize = file_size(h as usize)
+    if fSizeIs < 16 as isize {
+        file_close(h as usize)
+        return 0 as isize // Not a legacy NQTL0001 ledger, nothing to migrate
+    }
+
+    // Read first 16 bytes to check format version
+    let hdr: [u8; 16]
+    let rH: isize = file_read_exact(h as usize, slice(hdr))
+    if rH < 0 as isize {
+        file_close(h as usize)
+        return -1 as isize
+    }
+
+    // Verify magic "NQTL000"
+    if hdr[0] != 78 as u8 || hdr[1] != 81 as u8 || hdr[2] != 84 as u8 || hdr[3] != 76 as u8 ||
+       hdr[4] != 48 as u8 || hdr[5] != 48 as u8 || hdr[6] != 48 as u8 {
+        file_close(h as usize)
+        return 0 as isize // Not a valid NQTL header, nothing to migrate
+    }
+
+    // If already NQTL0002, nothing to migrate!
+    if hdr[7] == 50 as u8 { // '2'
+        file_close(h as usize)
+        return 0 as isize
+    }
+
+    // If not NQTL0001, unknown version
+    if hdr[7] != 49 as u8 { // '1'
+        file_close(h as usize)
+        return 0 as isize
+    }
+
+    // It is NQTL0001: perform atomic migration to NQTL0002
+    let dataBytes: usize = fSizeIs as usize - 16 as usize
+    if dataBytes % 16 as usize != 0 as usize {
+        file_close(h as usize)
+        return -1 as isize // Corrupt NQTL0001 record boundaries
+    }
+
+    let totalEntries: usize = dataBytes / 16 as usize
+    let tmpPath: string = dbPath + "/tx_outcomes.log.migrating"
+    let th: isize = file_open_create(tmpPath)
+    if !file_handle_valid(th) {
+        file_close(h as usize)
+        return -1 as isize
+    }
+
+    // Write 32-byte NQTL0002 header to tmpPath
+    let hdr2: [u8; 32]
+    hdr2[0] = 78 as u8 hdr2[1] = 81 as u8 hdr2[2] = 84 as u8 hdr2[3] = 76 as u8
+    hdr2[4] = 48 as u8 hdr2[5] = 48 as u8 hdr2[6] = 48 as u8 hdr2[7] = 50 as u8
+    let hi: usize = 8 as usize
+    while hi < 32 as usize { hdr2[hi] = 0 as u8 hi = hi + 1 as usize }
+    let wH: isize = file_write_all(th as usize, slice(hdr2))
+    if wH < 0 as isize {
+        file_close(h as usize)
+        file_close(th as usize)
+        fs_remove(tmpPath)
+        return -1 as isize
+    }
+
+    // Read each 16-byte NQTL0001 entry, convert to 32-byte checksummed NQTL0002 entry, and write
+    let entryIdx: usize = 0 as usize
+    while entryIdx < totalEntries {
+        let e1: [u8; 16]
+        let rE: isize = file_read_exact(h as usize, slice(e1))
+        if rE < 0 as isize {
+            file_close(h as usize)
+            file_close(th as usize)
+            fs_remove(tmpPath)
+            return -1 as isize
+        }
+
+        let eTx: u64 = noeWalGetNumber(slice(e1), 0 as usize, 8 as usize)
+        let eStatus: u32 = noeWalGetNumber(slice(e1), 8 as usize, 4 as usize) as u32
+
+        let e2: [u8; 32]
+        noeWalPutNumber(slice(e2), 0 as usize, 8 as usize, eTx)
+        noeWalPutNumber(slice(e2), 8 as usize, 4 as usize, eStatus as u64)
+        noeWalPutNumber(slice(e2), 12 as usize, 4 as usize, 0 as u64)
+
+        let shaBuf: [u8; 32]
+        if noeWalComputeSha256(&e2[0], 16 as usize, &shaBuf[0], 32 as usize) != 0 as isize {
+            file_close(h as usize)
+            file_close(th as usize)
+            fs_remove(tmpPath)
+            return -1 as isize
+        }
+        let ci: usize = 0 as usize
+        while ci < 16 as usize {
+            e2[16 as usize + ci] = shaBuf[ci]
+            ci = ci + 1 as usize
+        }
+
+        let wE: isize = file_write_all(th as usize, slice(e2))
+        if wE < 0 as isize {
+            file_close(h as usize)
+            file_close(th as usize)
+            fs_remove(tmpPath)
+            return -1 as isize
+        }
+        entryIdx = entryIdx + 1 as usize
+    }
+
+    file_close(h as usize)
+
+    // Fsync the migrated file before publishing
+    let sRes: isize = file_sync(th as usize)
+    file_close(th as usize)
+    if sRes < 0 as isize {
+        fs_remove(tmpPath)
+        return sRes
+    }
+
+    // Atomic replacement: rename tmpPath -> ledgerPath
+    let renRes: isize = fs_rename(tmpPath, ledgerPath)
+    if renRes < 0 as isize {
+        fs_remove(tmpPath)
+        return renRes
+    }
+
+    // Fsync directory to ensure atomic rename is durable on disk
+    let dirRes: isize = noeWalSyncDirectory(dbPath)
+    if dirRes < 0 as isize {
+        return dirRes
+    }
+
+    return 0 as isize
+}
+
 export function noeWalLedgerRecordOutcome(dbPath: string, txId: u64, status: u32, doSync: bool): isize {
     if txId == 0 as u64 { return 0 as isize }
     if fs_exists(dbPath + "/.noesql_testing_faults_enabled") && fs_exists(dbPath + "/FAULT_LEDGER_WRITE_FAIL.flag") {
         return -27 as isize
     }
+    // Ensure legacy NQTL0001 ledger is migrated before any append
+    let migRes: isize = noeWalLedgerEnsureV2(dbPath)
+    if migRes < 0 as isize { return migRes }
+
     let ledgerPath: string = dbPath + "/tx_outcomes.log"
     let exists: bool = fs_exists(ledgerPath)
     let h: isize = -1 as isize
@@ -504,6 +650,9 @@ export function noeWalLedgerQueryOutcome(dbPath: string, targetTxId: u64): int {
     if !fs_exists(ledgerPath) {
         return 0 // Not in ledger
     }
+
+    // Ensure legacy NQTL0001 ledger is upgraded to V2 if present
+    noeWalLedgerEnsureV2(dbPath)
 
     let h: isize = file_open_read(ledgerPath)
     if !file_handle_valid(h) { return -1 } // cannot read ledger -> unknown
@@ -627,7 +776,11 @@ export function noeWalScanAuthenticatedCommit(engine: *NoeWalEngine, targetTxId:
 
     let fSize: usize = fSizeIs as usize
     let limitOffset: usize = engine.walCommittedOffset
-    if limitOffset == 0 as usize || limitOffset > fSize { limitOffset = fSize }
+    if limitOffset > fSize { limitOffset = fSize }
+    if limitOffset == 0 as usize {
+        file_close(walFd as usize)
+        return 0
+    }
 
     let currOffset: usize = 0 as usize
 
@@ -644,12 +797,18 @@ export function noeWalScanAuthenticatedCommit(engine: *NoeWalEngine, targetTxId:
         }
 
         if hdr[0] != 78 as u8 || hdr[1] != 87 as u8 || hdr[2] != 65 as u8 || hdr[3] != 76 as u8 {
-            break // Corrupt frame or tail reached
+            file_close(walFd as usize)
+            return -1 // Corrupt frame within committed WAL
         }
 
         let kind: int = hdr[6] as int
         let frameTx: u64 = noeWalGetNumber(slice(hdr), 8 as usize, 8 as usize)
         let pSize: usize = noeWalGetNumber(slice(hdr), 20 as usize, 4 as usize) as usize
+
+        if currOffset + 56 as usize + pSize > limitOffset {
+            file_close(walFd as usize)
+            return -1 // Payload overruns committed WAL
+        }
 
         if kind == noeWalBegin() {
             let txId: u64 = frameTx
@@ -674,12 +833,18 @@ export function noeWalScanAuthenticatedCommit(engine: *NoeWalEngine, targetTxId:
                 }
 
                 if nextHdr[0] != 78 as u8 || nextHdr[1] != 87 as u8 || nextHdr[2] != 65 as u8 || nextHdr[3] != 76 as u8 {
-                    break // Corrupt frame
+                    file_close(walFd as usize)
+                    return -1 // Corrupt frame
                 }
 
                 let nextKind: int = nextHdr[6] as int
                 let nextTx: u64 = noeWalGetNumber(slice(nextHdr), 8 as usize, 8 as usize)
                 let nextPSize: usize = noeWalGetNumber(slice(nextHdr), 20 as usize, 4 as usize) as usize
+
+                if scanOff + 56 as usize + nextPSize > limitOffset {
+                    file_close(walFd as usize)
+                    return -1 // Payload overruns committed WAL
+                }
 
                 if nextKind == noeWalBegin() {
                     // Previous transaction ended without commit
@@ -689,7 +854,6 @@ export function noeWalScanAuthenticatedCommit(engine: *NoeWalEngine, targetTxId:
 
                 if nextKind == noeWalImage() {
                     if nextTx == txId && nextPSize <= 2048 as usize {
-                        if scanOff + 56 as usize + nextPSize > limitOffset { break }
                         let payBuf: [u8; 2048]
                         let rPay: isize = file_read_exact(walFd as usize, slice(&payBuf[0], nextPSize))
                         if rPay < 0 as isize {
@@ -705,7 +869,6 @@ export function noeWalScanAuthenticatedCommit(engine: *NoeWalEngine, targetTxId:
 
                 if nextKind == noeWalCommit() {
                     if nextTx == txId && nextPSize == 32 as usize {
-                        if scanOff + 56 as usize + 32 as usize > limitOffset { break }
                         let commitPayload: [u8; 32]
                         let rC: isize = file_read_exact(walFd as usize, slice(commitPayload))
                         if rC < 0 as isize {
@@ -745,6 +908,11 @@ export function noeWalScanAuthenticatedCommit(engine: *NoeWalEngine, targetTxId:
         currOffset = currOffset + 56 as usize + pSize
     }
 
+    if currOffset != limitOffset {
+        file_close(walFd as usize)
+        return -1 // Incomplete scan within committed WAL
+    }
+
     file_close(walFd as usize)
     return 0 // Not found as an authenticated commit in active WAL
 }
@@ -756,8 +924,15 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
         return -27 as isize // Injected ledger write failure
     }
 
+    let migRes: isize = noeWalLedgerEnsureV2(engine.dbPath)
+    if migRes < 0 as isize { return migRes }
+
     let walPath: string = engine.dbPath + "/WAL.log"
     if fs_exists(walPath) {
+        if fs_exists(engine.dbPath + "/.noesql_testing_faults_enabled") && fs_exists(engine.dbPath + "/FAULT_CONSOLIDATE_WAL_READ_FAIL.flag") {
+            return -35 as isize // Injected WAL read failure during consolidation
+        }
+
         let walFd: isize = file_open_read(walPath)
         if !file_handle_valid(walFd) { return -14 as isize }
 
@@ -769,22 +944,34 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
 
         let fSize: usize = fSizeIs as usize
         let limitOffset: usize = engine.walCommittedOffset
-        if limitOffset == 0 as usize || limitOffset > fSize { limitOffset = fSize }
+        if limitOffset > fSize { limitOffset = fSize }
 
         let currOffset: usize = 0 as usize
         while currOffset + 56 as usize <= limitOffset {
-            if file_seek(walFd as usize, currOffset as i64, 0) < 0 as isize { break }
+            if file_seek(walFd as usize, currOffset as i64, 0) < 0 as isize {
+                file_close(walFd as usize)
+                return -31 as isize
+            }
             let hdr: [u8; 56]
             let rH: isize = file_read_exact(walFd as usize, slice(hdr))
-            if rH < 0 as isize { break }
+            if rH < 0 as isize {
+                file_close(walFd as usize)
+                return -31 as isize
+            }
 
             if hdr[0] != 78 as u8 || hdr[1] != 87 as u8 || hdr[2] != 65 as u8 || hdr[3] != 76 as u8 {
-                break
+                file_close(walFd as usize)
+                return -32 as isize // Corrupt header magic within committed WAL!
             }
 
             let kind: int = hdr[6] as int
             let frameTx: u64 = noeWalGetNumber(slice(hdr), 8 as usize, 8 as usize)
             let pSize: usize = noeWalGetNumber(slice(hdr), 20 as usize, 4 as usize) as usize
+
+            if currOffset + 56 as usize + pSize > limitOffset {
+                file_close(walFd as usize)
+                return -33 as isize // Frame payload overruns committed WAL!
+            }
 
             if kind == noeWalBegin() {
                 let txId: u64 = frameTx
@@ -797,18 +984,30 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
                 let nextBeginOffset: usize = scanOff
 
                 while scanOff + 56 as usize <= limitOffset {
-                    if file_seek(walFd as usize, scanOff as i64, 0) < 0 as isize { break }
+                    if file_seek(walFd as usize, scanOff as i64, 0) < 0 as isize {
+                        file_close(walFd as usize)
+                        return -31 as isize
+                    }
                     let nextHdr: [u8; 56]
                     let rNext: isize = file_read_exact(walFd as usize, slice(nextHdr))
-                    if rNext < 0 as isize { break }
+                    if rNext < 0 as isize {
+                        file_close(walFd as usize)
+                        return -31 as isize
+                    }
 
                     if nextHdr[0] != 78 as u8 || nextHdr[1] != 87 as u8 || nextHdr[2] != 65 as u8 || nextHdr[3] != 76 as u8 {
-                        break
+                        file_close(walFd as usize)
+                        return -32 as isize // Corrupt frame magic within committed WAL!
                     }
 
                     let nextKind: int = nextHdr[6] as int
                     let nextTx: u64 = noeWalGetNumber(slice(nextHdr), 8 as usize, 8 as usize)
                     let nextPSize: usize = noeWalGetNumber(slice(nextHdr), 20 as usize, 4 as usize) as usize
+
+                    if scanOff + 56 as usize + nextPSize > limitOffset {
+                        file_close(walFd as usize)
+                        return -33 as isize // Frame payload overruns committed WAL!
+                    }
 
                     if nextKind == noeWalBegin() {
                         nextBeginOffset = scanOff
@@ -817,10 +1016,12 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
 
                     if nextKind == noeWalImage() {
                         if nextTx == txId && nextPSize <= 2048 as usize {
-                            if scanOff + 56 as usize + nextPSize > limitOffset { break }
                             let payBuf: [u8; 2048]
                             let rPay: isize = file_read_exact(walFd as usize, slice(&payBuf[0], nextPSize))
-                            if rPay < 0 as isize { break }
+                            if rPay < 0 as isize {
+                                file_close(walFd as usize)
+                                return -31 as isize
+                            }
                             noeWalChainHash(&rollDigest[0], &payBuf[0], nextPSize, &rollDigest[0])
                         }
                         scanOff = scanOff + 56 as usize + nextPSize
@@ -830,10 +1031,12 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
 
                     if nextKind == noeWalCommit() {
                         if nextTx == txId && nextPSize == 32 as usize {
-                            if scanOff + 56 as usize + 32 as usize > limitOffset { break }
                             let commitPayload: [u8; 32]
                             let rC: isize = file_read_exact(walFd as usize, slice(commitPayload))
-                            if rC < 0 as isize { break }
+                            if rC < 0 as isize {
+                                file_close(walFd as usize)
+                                return -31 as isize
+                            }
 
                             let matchFail: bool = false
                             let ci: usize = 0 as usize
@@ -874,6 +1077,11 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
             }
 
             currOffset = currOffset + 56 as usize + pSize
+        }
+
+        if currOffset != limitOffset {
+            file_close(walFd as usize)
+            return -34 as isize // Incomplete scan: did not reach limitOffset cleanly!
         }
 
         file_close(walFd as usize)
@@ -926,6 +1134,14 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
     if lockRes < 0 as isize {
         file_close(engine.lockFd)
         return lockRes
+    }
+
+    // Ensure legacy NQTL0001 ledger is migrated to V2 under exclusive lock
+    let migRes: isize = noeWalLedgerEnsureV2(path)
+    if migRes < 0 as isize {
+        file_unlock(engine.lockFd)
+        file_close(engine.lockFd)
+        return migRes
     }
 
     // 3. Under exclusive lock: load base database snapshot

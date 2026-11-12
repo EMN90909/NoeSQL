@@ -1892,10 +1892,234 @@ assert "RECONCILED:aborted:tx=1" not in res_q4.stdout
 print("=> PASS 18E: Checksum mismatch in ledger entry strictly detected, returning unknown.")
 print("=> PASS: Missing, truncated, torn, or corrupted outcome ledger strictly returns UNKNOWN (zero false aborted responses)!")
 
+# -----------------------------------------------------------------------------
+# Test 19: Injected WAL Read Failure During Consolidation Aborts Checkpoint and Preserves WAL
+# -----------------------------------------------------------------------------
+print("\n[TEST 19] Injected WAL Read Failure During Consolidation Aborts Checkpoint and Preserves WAL")
+WAL_READ_FAIL_DB = os.path.join(NOESQL_DIR, "tmp_wal_read_fail.noedb")
+if os.path.exists(WAL_READ_FAIL_DB): shutil.rmtree(WAL_READ_FAIL_DB, ignore_errors=True)
+if os.path.exists(WAL_READ_FAIL_DB + ".lck"):
+    try: os.remove(WAL_READ_FAIL_DB + ".lck")
+    except OSError: pass
+
+wal_read_fail_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_wal_read_fail.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if oRes != 0 as isize { print("OPEN_FAILED:" + noeIntToString(oRes as i64)) return }
+
+    noeDaemonHandleRequest(&engine, "table accounts { id: int key auto, balance: int }") // TX 1
+    noeDaemonHandleRequest(&engine, "accounts add { balance: 500 }") // TX 2
+
+    // Inject WAL read failure during consolidation
+    let f1: isize = file_open_create(dbPath + "/.noesql_testing_faults_enabled")
+    if file_handle_valid(f1) { file_close(f1 as usize) }
+    let f2: isize = file_open_create(dbPath + "/FAULT_CONSOLIDATE_WAL_READ_FAIL.flag")
+    if file_handle_valid(f2) { file_close(f2 as usize) }
+
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    print("INJECTED_WAL_READ_FAIL_CP_RES:" + noeIntToString(cpRes as i64))
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+}
+main()
+"""
+wal_read_fail_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_wal_read_fail_init.noqeri")
+with open(wal_read_fail_init_path, "w") as f:
+    f.write(wal_read_fail_init_code)
+
+res_wrf_init = subprocess.run([NOQERI_BIN, "run", wal_read_fail_init_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("WAL read fail output:\n", res_wrf_init.stdout.strip())
+assert "INJECTED_WAL_READ_FAIL_CP_RES:-35" in res_wrf_init.stdout, f"Expected -35, got:\n{res_wrf_init.stdout}"
+wrf_wal_file = os.path.join(WAL_READ_FAIL_DB, "WAL.log")
+assert os.path.exists(wrf_wal_file) and os.path.getsize(wrf_wal_file) > 0, "WAL.log MUST NOT be truncated or retired when consolidation read fails!"
+print("=> PASS 19A: Checkpoint strictly aborted with -35 on injected WAL read failure; WAL preserved intact.")
+
+# Cold reopen with fault flag removed: must recover both transactions cleanly from untruncated WAL
+if os.path.exists(os.path.join(WAL_READ_FAIL_DB, "FAULT_CONSOLIDATE_WAL_READ_FAIL.flag")):
+    os.remove(os.path.join(WAL_READ_FAIL_DB, "FAULT_CONSOLIDATE_WAL_READ_FAIL.flag"))
+if os.path.exists(os.path.join(WAL_READ_FAIL_DB, ".noesql_testing_faults_enabled")):
+    os.remove(os.path.join(WAL_READ_FAIL_DB, ".noesql_testing_faults_enabled"))
+
+wal_read_fail_cold_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_wal_read_fail.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("COLD_REOPEN_RES:" + noeIntToString(oRes as i64))
+
+    let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+    print("COLD_RECON_TX1:" + r1)
+    let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+    print("COLD_RECON_TX2:" + r2)
+
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    print("CLEAN_CP_RES:" + noeIntToString(cpRes as i64))
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+wal_read_fail_cold_path = os.path.join(NOESQL_DIR, "tests", "tmp_wal_read_fail_cold.noqeri")
+with open(wal_read_fail_cold_path, "w") as f:
+    f.write(wal_read_fail_cold_code)
+
+res_wrf_cold = subprocess.run([NOQERI_BIN, "run", wal_read_fail_cold_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Cold reopen after WAL read fail:\n", res_wrf_cold.stdout.strip())
+assert "COLD_REOPEN_RES:0" in res_wrf_cold.stdout
+assert "COLD_RECON_TX1:RECONCILED:committed:tx=1" in res_wrf_cold.stdout
+assert "COLD_RECON_TX2:RECONCILED:committed:tx=2" in res_wrf_cold.stdout
+assert "CLEAN_CP_RES:0" in res_wrf_cold.stdout
+assert os.path.getsize(wrf_wal_file) == 0, "WAL should be cleanly truncated after successful checkpoint!"
+print("=> PASS 19B: Cold recovery verified intact transactions from preserved WAL, clean checkpoint consolidated ledger.")
+print("=> PASS: Injected WAL read failure during consolidation strictly preserves WAL and prevents outcome loss!")
+
+# -----------------------------------------------------------------------------
+# Test 20: Legacy NQTL0001 Ledger Atomic Upgrade to NQTL0002 & Continued Operation
+# -----------------------------------------------------------------------------
+print("\n[TEST 20] Legacy NQTL0001 Ledger Atomic Upgrade to NQTL0002 & Continued Operation")
+import struct
+
+LEGACY_LEDGER_DB = os.path.join(NOESQL_DIR, "tmp_legacy_ledger.noedb")
+if os.path.exists(LEGACY_LEDGER_DB): shutil.rmtree(LEGACY_LEDGER_DB, ignore_errors=True)
+if os.path.exists(LEGACY_LEDGER_DB + ".lck"):
+    try: os.remove(LEGACY_LEDGER_DB + ".lck")
+    except OSError: pass
+
+# 1. Initialize a base database snapshot using NoeSQL
+legacy_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_legacy_ledger.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+    noeDaemonHandleRequest(&engine, "table accounts { id: int key auto, balance: int }") // TX 1
+    let tx2: NoeWalTx
+    noeWalEngineBegin(&engine, &tx2)
+    noeWalEngineExecute(&engine, &tx2, "accounts add { balance: 200 }")
+    noeWalEngineRollback(&engine, &tx2) // TX 2 aborted
+    noeDaemonHandleRequest(&engine, "accounts add { balance: 300 }") // TX 3
+    noeWalEngineCheckpoint(&engine)
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+legacy_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_legacy_init.noqeri")
+with open(legacy_init_path, "w") as f:
+    f.write(legacy_init_code)
+
+res_leg_init = subprocess.run([NOQERI_BIN, "run", legacy_init_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+
+# 2. Overwrite tx_outcomes.log with genuine legacy NQTL0001 format (64 bytes total)
+# 16-byte header: "NQTL0001" + 8 zero bytes
+# 16-byte entry 1: TX 1, status 1 (committed), flags 0
+# 16-byte entry 2: TX 2, status 2 (aborted), flags 0
+# 16-byte entry 3: TX 3, status 1 (committed), flags 0
+leg_ledger_file = os.path.join(LEGACY_LEDGER_DB, "tx_outcomes.log")
+legacy_v1_bytes = (
+    b"NQTL0001" + b"\x00" * 8 +
+    struct.pack("<QII", 1, 1, 0) + # TX 1 committed
+    struct.pack("<QII", 2, 2, 0) + # TX 2 aborted
+    struct.pack("<QII", 3, 1, 0)   # TX 3 committed
+)
+assert len(legacy_v1_bytes) == 64, f"Legacy NQTL0001 ledger must be 64 bytes, got {len(legacy_v1_bytes)}"
+with open(leg_ledger_file, "wb") as f:
+    f.write(legacy_v1_bytes)
+
+print(f"Synthesized authentic legacy NQTL0001 ledger (size={len(legacy_v1_bytes)} bytes)")
+
+# 3. Open database and verify atomic upgrade to NQTL0002
+legacy_upgrade_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_legacy_ledger.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("UPGRADE_OPEN_RES:" + noeIntToString(oRes as i64))
+
+    // Reconcile legacy historical transactions
+    let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+    print("UPGRADE_RECON_TX1:" + r1)
+    let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+    print("UPGRADE_RECON_TX2:" + r2)
+    let r3: string = noeDaemonReconcileTx(&engine, 3 as u64)
+    print("UPGRADE_RECON_TX3:" + r3)
+
+    // Execute new transaction TX 4
+    let h4: string = noeDaemonHandleRequest(&engine, "accounts add { balance: 400 }")
+    print("UPGRADE_EXEC_TX4:" + h4)
+
+    let r4: string = noeDaemonReconcileTx(&engine, 4 as u64)
+    print("UPGRADE_RECON_TX4:" + r4)
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+legacy_upgrade_path = os.path.join(NOESQL_DIR, "tests", "tmp_legacy_upgrade.noqeri")
+with open(legacy_upgrade_path, "w") as f:
+    f.write(legacy_upgrade_code)
+
+res_leg_upg = subprocess.run([NOQERI_BIN, "run", legacy_upgrade_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Legacy upgrade output:\n", res_leg_upg.stdout.strip())
+assert "UPGRADE_OPEN_RES:0" in res_leg_upg.stdout
+assert "UPGRADE_RECON_TX1:RECONCILED:committed:tx=1" in res_leg_upg.stdout
+assert "UPGRADE_RECON_TX2:RECONCILED:aborted:tx=2" in res_leg_upg.stdout
+assert "UPGRADE_RECON_TX3:RECONCILED:committed:tx=3" in res_leg_upg.stdout
+assert "UPGRADE_EXEC_TX4:OK:tx=4" in res_leg_upg.stdout
+assert "UPGRADE_RECON_TX4:RECONCILED:committed:tx=4" in res_leg_upg.stdout
+
+# Check physical file format on disk
+with open(leg_ledger_file, "rb") as f:
+    upgraded_bytes = f.read()
+
+assert upgraded_bytes[:8] == b"NQTL0002", f"Expected header magic NQTL0002, got: {upgraded_bytes[:8]}"
+# Size must be 32 (header) + 4 * 32 (entries for TX 1, 2, 3, 4) = 160 bytes
+assert len(upgraded_bytes) == 160, f"Expected 160 bytes after upgrade and TX 4 append, got {len(upgraded_bytes)}"
+print(f"Verified upgraded ledger: magic={upgraded_bytes[:8]}, size={len(upgraded_bytes)} bytes (32-byte header + 4x32-byte records)")
+
+# Verify cold restart over upgraded ledger
+legacy_cold_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_legacy_ledger.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("COLD_OPEN_RES:" + noeIntToString(oRes as i64))
+
+    let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+    print("FINAL_RECON_TX1:" + r1)
+    let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+    print("FINAL_RECON_TX2:" + r2)
+    let r3: string = noeDaemonReconcileTx(&engine, 3 as u64)
+    print("FINAL_RECON_TX3:" + r3)
+    let r4: string = noeDaemonReconcileTx(&engine, 4 as u64)
+    print("FINAL_RECON_TX4:" + r4)
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+legacy_cold_path = os.path.join(NOESQL_DIR, "tests", "tmp_legacy_cold.noqeri")
+with open(legacy_cold_path, "w") as f:
+    f.write(legacy_cold_code)
+
+res_leg_cold = subprocess.run([NOQERI_BIN, "run", legacy_cold_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Cold reopen output after upgrade:\n", res_leg_cold.stdout.strip())
+assert "COLD_OPEN_RES:0" in res_leg_cold.stdout
+assert "FINAL_RECON_TX1:RECONCILED:committed:tx=1" in res_leg_cold.stdout
+assert "FINAL_RECON_TX2:RECONCILED:aborted:tx=2" in res_leg_cold.stdout
+assert "FINAL_RECON_TX3:RECONCILED:committed:tx=3" in res_leg_cold.stdout
+assert "FINAL_RECON_TX4:RECONCILED:committed:tx=4" in res_leg_cold.stdout
+print("=> PASS 20: Legacy NQTL0001 ledger atomically upgraded to NQTL0002; continued writes and reconciliation 100% verified!")
+
 # Cleanup temporary files
-for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, empty_init_path, empty_read_path, daemon_path, forge_runner_path, forge_cold_path, concur_init_path, concur_worker_a_path, concur_worker_b_path, ledger_cp_init_path, ledger_cp_cold_path, ledger_cp_sync_path, ledger_cp_clean_path, ledger_corrupt_init_path, ledger_query_path]:
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, empty_init_path, empty_read_path, daemon_path, forge_runner_path, forge_cold_path, concur_init_path, concur_worker_a_path, concur_worker_b_path, ledger_cp_init_path, ledger_cp_cold_path, ledger_cp_sync_path, ledger_cp_clean_path, ledger_corrupt_init_path, ledger_query_path, wal_read_fail_init_path, wal_read_fail_cold_path, legacy_init_path, legacy_upgrade_path, legacy_cold_path]:
     if os.path.exists(p): os.remove(p)
-for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, EMPTY_SNAP_DB, DAEMON_RECON_DB, FORGE_WAL_DB, CONCUR_CKPT_DB, LEDGER_CP_DB, LEDGER_CORRUPT_DB]:
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, EMPTY_SNAP_DB, DAEMON_RECON_DB, FORGE_WAL_DB, CONCUR_CKPT_DB, LEDGER_CP_DB, LEDGER_CORRUPT_DB, WAL_READ_FAIL_DB, LEGACY_LEDGER_DB]:
     if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
     if os.path.exists(d + ".lck"):
         try: os.remove(d + ".lck")
