@@ -1636,10 +1636,266 @@ assert "CONCUR_RECON_TX1:RECONCILED:committed:tx=1" in out_b
 assert "CONCUR_RECON_TX2:RECONCILED:committed:tx=2" in out_b
 print("=> PASS: Concurrent reconciliation cleanly synchronized with active checkpointing under lock!")
 
+# -----------------------------------------------------------------------------
+# Test 17: Checkpoint Refuses WAL Retirement on Ledger Consolidation Failure
+# -----------------------------------------------------------------------------
+print("\n[TEST 17] Checkpoint Refuses WAL Retirement on Ledger Consolidation Failure (Write & Sync Injections)")
+LEDGER_CP_DB = os.path.join(NOESQL_DIR, "tmp_ledger_cp.noedb")
+if os.path.exists(LEDGER_CP_DB): shutil.rmtree(LEDGER_CP_DB, ignore_errors=True)
+if os.path.exists(LEDGER_CP_DB + ".lck"):
+    try: os.remove(LEDGER_CP_DB + ".lck")
+    except OSError: pass
+
+ledger_cp_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_ledger_cp.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if oRes != 0 as isize { print("OPEN_FAILED") return }
+
+    noeDaemonHandleRequest(&engine, "table ledger { id: int key auto, amount: int }")
+    noeDaemonHandleRequest(&engine, "ledger add { amount: 100 }")
+    noeDaemonHandleRequest(&engine, "ledger add { amount: 200 }")
+    print("INIT_COMMITTED")
+
+    // Inject write failure flag immediately before checkpoint WAL retirement
+    let f1: isize = file_open_create(dbPath + "/.noesql_testing_faults_enabled")
+    if file_handle_valid(f1) { file_close(f1 as usize) }
+    let f2: isize = file_open_create(dbPath + "/FAULT_LEDGER_WRITE_FAIL.flag")
+    if file_handle_valid(f2) { file_close(f2 as usize) }
+
+    // Injected write failure during ledger consolidation
+    let cpRes1: isize = noeWalEngineCheckpoint(&engine)
+    print("INJECTED_WRITE_FAIL_CP_RES:" + noeIntToString(cpRes1 as i64))
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+}
+main()
+"""
+ledger_cp_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_ledger_cp_init.noqeri")
+with open(ledger_cp_init_path, "w") as f:
+    f.write(ledger_cp_init_code)
+
+res_lcp1 = subprocess.run([NOQERI_BIN, "run", ledger_cp_init_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Ledger write fail output:\n", res_lcp1.stdout.strip())
+assert "INJECTED_WRITE_FAIL_CP_RES:-27" in res_lcp1.stdout, f"Expected -27 on injected ledger write failure, got:\n{res_lcp1.stdout}"
+wal_file = os.path.join(LEDGER_CP_DB, "WAL.log")
+assert os.path.exists(wal_file) and os.path.getsize(wal_file) > 0, "WAL must NOT be truncated when ledger consolidation fails!"
+print("=> PASS 17A: Checkpoint aborted with -27 on ledger write failure; WAL preserved intact.")
+
+# Cold reopen to verify transactions survived in WAL and can still reconcile
+ledger_cp_cold_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_ledger_cp.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("COLD_REOPEN_RES:" + noeIntToString(oRes as i64))
+
+    let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+    print("COLD_RECON_TX1:" + r1)
+    let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+    print("COLD_RECON_TX2:" + r2)
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+}
+main()
+"""
+ledger_cp_cold_path = os.path.join(NOESQL_DIR, "tests", "tmp_ledger_cp_cold.noqeri")
+with open(ledger_cp_cold_path, "w") as f:
+    f.write(ledger_cp_cold_code)
+
+# Clear write failure flag for cold restart
+if os.path.exists(os.path.join(LEDGER_CP_DB, "FAULT_LEDGER_WRITE_FAIL.flag")):
+    os.remove(os.path.join(LEDGER_CP_DB, "FAULT_LEDGER_WRITE_FAIL.flag"))
+
+res_lcp_cold = subprocess.run([NOQERI_BIN, "run", ledger_cp_cold_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Cold reopen output:\n", res_lcp_cold.stdout.strip())
+assert "COLD_REOPEN_RES:0" in res_lcp_cold.stdout
+assert "COLD_RECON_TX1:RECONCILED:committed:tx=1" in res_lcp_cold.stdout
+assert "COLD_RECON_TX2:RECONCILED:committed:tx=2" in res_lcp_cold.stdout
+print("=> PASS 17B: Cold restart cleanly restored state and reconciled transactions from untruncated WAL.")
+
+# Test sync failure injection immediately before checkpoint
+ledger_cp_sync_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_ledger_cp.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    noeDaemonHandleRequest(&engine, "ledger add { amount: 300 }")
+
+    let f1: isize = file_open_create(dbPath + "/.noesql_testing_faults_enabled")
+    if file_handle_valid(f1) { file_close(f1 as usize) }
+    let f2: isize = file_open_create(dbPath + "/FAULT_LEDGER_SYNC_FAIL.flag")
+    if file_handle_valid(f2) { file_close(f2 as usize) }
+
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    print("INJECTED_SYNC_FAIL_CP_RES:" + noeIntToString(cpRes as i64))
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+}
+main()
+"""
+ledger_cp_sync_path = os.path.join(NOESQL_DIR, "tests", "tmp_ledger_cp_sync.noqeri")
+with open(ledger_cp_sync_path, "w") as f:
+    f.write(ledger_cp_sync_code)
+
+res_lcp_sync = subprocess.run([NOQERI_BIN, "run", ledger_cp_sync_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Ledger sync fail output:\n", res_lcp_sync.stdout.strip())
+assert "INJECTED_SYNC_FAIL_CP_RES:-29" in res_lcp_sync.stdout, f"Expected -29 on injected sync fail, got:\n{res_lcp_sync.stdout}"
+assert os.path.getsize(wal_file) > 0, "WAL must NOT be truncated when ledger fsync fails!"
+print("=> PASS 17C: Checkpoint aborted with -29 on ledger fsync failure; WAL preserved intact.")
+
+# Clear fault flag and perform clean checkpoint: WAL should now be truncated
+if os.path.exists(os.path.join(LEDGER_CP_DB, "FAULT_LEDGER_SYNC_FAIL.flag")):
+    os.remove(os.path.join(LEDGER_CP_DB, "FAULT_LEDGER_SYNC_FAIL.flag"))
+if os.path.exists(os.path.join(LEDGER_CP_DB, ".noesql_testing_faults_enabled")):
+    os.remove(os.path.join(LEDGER_CP_DB, ".noesql_testing_faults_enabled"))
+
+ledger_cp_clean_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_ledger_cp.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    print("CLEAN_CP_RES:" + noeIntToString(cpRes as i64))
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+ledger_cp_clean_path = os.path.join(NOESQL_DIR, "tests", "tmp_ledger_cp_clean.noqeri")
+with open(ledger_cp_clean_path, "w") as f:
+    f.write(ledger_cp_clean_code)
+
+res_lcp_clean = subprocess.run([NOQERI_BIN, "run", ledger_cp_clean_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Clean checkpoint output:\n", res_lcp_clean.stdout.strip())
+assert "CLEAN_CP_RES:0" in res_lcp_clean.stdout
+assert os.path.getsize(wal_file) == 0, "WAL should be cleanly truncated to 0 bytes after successful checkpoint!"
+print("=> PASS: Checkpoint strictly refuses WAL retirement when ledger consolidation or fsync fails!")
+
+# -----------------------------------------------------------------------------
+# Test 18: Missing or Damaged Outcome Ledger Returns UNKNOWN (Never False Aborted)
+# -----------------------------------------------------------------------------
+print("\n[TEST 18] Missing or Damaged Outcome Ledger Returns UNKNOWN / Storage Error (Never False Aborted)")
+LEDGER_CORRUPT_DB = os.path.join(NOESQL_DIR, "tmp_ledger_corrupt.noedb")
+if os.path.exists(LEDGER_CORRUPT_DB): shutil.rmtree(LEDGER_CORRUPT_DB, ignore_errors=True)
+if os.path.exists(LEDGER_CORRUPT_DB + ".lck"):
+    try: os.remove(LEDGER_CORRUPT_DB + ".lck")
+    except OSError: pass
+
+ledger_corrupt_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_ledger_corrupt.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+    noeDaemonHandleRequest(&engine, "table accounts { id: int key auto, val: int }") // TX 1 committed
+
+    let tx2: NoeWalTx
+    noeWalEngineBegin(&engine, &tx2)
+    noeWalEngineExecute(&engine, &tx2, "accounts add { val: 20 }")
+    noeWalEngineRollback(&engine, &tx2) // TX 2 aborted
+
+    noeDaemonHandleRequest(&engine, "accounts add { val: 30 }") // TX 3 committed
+
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    print("INIT_CP_RES:" + noeIntToString(cpRes as i64))
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+ledger_corrupt_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_ledger_corrupt_init.noqeri")
+with open(ledger_corrupt_init_path, "w") as f:
+    f.write(ledger_corrupt_init_code)
+
+res_lcorr_init = subprocess.run([NOQERI_BIN, "run", ledger_corrupt_init_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+assert "INIT_CP_RES:0" in res_lcorr_init.stdout
+
+# Backup the healthy tx_outcomes.log
+ledger_file = os.path.join(LEDGER_CORRUPT_DB, "tx_outcomes.log")
+with open(ledger_file, "rb") as f:
+    valid_ledger_bytes = f.read()
+
+# Query helper script
+ledger_query_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_ledger_corrupt.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if oRes != 0 as isize { print("OPEN_FAILED:" + noeIntToString(oRes as i64)) return }
+
+    let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+    print("RECON_TX1:" + r1)
+    let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+    print("RECON_TX2:" + r2)
+    let r3: string = noeDaemonReconcileTx(&engine, 3 as u64)
+    print("RECON_TX3:" + r3)
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+ledger_query_path = os.path.join(NOESQL_DIR, "tests", "tmp_ledger_query.noqeri")
+with open(ledger_query_path, "w") as f:
+    f.write(ledger_query_code)
+
+# 18A: Baseline healthy ledger check
+res_q0 = subprocess.run([NOQERI_BIN, "run", ledger_query_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+assert "RECON_TX1:RECONCILED:committed:tx=1" in res_q0.stdout
+assert "RECON_TX2:RECONCILED:aborted:tx=2" in res_q0.stdout
+assert "RECON_TX3:RECONCILED:committed:tx=3" in res_q0.stdout
+print("=> PASS 18A: Baseline healthy post-checkpoint ledger accurately reconciles committed vs rollback gap.")
+
+# 18B: Ledger Deleted: MUST return unknown, NEVER false aborted!
+os.remove(ledger_file)
+res_q1 = subprocess.run([NOQERI_BIN, "run", ledger_query_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Deleted ledger output:\n", res_q1.stdout.strip())
+assert "RECON_TX1:RECONCILED:unknown:tx=1" in res_q1.stdout, f"Deleted ledger must report TX 1 as unknown, got:\n{res_q1.stdout}"
+assert "RECON_TX2:RECONCILED:unknown:tx=2" in res_q1.stdout, f"Deleted ledger must report TX 2 as unknown, got:\n{res_q1.stdout}"
+assert "RECONCILED:aborted:tx=1" not in res_q1.stdout, "Committed TX 1 must NEVER be reported as aborted when ledger is missing!"
+print("=> PASS 18B: Deleted ledger strictly returns unknown (zero false aborted responses).")
+
+# 18C: Ledger Truncated to 0 bytes: MUST return unknown
+with open(ledger_file, "wb") as f:
+    pass
+res_q2 = subprocess.run([NOQERI_BIN, "run", ledger_query_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("0-byte ledger output:\n", res_q2.stdout.strip())
+assert "RECON_TX1:RECONCILED:unknown:tx=1" in res_q2.stdout
+assert "RECONCILED:aborted:tx=1" not in res_q2.stdout
+print("=> PASS 18C: 0-byte truncated ledger strictly returns unknown.")
+
+# 18D: Torn Record Boundary (32 bytes header + 15 bytes partial entry): MUST return unknown
+with open(ledger_file, "wb") as f:
+    f.write(valid_ledger_bytes[:32] + b"\xaa" * 15)
+res_q3 = subprocess.run([NOQERI_BIN, "run", ledger_query_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Torn boundary ledger output:\n", res_q3.stdout.strip())
+assert "RECON_TX1:RECONCILED:unknown:tx=1" in res_q3.stdout
+assert "RECONCILED:aborted:tx=1" not in res_q3.stdout
+print("=> PASS 18D: Torn record boundary strictly rejected, returning unknown.")
+
+# 18E: Entry Checksum Mismatch (tampered/corrupted entry payload): MUST return unknown
+tampered_bytes = bytearray(valid_ledger_bytes)
+tampered_bytes[40] = (tampered_bytes[40] ^ 0xFF) # Flip byte in TX 1's record
+with open(ledger_file, "wb") as f:
+    f.write(tampered_bytes)
+res_q4 = subprocess.run([NOQERI_BIN, "run", ledger_query_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Checksum corrupted ledger output:\n", res_q4.stdout.strip())
+assert "RECON_TX1:RECONCILED:unknown:tx=1" in res_q4.stdout
+assert "RECONCILED:aborted:tx=1" not in res_q4.stdout
+print("=> PASS 18E: Checksum mismatch in ledger entry strictly detected, returning unknown.")
+print("=> PASS: Missing, truncated, torn, or corrupted outcome ledger strictly returns UNKNOWN (zero false aborted responses)!")
+
 # Cleanup temporary files
-for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, empty_init_path, empty_read_path, daemon_path, forge_runner_path, forge_cold_path, concur_init_path, concur_worker_a_path, concur_worker_b_path]:
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, empty_init_path, empty_read_path, daemon_path, forge_runner_path, forge_cold_path, concur_init_path, concur_worker_a_path, concur_worker_b_path, ledger_cp_init_path, ledger_cp_cold_path, ledger_cp_sync_path, ledger_cp_clean_path, ledger_corrupt_init_path, ledger_query_path]:
     if os.path.exists(p): os.remove(p)
-for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, EMPTY_SNAP_DB, DAEMON_RECON_DB, FORGE_WAL_DB, CONCUR_CKPT_DB]:
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, EMPTY_SNAP_DB, DAEMON_RECON_DB, FORGE_WAL_DB, CONCUR_CKPT_DB, LEDGER_CP_DB, LEDGER_CORRUPT_DB]:
     if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
     if os.path.exists(d + ".lck"):
         try: os.remove(d + ".lck")

@@ -52,6 +52,10 @@ export function noeWalChainHash(currentDigest: *u8, payload: *u8, payloadLen: us
     return noeHostSha256(&buf[0], 32 as usize + payloadLen, outDigest, 32 as usize)
 }
 
+export function noeWalComputeSha256(source: *u8, length: usize, digest: *u8, capacity: usize): isize {
+    return noeHostSha256(source, length, digest, capacity)
+}
+
 export function noeWalPutNumber(bytes: []u8, at: usize, count: usize, value: u64): bool {
     if at > len(bytes) || count > len(bytes) - at { return false }
     let n: u64 = value
