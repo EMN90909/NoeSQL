@@ -26,6 +26,9 @@ record NoeWalEngine {
     dbPath: string
     walFd: usize
     lockFd: usize
+    ledgerFd: usize
+    walInode: i64
+    walDev: i64
     walOpen: bool
     lastTxId: u64
     walSequence: u32
@@ -45,6 +48,9 @@ export function noeWalEngineInit(engine: *NoeWalEngine): void {
     if engine == null { return }
     engine.walFd = 0 as usize
     engine.lockFd = 0 as usize
+    engine.ledgerFd = 0 as usize
+    engine.walInode = 0 as i64
+    engine.walDev = 0 as i64
     engine.walOpen = false
     engine.lastTxId = 0 as u64
     engine.walSequence = 0 as u32
@@ -287,37 +293,6 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
     }
 
     let walPath: string = engine.dbPath + "/WAL.log"
-    if !fs_exists(walPath) {
-        if engine.walFd != 0 as usize {
-            file_close(engine.walFd)
-            engine.walFd = 0 as usize
-        }
-        engine.walOpen = false
-        return -17 as isize // Missing WAL.log / unlinked WAL
-    }
-
-    // Inspect actual disk file size to prevent bypass via unlinked/replaced open descriptor
-    let diskWalHandle: isize = file_open_read(walPath)
-    if !file_handle_valid(diskWalHandle) {
-        if engine.walFd != 0 as usize {
-            file_close(engine.walFd)
-            engine.walFd = 0 as usize
-        }
-        engine.walOpen = false
-        return -17 as isize
-    }
-    let diskSizeIs: isize = file_size(diskWalHandle as usize)
-    file_close(diskWalHandle as usize)
-    if diskSizeIs < 0 as isize {
-        if engine.walFd != 0 as usize {
-            file_close(engine.walFd)
-            engine.walFd = 0 as usize
-        }
-        engine.walOpen = false
-        return -17 as isize
-    }
-
-    let diskSize: usize = diskSizeIs as usize
     let diskInode: i64 = fs_inode(walPath)
     let diskDev: i64 = fs_dev(walPath)
     if diskInode <= 0 as i64 || diskDev <= 0 as i64 {
@@ -326,33 +301,46 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
             engine.walFd = 0 as usize
         }
         engine.walOpen = false
-        return -17 as isize // Failed identity lookup fails closed!
+        return -17 as isize // Missing WAL.log / unlinked WAL / stat failed
     }
 
     let identityReplaced: bool = false
+    let diskSize: usize = 0 as usize
 
-    // 2. Fast-path: if disk WAL size matches our verified committed offset
-    // AND our open walFd size matches diskSize, AND device & inode identity match,
-    // then no external writes or file replacements occurred.
     if engine.walFd != 0 as usize {
-        let curInode: i64 = file_inode(engine.walFd)
-        let curDev: i64 = file_dev(engine.walFd)
-        let curSizeIs: isize = file_size(engine.walFd)
+        let curInode: i64 = engine.walInode
+        let curDev: i64 = engine.walDev
+        if curInode <= 0 as i64 || curDev <= 0 as i64 {
+            curInode = file_inode(engine.walFd)
+            curDev = file_dev(engine.walFd)
+            engine.walInode = curInode
+            engine.walDev = curDev
+        }
         if curInode <= 0 as i64 || curDev <= 0 as i64 {
             file_close(engine.walFd)
             engine.walFd = 0 as usize
             engine.walOpen = false
             return -17 as isize // Descriptor identity failure fails closed!
         }
-        if curDev == diskDev && curInode == diskInode && curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset && diskSize == engine.walCommittedOffset {
-            engine.walBytesWritten = engine.walCommittedOffset
-            return 0 as isize // Fast-path: verified device, inode and size match!
-        }
-        if curDev != diskDev || curInode != diskInode || curSizeIs < 0 as isize || (curSizeIs as usize) != diskSize {
-            if curDev != diskDev || curInode != diskInode {
-                identityReplaced = true
+
+        // Fast-path: if device & inode match, the open descriptor points to the exact file on disk!
+        if curDev == diskDev && curInode == diskInode {
+            let curSizeIs: isize = file_size(engine.walFd)
+            if curSizeIs >= 0 as isize {
+                let curSize: usize = curSizeIs as usize
+                diskSize = curSize
+                if curSize == engine.walCommittedOffset {
+                    engine.walBytesWritten = engine.walCommittedOffset
+                    return 0 as isize // Fast-path: verified device, inode and size match!
+                }
+            } else {
+                file_close(engine.walFd)
+                engine.walFd = 0 as usize
+                engine.walOpen = false
+                return -17 as isize
             }
-            // Re-bind walFd if file was replaced (same size or different) or truncated
+        } else {
+            identityReplaced = true
             file_close(engine.walFd)
             let appHandle: isize = file_open_append(walPath)
             if !file_handle_valid(appHandle) {
@@ -361,7 +349,34 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
                 return -14 as isize
             }
             engine.walFd = appHandle as usize
+            engine.walInode = file_inode(engine.walFd)
+            engine.walDev = file_dev(engine.walFd)
+            let sIs: isize = file_size(engine.walFd)
+            if sIs < 0 as isize {
+                file_close(engine.walFd)
+                engine.walFd = 0 as usize
+                engine.walOpen = false
+                return -14 as isize
+            }
+            diskSize = sIs as usize
         }
+    } else {
+        let appHandle: isize = file_open_append(walPath)
+        if !file_handle_valid(appHandle) {
+            engine.walOpen = false
+            return -14 as isize
+        }
+        engine.walFd = appHandle as usize
+        engine.walInode = file_inode(engine.walFd)
+        engine.walDev = file_dev(engine.walFd)
+        let sIs: isize = file_size(engine.walFd)
+        if sIs < 0 as isize {
+            file_close(engine.walFd)
+            engine.walFd = 0 as usize
+            engine.walOpen = false
+            return -14 as isize
+        }
+        diskSize = sIs as usize
     }
 
     if identityReplaced || diskSize < engine.walCommittedOffset {
@@ -927,6 +942,61 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
     let migRes: isize = noeWalLedgerEnsureV2(engine.dbPath)
     if migRes < 0 as isize { return migRes }
 
+    let ledgerPath: string = engine.dbPath + "/tx_outcomes.log"
+    let maxLedgerTx: u64 = 0 as u64
+    if fs_exists(ledgerPath) {
+        let lh: isize = file_open_read(ledgerPath)
+        if !file_handle_valid(lh) { return -28 as isize }
+        let fSizeIs: isize = file_size(lh as usize)
+        if fSizeIs < 32 as isize {
+            file_close(lh as usize)
+            return -28 as isize // Truncated header
+        }
+        let hdr: [u8; 32]
+        let rH: isize = file_read_exact(lh as usize, slice(hdr))
+        if rH < 0 as isize || hdr[0] != 78 as u8 || hdr[1] != 81 as u8 || hdr[2] != 84 as u8 || hdr[3] != 76 as u8 ||
+           hdr[4] != 48 as u8 || hdr[5] != 48 as u8 || hdr[6] != 48 as u8 || hdr[7] != 50 as u8 {
+            file_close(lh as usize)
+            return -28 as isize // Bad header magic
+        }
+        let entryBytes: usize = (fSizeIs as usize) - 32 as usize
+        if entryBytes % 32 as usize != 0 as usize {
+            file_close(lh as usize)
+            return -28 as isize // Torn entry boundary
+        }
+        let totalEntries: usize = entryBytes / 32 as usize
+        let ei: usize = 0 as usize
+        while ei < totalEntries {
+            let ent: [u8; 32]
+            let rE: isize = file_read_exact(lh as usize, slice(ent))
+            if rE < 0 as isize {
+                file_close(lh as usize)
+                return -28 as isize
+            }
+            let shaBuf: [u8; 32]
+            if noeWalComputeSha256(&ent[0], 16 as usize, &shaBuf[0], 32 as usize) != 0 as isize {
+                file_close(lh as usize)
+                return -28 as isize
+            }
+            let ci: usize = 0 as usize
+            let cFail: bool = false
+            while ci < 16 as usize {
+                if ent[16 as usize + ci] != shaBuf[ci] { cFail = true }
+                ci = ci + 1 as usize
+            }
+            if cFail {
+                file_close(lh as usize)
+                return -28 as isize // Checksum mismatch
+            }
+            let eTx: u64 = noeWalGetNumber(slice(ent), 0 as usize, 8 as usize)
+            if eTx > maxLedgerTx {
+                maxLedgerTx = eTx
+            }
+            ei = ei + 1 as usize
+        }
+        file_close(lh as usize)
+    }
+
     let walPath: string = engine.dbPath + "/WAL.log"
     if fs_exists(walPath) {
         if fs_exists(engine.dbPath + "/.noesql_testing_faults_enabled") && fs_exists(engine.dbPath + "/FAULT_CONSOLIDATE_WAL_READ_FAIL.flag") {
@@ -1058,17 +1128,13 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
                 }
 
                 if txCommitted {
-                    let qRes: int = noeWalLedgerQueryOutcome(engine.dbPath, txId)
-                    if qRes == -1 {
-                        file_close(walFd as usize)
-                        return -28 as isize // Ledger integrity failure during consolidation
-                    }
-                    if qRes != 1 {
+                    if txId > maxLedgerTx {
                         let recRes: isize = noeWalLedgerRecordOutcome(engine.dbPath, txId, 1 as u32, false)
                         if recRes < 0 as isize {
                             file_close(walFd as usize)
                             return recRes
                         }
+                        maxLedgerTx = txId
                     }
                 }
 
@@ -1092,7 +1158,6 @@ export function noeWalLedgerConsolidateWal(engine: *NoeWalEngine): isize {
     }
 
     // Durability sync barrier: even if no new records were appended, ensure ledger file and directory are synced
-    let ledgerPath: string = engine.dbPath + "/tx_outcomes.log"
     if fs_exists(ledgerPath) {
         let lh: isize = file_open_append(ledgerPath)
         if !file_handle_valid(lh) {
@@ -1274,8 +1339,30 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
     }
     engine.walFd = h as usize
     engine.walOpen = true
+    engine.walInode = file_inode(engine.walFd)
+    engine.walDev = file_dev(engine.walFd)
     engine.walBytesWritten = engine.walCommittedOffset
     noeWalSyncDirectory(path)
+
+    // Open persistent ledger handle
+    let legPath: string = path + "/tx_outcomes.log"
+    if !fs_exists(legPath) {
+        let legH: isize = file_open_create(legPath)
+        if file_handle_valid(legH) {
+            let hdr: [u8; 32]
+            hdr[0] = 78 as u8 hdr[1] = 81 as u8 hdr[2] = 84 as u8 hdr[3] = 76 as u8
+            hdr[4] = 48 as u8 hdr[5] = 48 as u8 hdr[6] = 48 as u8 hdr[7] = 50 as u8
+            let hi: usize = 8 as usize
+            while hi < 32 as usize { hdr[hi] = 0 as u8 hi = hi + 1 as usize }
+            file_write_all(legH as usize, slice(hdr))
+            engine.ledgerFd = legH as usize
+        }
+    } else {
+        let legH: isize = file_open_append(legPath)
+        if file_handle_valid(legH) {
+            engine.ledgerFd = legH as usize
+        }
+    }
 
     // 5. Rebuild B-tree index on first table primary keys
     noeWalRebuildIndex(engine)
@@ -1403,20 +1490,9 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
     if engine == null || !engine.walOpen || tx == null || !tx.inProgress { return -1 as isize }
 
     let walPath: string = engine.dbPath + "/WAL.log"
-    if !fs_exists(walPath) {
-        if engine.walFd != 0 as usize {
-            file_close(engine.walFd)
-            engine.walFd = 0 as usize
-        }
-        engine.walOpen = false
-        noeWalEngineRollback(engine, tx)
-        return -17 as isize
-    }
-    let curInode: i64 = file_inode(engine.walFd)
-    let curDev: i64 = file_dev(engine.walFd)
     let diskInode: i64 = fs_inode(walPath)
     let diskDev: i64 = fs_dev(walPath)
-    if curInode <= 0 as i64 || curDev <= 0 as i64 || diskInode <= 0 as i64 || diskDev <= 0 as i64 || curDev != diskDev || curInode != diskInode {
+    if diskInode <= 0 as i64 || diskDev <= 0 as i64 || engine.walInode != diskInode || engine.walDev != diskDev {
         // Failed identity lookup or file replaced during active transaction -> fail closed & rollback memory!
         if engine.walFd != 0 as usize {
             file_close(engine.walFd)
@@ -1475,8 +1551,23 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
         engine.walCommittedOffset = engine.walBytesWritten
     }
 
-    // Record committed outcome in durable ledger
-    noeWalLedgerRecordOutcome(engine.dbPath, tx.txId, 1 as u32, false)
+    // Record committed outcome directly into open durable ledger descriptor
+    if engine.ledgerFd != 0 as usize {
+        let entry: [u8; 32]
+        noeWalPutNumber(slice(entry), 0 as usize, 8 as usize, tx.txId)
+        noeWalPutNumber(slice(entry), 8 as usize, 4 as usize, 1 as u64)
+        noeWalPutNumber(slice(entry), 12 as usize, 4 as usize, 0 as u64)
+        let shaBuf: [u8; 32]
+        noeWalComputeSha256(&entry[0], 16 as usize, &shaBuf[0], 32 as usize)
+        let ci: usize = 0 as usize
+        while ci < 16 as usize {
+            entry[16 as usize + ci] = shaBuf[ci]
+            ci = ci + 1 as usize
+        }
+        file_write_all(engine.ledgerFd, slice(entry))
+    } else {
+        noeWalLedgerRecordOutcome(engine.dbPath, tx.txId, 1 as u32, false)
+    }
 
     // Release cross-process single-writer exclusive lock
     file_unlock(engine.lockFd)
@@ -1502,8 +1593,23 @@ export function noeWalEngineRollback(engine: *NoeWalEngine, tx: *NoeWalTx): isiz
     if engine == null || tx == null || !tx.inProgress { return 0 as isize }
     tx.inProgress = false
 
-    // Explicitly record aborted outcome in durable outcomes ledger
-    noeWalLedgerRecordOutcome(engine.dbPath, tx.txId, 2 as u32, false)
+    // Explicitly record aborted outcome directly into open durable ledger descriptor
+    if engine.ledgerFd != 0 as usize {
+        let entry: [u8; 32]
+        noeWalPutNumber(slice(entry), 0 as usize, 8 as usize, tx.txId)
+        noeWalPutNumber(slice(entry), 8 as usize, 4 as usize, 2 as u64)
+        noeWalPutNumber(slice(entry), 12 as usize, 4 as usize, 0 as u64)
+        let shaBuf: [u8; 32]
+        noeWalComputeSha256(&entry[0], 16 as usize, &shaBuf[0], 32 as usize)
+        let ci: usize = 0 as usize
+        while ci < 16 as usize {
+            entry[16 as usize + ci] = shaBuf[ci]
+            ci = ci + 1 as usize
+        }
+        file_write_all(engine.ledgerFd, slice(entry))
+    } else {
+        noeWalLedgerRecordOutcome(engine.dbPath, tx.txId, 2 as u32, false)
+    }
 
     let revRes: isize = noeWalEngineRevert(engine)
     if revRes != 0 as isize {
@@ -1579,6 +1685,10 @@ export function noeWalEngineCheckpointLocked(engine: *NoeWalEngine, keepLocked: 
     }
 
     // Consolidate verified transaction outcomes into durable ledger before WAL truncation
+    if engine.ledgerFd != 0 as usize {
+        file_close(engine.ledgerFd)
+        engine.ledgerFd = 0 as usize
+    }
     let consRes: isize = noeWalLedgerConsolidateWal(engine)
     if consRes != 0 as isize {
         file_unlock(engine.lockFd)
@@ -1617,9 +1727,17 @@ export function noeWalEngineCheckpointLocked(engine: *NoeWalEngine, keepLocked: 
         return -4 as isize
     }
     engine.walFd = appHandle as usize
+    engine.walInode = file_inode(engine.walFd)
+    engine.walDev = file_dev(engine.walFd)
     engine.walBytesWritten = 0 as usize
     engine.walCommittedOffset = 0 as usize
     noeWalSyncDirectory(engine.dbPath)
+
+    // Re-open persistent ledger handle
+    let legApp: isize = file_open_append(engine.dbPath + "/tx_outcomes.log")
+    if file_handle_valid(legApp) {
+        engine.ledgerFd = legApp as usize
+    }
 
     if !keepLocked {
         file_unlock(engine.lockFd)
@@ -1640,6 +1758,10 @@ export function noeWalEngineClose(engine: *NoeWalEngine): isize {
     if engine.walFd != 0 as usize {
         file_close(engine.walFd)
         engine.walFd = 0 as usize
+    }
+    if engine.ledgerFd != 0 as usize {
+        file_close(engine.ledgerFd)
+        engine.ledgerFd = 0 as usize
     }
     if engine.lockFd != 0 as usize {
         file_close(engine.lockFd)

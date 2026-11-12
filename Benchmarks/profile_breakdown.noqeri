@@ -1,0 +1,67 @@
+import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "/tmp/bench_profile.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let tInit0: int = clockMillis()
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize {
+        print("OPEN_FAILED")
+        return
+    }
+
+    let tIdx: isize = noeCreateTable(&engine.db, "records")
+    noeAddField(&engine.db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&engine.db, tIdx as usize, "val", noeTypeInt(), true, false, false, false, "")
+    noeAddField(&engine.db, tIdx as usize, "name", noeTypeText(), true, false, false, false, "")
+    let tInit1: int = clockMillis()
+
+    let totalExecMs: i64 = 0 as i64
+    let totalCommitMs: i64 = 0 as i64
+
+    let tStart: int = clockMillis()
+    let i: usize = 0 as usize
+    while i < 50 as usize {
+        let tx: NoeWalTx
+        noeWalEngineBegin(&engine, &tx)
+
+        let tE0: int = clockMillis()
+        let stmt: string = "records add { val: " + noeIntToString((i * 10 as usize) as i64) + ", name: \"test_record\" }"
+        noeWalEngineExecute(&engine, &tx, stmt)
+        let tE1: int = clockMillis()
+        totalExecMs = totalExecMs + ((tE1 - tE0) as i64)
+
+        let tC0: int = clockMillis()
+        noeWalEngineCommit(&engine, &tx)
+        let tC1: int = clockMillis()
+        totalCommitMs = totalCommitMs + ((tC1 - tC0) as i64)
+
+        i = i + 1 as usize
+    }
+    let tEnd: int = clockMillis()
+    let totalMs: i64 = (tEnd - tStart) as i64
+
+    // Test checkpoint profiling
+    let tCp0: int = clockMillis()
+    let cpRes: isize = noeWalEngineCheckpoint(&engine)
+    let tCp1: int = clockMillis()
+    let cpMs: i64 = (tCp1 - tCp0) as i64
+
+    noeWalEngineClose(&engine)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("================================================================")
+    print("  NOESQL TIME BREAKDOWN PROFILER (50 Transactions)")
+    print("================================================================")
+    print("Total Transaction Loop Time: " + noeIntToString(totalMs) + " ms")
+    print("  - Query Execution (parse + B-tree): " + noeIntToString(totalExecMs) + " ms")
+    print("  - Commit (WAL serialize + write + fsync): " + noeIntToString(totalCommitMs) + " ms")
+    print("Checkpoint Time (snapshot + sha256 + fsync): " + noeIntToString(cpMs) + " ms")
+    print("================================================================")
+}
+
+main()

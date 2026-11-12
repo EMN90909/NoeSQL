@@ -1,0 +1,52 @@
+import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "/tmp/bench_detailed.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize {
+        print("OPEN_FAILED")
+        return
+    }
+
+    let tIdx: isize = noeCreateTable(&engine.db, "records")
+    noeAddField(&engine.db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
+    noeAddField(&engine.db, tIdx as usize, "val", noeTypeInt(), true, false, false, false, "")
+    noeAddField(&engine.db, tIdx as usize, "name", noeTypeText(), true, false, false, false, "")
+
+    // Measure raw fsync cost
+    let tFs0: int = clockMillis()
+    let j: usize = 0 as usize
+    while j < 50 as usize {
+        file_sync(engine.walFd as usize)
+        j = j + 1 as usize
+    }
+    let tFs1: int = clockMillis()
+    let rawFsync50Ms: i64 = (tFs1 - tFs0) as i64
+
+    // Measure raw dir sync cost
+    let tDs0: int = clockMillis()
+    let k: usize = 0 as usize
+    while k < 50 as usize {
+        noeWalSyncDirectory(dbPath)
+        k = k + 1 as usize
+    }
+    let tDs1: int = clockMillis()
+    let rawDirSync50Ms: i64 = (tDs1 - tDs0) as i64
+
+    noeWalEngineClose(&engine)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("================================================================")
+    print("  RAW I/O SYNC COST (50 Invocations on this machine)")
+    print("================================================================")
+    print("50 file_sync calls on open WAL file: " + noeIntToString(rawFsync50Ms) + " ms (" + noeIntToString(rawFsync50Ms * 1000 as i64 / 50 as i64) + " us per fsync)")
+    print("50 directory_sync calls on directory: " + noeIntToString(rawDirSync50Ms) + " ms (" + noeIntToString(rawDirSync50Ms * 1000 as i64 / 50 as i64) + " us per dir_sync)")
+    print("================================================================")
+}
+
+main()
