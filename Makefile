@@ -24,6 +24,7 @@ test: no-js no-c-family no-rust-zig
 		$(NOQERI) run "$$f" || exit 1; \
 	done
 	@python3 tests/test_concurrent_workload.py || exit 1
+	@python3 tests/test_durability_crash_kill.py || exit 1
 	@echo "=== All Pure Noqeri Tests Passed ==="
 
 no-js:

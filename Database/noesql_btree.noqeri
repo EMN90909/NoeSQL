@@ -2,7 +2,7 @@ module noqeri.database.noesql.btree
 
 // NoeSQL Pure Noqeri B-Tree Index Groundwork
 // High-performance, zero dynamic heap allocation B-Tree index
-// Providing O(log N) search, insertion, and range scans for relational indexing.
+// Providing O(log N) search, insertion, update, delete, and range scans.
 
 record NoeBTreeNode {
     isLeaf: bool
@@ -15,7 +15,7 @@ record NoeBTreeNode {
 record NoeBTree {
     root: usize
     nodeCount: usize
-    nodes: [NoeBTreeNode; 64]
+    nodes: [NoeBTreeNode; 128]
 }
 
 export function noeBTreeMaxKeys(): usize {
@@ -23,7 +23,7 @@ export function noeBTreeMaxKeys(): usize {
 }
 
 export function noeBTreeMaxNodes(): usize {
-    return 64 as usize
+    return 128 as usize
 }
 
 export function noeBTreeInit(tree: *NoeBTree): void {
@@ -62,13 +62,80 @@ export function noeBTreeSearch(tree: *NoeBTree, key: i64): isize {
     return -1 as isize
 }
 
+export function noeBTreeUpdate(tree: *NoeBTree, key: i64, newRowIndex: usize): bool {
+    if tree == null || tree.nodeCount == 0 as usize { return false }
+    let currIdx: usize = tree.root
+    while currIdx < tree.nodeCount {
+        let node: *NoeBTreeNode = &tree.nodes[currIdx]
+        let i: usize = 0 as usize
+        while i < node.keyCount && key > node.keys[i] {
+            i = i + 1 as usize
+        }
+        if i < node.keyCount && node.keys[i] == key {
+            node.rowIndices[i] = newRowIndex
+            return true
+        }
+        if node.isLeaf {
+            return false
+        }
+        currIdx = node.children[i]
+    }
+    return false
+}
+
+export function noeBTreeDelete(tree: *NoeBTree, key: i64): bool {
+    if tree == null || tree.nodeCount == 0 as usize { return false }
+    return noeBTreeDeleteFromNode(tree, tree.root, key)
+}
+
+function noeBTreeDeleteFromNode(tree: *NoeBTree, nodeIdx: usize, key: i64): bool {
+    if nodeIdx >= tree.nodeCount { return false }
+    let node: *NoeBTreeNode = &tree.nodes[nodeIdx]
+    let i: usize = 0 as usize
+    while i < node.keyCount && key > node.keys[i] {
+        i = i + 1 as usize
+    }
+
+    if i < node.keyCount && node.keys[i] == key {
+        // Key found in this node
+        if node.isLeaf {
+            let j: usize = i
+            while j + 1 as usize < node.keyCount {
+                node.keys[j] = node.keys[j + 1 as usize]
+                node.rowIndices[j] = node.rowIndices[j + 1 as usize]
+                j = j + 1 as usize
+            }
+            node.keyCount = node.keyCount - 1 as usize
+            return true
+        } else {
+            // Internal node key deletion: replace with predecessor leaf key
+            let predChildIdx: usize = node.children[i]
+            let curr: *NoeBTreeNode = &tree.nodes[predChildIdx]
+            while !curr.isLeaf {
+                curr = &tree.nodes[curr.children[curr.keyCount]]
+            }
+            if curr.keyCount > 0 as usize {
+                let predKey: i64 = curr.keys[curr.keyCount - 1 as usize]
+                let predRow: usize = curr.rowIndices[curr.keyCount - 1 as usize]
+                node.keys[i] = predKey
+                node.rowIndices[i] = predRow
+                return noeBTreeDeleteFromNode(tree, node.children[i], predKey)
+            }
+            return false
+        }
+    } else if !node.isLeaf {
+        return noeBTreeDeleteFromNode(tree, node.children[i], key)
+    }
+    return false
+}
+
 export function noeBTreeInsert(tree: *NoeBTree, key: i64, rowIndex: usize): isize {
     if tree == null { return -1 as isize }
     let rootNode: *NoeBTreeNode = &tree.nodes[tree.root]
 
     // If root is full, split root
     if rootNode.keyCount >= 15 as usize {
-        if tree.nodeCount + 2 as usize > 64 as usize { return -2 as isize } // capacity limit
+        if tree.nodeCount + 2 as usize > 128 as usize { return -2 as isize } // capacity limit
         let newRootIdx: usize = tree.nodeCount
         tree.nodeCount = tree.nodeCount + 1 as usize
         let newRoot: *NoeBTreeNode = &tree.nodes[newRootIdx]

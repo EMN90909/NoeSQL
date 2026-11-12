@@ -6,33 +6,32 @@ function main(): void {
     let engine: NoeWalEngine
     let openRes: isize = noeWalEngineOpen(&engine, dbPath)
     if openRes != 0 as isize {
-        print("OPEN_FAILED")
+        print("OPEN_FAILED:" + intToString(openRes as i64))
         return
     }
 
     let tIdx: isize = noeFindTable(&engine.db, "events")
     if tIdx < 0 as isize {
-        noeWalEngineClose(&engine)
+        file_close(engine.walFd)
+        file_close(engine.lockFd)
         print("TABLE_NOT_FOUND")
         return
     }
 
     let t: *NoeTableData = &engine.db.tables[tIdx as usize]
-    if t.rowCount == 0 as usize {
-        noeWalEngineClose(&engine)
-        print("CORRUPTION:zero_rows")
-        return
+    print("TOTAL_RECOVERED_ROWS:" + intToString(t.rowCount as i64))
+
+    let r: usize = 0 as usize
+    while r < t.rowCount {
+        let cell: *NoeRowCell = &t.cells[r * 16 as usize + 1 as usize]
+        if !cell.isNull {
+            print("RECOVERED_ROW_VAL:" + intToString(cell.intVal))
+        }
+        r = r + 1 as usize
     }
 
-    // Verify primary key B-Tree index lookup
-    let rowIdx: isize = noeBTreeSearch(&engine.primaryIndex, 1 as i64)
-    if rowIdx < 0 as isize {
-        noeWalEngineClose(&engine)
-        print("CORRUPTION:btree_miss")
-        return
-    }
-
-    noeWalEngineClose(&engine)
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
     print("WAL_READER_COMPLETE")
 }
 

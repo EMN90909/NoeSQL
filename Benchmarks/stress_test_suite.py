@@ -13,7 +13,7 @@ print("  NOESQL DEEP STRESS & ADVERSARIAL CAPACITY SUITE")
 print("================================================================================")
 
 # --- Test 1: Capacity Limit & Out-of-Bounds Row Stress ---
-print("\n[STRESS TEST 1] Table Row Capacity Saturation (Limit: 64 rows)")
+print("\n[STRESS TEST 1] Table Row Capacity Saturation (Limit: 512 rows)")
 script_capacity = """
 import "../Database/noesql_engine.noqeri"
 
@@ -26,7 +26,7 @@ function main(): void {
 
     let inserted: usize = 0 as usize
     let i: usize = 0 as usize
-    while i < 100 as usize {
+    while i < 600 as usize {
         let r: [NoeRowCell; 2]
         r[0].isNull = true
         r[1].isNull = false
@@ -49,8 +49,8 @@ with open(os.path.join(NOESQL_DIR, "Benchmarks", "stress_cap.noqeri"), "w") as f
 
 res = subprocess.run([NOQERI_BIN, "run", "Benchmarks/stress_cap.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)
 print("Output:", res.stdout.strip())
-assert "CAPACITY_SATURATED_AT:64:ERROR:-101" in res.stdout, f"Unexpected capacity behavior: {res.stdout}"
-print("=> PASS: Fixed static memory strictly bounds rows at 64 without memory leaks or buffer overflows.")
+assert "CAPACITY_SATURATED_AT:512:ERROR:-101" in res.stdout, f"Unexpected capacity behavior: {res.stdout}"
+print("=> PASS: Fixed static memory strictly bounds rows at 512 without memory leaks or buffer overflows.")
 
 # --- Test 2: Rapid Commit Generation Rollover Stress ---
 print("\n[STRESS TEST 2] Rapid Successive Immutable Generation Commits (100 Generations)")

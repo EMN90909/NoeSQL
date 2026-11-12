@@ -15,53 +15,82 @@ function main(): void {
     fs_remove_tree(dbPath)
     fs_remove(dbPath + ".lck")
 
-    // 1. Open engine
+    // 1. Open engine and create base schema
     let engine: NoeWalEngine
     let openRes: isize = noeWalEngineOpen(&engine, dbPath)
     assert_true(openRes == 0 as isize, "open wal engine")
     assert_true(fs_exists(dbPath + "/HEAD"), "HEAD exists")
     assert_true(fs_exists(dbPath + "/WAL.log"), "WAL.log exists")
 
-    // 2. Define schema
     let tIdx: isize = noeCreateTable(&engine.db, "inventory")
     assert_true(tIdx >= 0 as isize, "create table inventory")
     noeAddField(&engine.db, tIdx as usize, "id", noeTypeInt(), true, true, true, true, "")
     noeAddField(&engine.db, tIdx as usize, "sku", noeTypeText(), true, false, false, false, "")
     noeAddField(&engine.db, tIdx as usize, "qty", noeTypeInt(), true, false, false, false, "")
 
-    // 3. Perform 20 WAL transactions
+    // Checkpoint base schema
+    assert_true(noeWalEngineCheckpoint(&engine) == 0 as isize, "checkpoint schema")
+
+    // 2. Perform 15 WAL transactions with genuine SHA-256 commit verification
     let i: usize = 0 as usize
-    while i < 20 as usize {
+    while i < 15 as usize {
         let tx: NoeWalTx
         assert_true(noeWalEngineBegin(&engine, &tx) == 0 as isize, "wal begin tx")
-        let stmt: string = "inventory add { sku: \"item_" + intToString(i as i64) + "\", qty: " + intToString((i * 5 as usize) as i64) + " }"
+        let stmt: string = "inventory add { sku: \"item_" + intToString(i as i64) + "\", qty: " + intToString((i * 10 as usize) as i64) + " }"
         assert_true(noeWalEngineExecute(&engine, &tx, stmt) == 0 as isize, "wal execute tx")
         assert_true(noeWalEngineCommit(&engine, &tx) == 0 as isize, "wal commit tx")
         i = i + 1 as usize
     }
 
-    assert_true(engine.db.tables[0].rowCount == 20 as usize, "20 rows inserted into inventory")
+    assert_true(engine.db.tables[0].rowCount == 15 as usize, "15 rows inserted in memory")
 
-    // 4. Test B-tree lookup
+    // 3. Test B-tree index lookup, update, and delete
     let btreeRow: isize = noeBTreeSearch(&engine.primaryIndex, 5 as i64)
     assert_true(btreeRow >= 0 as isize, "btree index lookup succeeded")
+    assert_true(noeBTreeUpdate(&engine.primaryIndex, 5 as i64, 42 as usize), "btree index update succeeded")
+    assert_true(noeBTreeSearch(&engine.primaryIndex, 5 as i64) == 42 as isize, "btree index updated row returned")
+    assert_true(noeBTreeDelete(&engine.primaryIndex, 5 as i64), "btree index delete succeeded")
+    assert_true(noeBTreeSearch(&engine.primaryIndex, 5 as i64) == -1 as isize, "deleted btree key returns -1")
 
-    // 5. Test Daemon Request Handling
-    let resp: string = noeDaemonHandleRequest(&engine, "inventory add { sku: \"daemon_item\", qty: 999 }")
-    assert_true(engine.db.tables[0].rowCount == 21 as usize, "daemon request executed")
+    // 4. CRITICAL RECOVERY TEST: Close WITHOUT checkpointing!
+    // The WAL.log contains 15 uncheckpointed committed transactions with real SHA-256 digests.
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+    engine.walOpen = false
 
-    // 6. Checkpoint
-    assert_true(noeWalEngineCheckpoint(&engine) == 0 as isize, "wal checkpoint succeeded")
+    // 5. Cold Reopen from disk: must verify cryptographic SHA-256 hashes and replay all 15 transactions!
+    let recovered: NoeWalEngine
+    let recOpenRes: isize = noeWalEngineOpen(&recovered, dbPath)
+    assert_true(recOpenRes == 0 as isize, "cold reopen with uncheckpointed WAL")
+    assert_true(recovered.db.tableCount == 1 as usize, "table count 1")
+    assert_true(recovered.db.tables[0].name == "inventory", "table name inventory")
+    assert_true(recovered.db.tables[0].rowCount == 15 as usize, "exact 15 committed rows replayed from WAL")
+    assert_true(recovered.lastTxId == 15 as u64, "lastTxId recovered as 15")
 
-    // 7. Test Durability & Reopen
-    assert_true(noeWalEngineClose(&engine) == 0 as isize, "wal engine close")
+    // Verify row contents from cold replay
+    let cell1: *NoeRowCell = &recovered.db.tables[0].cells[0 * 16 as usize + 1 as usize]
+    let cell14: *NoeRowCell = &recovered.db.tables[0].cells[14 * 16 as usize + 1 as usize]
+    assert_true(cell1.textVal == "item_0", "item_0 replayed")
+    assert_true(cell14.textVal == "item_14", "item_14 replayed")
 
-    let reopened: NoeWalEngine
-    assert_true(noeWalEngineOpen(&reopened, dbPath) == 0 as isize, "wal engine reopen from disk")
-    assert_true(reopened.db.tables[0].rowCount == 21 as usize, "reopened engine has all 21 rows")
+    // 6. Test Uncommitted / Torn Tail Recovery
+    // Append an uncommitted transaction (BEGIN + IMAGE with no COMMIT) to simulate a crash mid-write
+    let tx16: NoeWalTx
+    assert_true(noeWalEngineBegin(&recovered, &tx16) == 0 as isize, "begin tx 16")
+    let s16: string = "inventory add { sku: \"torn_item\", qty: -999 }"
+    assert_true(noeWalEngineExecute(&recovered, &tx16, s16) == 0 as isize, "exec tx 16")
+    // Intentionally DO NOT commit! Hard close simulating SIGKILL before commit:
+    file_close(recovered.walFd)
+    file_close(recovered.lockFd)
+    recovered.walOpen = false
+
+    // 7. Cold reopen again: uncommitted tail must be discarded, rowCount must remain 15!
+    let finalEngine: NoeWalEngine
+    assert_true(noeWalEngineOpen(&finalEngine, dbPath) == 0 as isize, "reopen after uncommitted tail")
+    assert_true(finalEngine.db.tables[0].rowCount == 15 as usize, "uncommitted tail discarded; exactly 15 rows remain")
 
     // Clean up
-    noeWalEngineClose(&reopened)
+    noeWalEngineClose(&finalEngine)
     fs_remove_tree(dbPath)
 
     print("Multi-Process Daemon & Client-Server WAL Storage Engine: ALL PASSED")

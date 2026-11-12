@@ -1,4 +1,5 @@
 import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/env.noqeri"
 
 function main(): void {
     let dbPath: string = "tmp_concurrent_wal_db"
@@ -17,24 +18,39 @@ function main(): void {
         noeAddField(&engine.db, tIdx as usize, "data", noeTypeInt(), true, false, false, false, "")
     }
 
+    let wStr: string = env_get_or("WORKER_ID", "1")
+    let wId: i64 = noeParseI64(wStr)
+
     let i: usize = 0 as usize
     while i < 5 as usize {
         let tx: NoeWalTx
         let bRes: isize = noeWalEngineBegin(&engine, &tx)
         if bRes != 0 as isize { print("BEGIN_FAILED") return }
 
-        let stmt: string = "events add { data: " + intToString((200 + i as int) as i64) + " }"
+        let val: i64 = wId * 100 as i64 + (i as i64)
+        let stmt: string = "events add { data: " + intToString(val) + " }"
         let eRes: isize = noeWalEngineExecute(&engine, &tx, stmt)
-        if eRes != 0 as isize { print("EXEC_FAILED") return }
+        if eRes != 0 as isize {
+            noeWalEngineRollback(&engine, &tx)
+            print("EXEC_FAILED")
+            return
+        }
 
         let cRes: isize = noeWalEngineCommit(&engine, &tx)
-        if cRes != 0 as isize { print("COMMIT_FAILED") return }
+        if cRes != 0 as isize {
+            print("COMMIT_FAILED")
+            return
+        }
 
+        // Output verifiable acknowledgment
+        print("ACK_WRITE:worker=" + intToString(wId) + ":val=" + intToString(val) + ":tx=" + intToString(tx.txId as i64))
         i = i + 1 as usize
     }
 
-    noeWalEngineClose(&engine)
-    print("WAL_WRITER_COMPLETE")
+    // Do NOT checkpoint so cold reader must verify uncheckpointed WAL durability!
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+    print("WAL_WRITER_COMPLETE:worker=" + intToString(wId))
 }
 
 main()

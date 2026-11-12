@@ -81,8 +81,8 @@ def main():
 
     cleanup()
 
-    # Step 4: WAL Multi-Process Concurrency Test
-    print("Testing Concurrent WAL Workload (Multi-Process WAL Writers & Readers)...")
+    # Step 4: WAL Multi-Process Concurrency Test with Independent Transaction Ledger
+    print("Testing Concurrent WAL Workload (Multi-Process WAL Writers & Independent Ledger Verification)...")
     wal_db = os.path.join(NOESQL_DIR, "tmp_concurrent_wal_db")
     if os.path.exists(wal_db):
         shutil.rmtree(wal_db, ignore_errors=True)
@@ -90,16 +90,75 @@ def main():
         try: os.remove(wal_db + ".lck")
         except OSError: pass
 
-    # Pre-init
-    init_wal = subprocess.run([NOQERI_BIN, "run", "tests/worker_wal_writer.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)
+    def write_worker_script(w_id):
+        script_file = os.path.join(NOESQL_DIR, "tests", f"tmp_worker_wal_{w_id}.noqeri")
+        code = f"""import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {{
+    let dbPath: string = "tmp_concurrent_wal_db"
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize {{ print("OPEN_FAILED") return }}
+
+    let tIdx: isize = noeFindTable(&engine.db, "events")
+    if tIdx < 0 as isize {{
+        let txSchema: NoeWalTx
+        noeWalEngineBegin(&engine, &txSchema)
+        noeWalEngineExecute(&engine, &txSchema, "table events {{ id: int key auto, data: int }}")
+        noeWalEngineCommit(&engine, &txSchema)
+    }}
+
+    let wId: i64 = {w_id} as i64
+    let i: usize = 0 as usize
+    while i < 5 as usize {{
+        let tx: NoeWalTx
+        let bRes: isize = noeWalEngineBegin(&engine, &tx)
+        if bRes != 0 as isize {{ print("BEGIN_FAILED") return }}
+
+        let val: i64 = wId * 100 as i64 + (i as i64)
+        let stmt: string = "events add {{ data: " + intToString(val) + " }}"
+        let eRes: isize = noeWalEngineExecute(&engine, &tx, stmt)
+        if eRes != 0 as isize {{ noeWalEngineRollback(&engine, &tx) print("EXEC_FAILED") return }}
+
+        let cRes: isize = noeWalEngineCommit(&engine, &tx)
+        if cRes != 0 as isize {{ print("COMMIT_FAILED") return }}
+
+        print("ACK_WRITE:worker=" + intToString(wId) + ":val=" + intToString(val) + ":tx=" + intToString(tx.txId as i64))
+        i = i + 1 as usize
+    }}
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+    print("WAL_WRITER_COMPLETE:worker=" + intToString(wId))
+}}
+main()
+"""
+        with open(script_file, "w") as f:
+            f.write(code)
+        return script_file
+
+    # Pre-init table with worker 0
+    init_script = write_worker_script(0)
+    init_wal = subprocess.run([NOQERI_BIN, "run", init_script], cwd=NOESQL_DIR, capture_output=True, text=True)
     if init_wal.returncode != 0 or "WAL_WRITER_COMPLETE" not in init_wal.stdout:
         print(f"Failed to pre-init WAL database:\n{init_wal.stdout}\n{init_wal.stderr}")
         sys.exit(1)
 
+    # Collect initial writes
+    acknowledged_ledger = set()
+    for line in init_wal.stdout.splitlines():
+        if line.startswith("ACK_WRITE:"):
+            parts = dict(p.split("=") for p in line[len("ACK_WRITE:"):].split(":"))
+            acknowledged_ledger.add(int(parts["val"]))
+
+    # Spawn 4 concurrent writers with unique worker IDs and 4 concurrent readers
     wal_procs = []
-    for i in range(4):
-        p = subprocess.Popen([NOQERI_BIN, "run", "tests/worker_wal_writer.noqeri"], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    num_writers = 4
+    for i in range(1, num_writers + 1):
+        s_file = write_worker_script(i)
+        p = subprocess.Popen([NOQERI_BIN, "run", s_file], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         wal_procs.append(("wal_writer", i, p))
+
     for j in range(4):
         p = subprocess.Popen([NOQERI_BIN, "run", "tests/worker_wal_reader.noqeri"], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         wal_procs.append(("wal_reader", j, p))
@@ -109,18 +168,47 @@ def main():
         if p.returncode != 0:
             print(f"WAL process {role} #{idx} FAILED with code {p.returncode}: {stderr}")
             all_ok = False
+        if role == "wal_writer":
+            for line in stdout.splitlines():
+                if line.startswith("ACK_WRITE:"):
+                    parts = dict(p.split("=") for p in line[len("ACK_WRITE:"):].split(":"))
+                    acknowledged_ledger.add(int(parts["val"]))
         elif "CORRUPTION" in stdout:
             print(f"WAL process {role} #{idx} reported corruption: {stdout}")
             all_ok = False
+
+    if not all_ok:
+        sys.exit(1)
+
+    print(f"Total Acknowledged Transactions Across Concurrent Writers: {len(acknowledged_ledger)}")
+
+    # Verify cold reopen and exact row match against independent ledger
+    verify_reader = subprocess.run([NOQERI_BIN, "run", "tests/worker_wal_reader.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)
+    if verify_reader.returncode != 0:
+        print(f"Cold verification reader failed:\n{verify_reader.stdout}\n{verify_reader.stderr}")
+        sys.exit(1)
+
+    recovered_rows = set()
+    for line in verify_reader.stdout.splitlines():
+        if line.startswith("RECOVERED_ROW_VAL:"):
+            val = int(line[len("RECOVERED_ROW_VAL:"):])
+            recovered_rows.add(val)
+
+    print(f"Total Recovered Rows from Uncheckpointed Cold WAL Replay: {len(recovered_rows)}")
+
+    missing = acknowledged_ledger - recovered_rows
+    extra = recovered_rows - acknowledged_ledger
+    if missing or extra or len(recovered_rows) != len(acknowledged_ledger):
+        print(f"FATAL: Ledger mismatch! Missing: {missing}, Extra: {extra}")
+        sys.exit(1)
+
+    print("=> 100% LEDGER MATCH: Every acknowledged write was recovered with exact identity and zero loss.")
 
     if os.path.exists(wal_db):
         shutil.rmtree(wal_db, ignore_errors=True)
     if os.path.exists(wal_db + ".lck"):
         try: os.remove(wal_db + ".lck")
         except OSError: pass
-
-    if not all_ok:
-        sys.exit(1)
 
     print("Long-Running Concurrent Workload (Multi-Process Readers & Writers, COW + WAL): ALL PASSED (Zero Corruption, 100% Consistency)")
 

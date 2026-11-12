@@ -141,7 +141,7 @@ record NoeTableData {
     autoSequence: i64
     rowCount: usize
     // Flattened row cells: cellIndex = rowIndex * 16 + colIndex
-    cells: [NoeRowCell; 1024]
+    cells: [NoeRowCell; 8192]
 }
 
 record NoeDatabaseState {
@@ -324,7 +324,7 @@ export function noeCheckDeleteBlockedByReference(db: *NoeDatabaseState, tableIdx
 
 export function noeInsertRow(db: *NoeDatabaseState, tableIdx: usize, rowVals: []NoeRowCell): isize {
     let t: *NoeTableData = &db.tables[tableIdx]
-    if t.rowCount >= 64 as usize {
+    if t.rowCount >= 512 as usize {
         return -101 as isize // Table capacity reached
     }
 

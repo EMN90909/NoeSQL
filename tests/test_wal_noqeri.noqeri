@@ -1,20 +1,88 @@
 import "../Database/noesql_wal.noqeri"
 
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
 function main(): void {
+    // 1. Single frame round trip
     let target: [u8; 128]
     let scratch: [u8; 128]
     let payload: [u8; 4] = [1 as u8, 2 as u8, 3 as u8, 4 as u8]
     let encodedLen: isize = noeWalEncodeFrame(slice(target), slice(scratch), noeWalImage(), 42 as u64, 1 as u32, slice(payload))
-    if encodedLen <= 0 as isize {
-        print("WAL encode failed")
-        return
-    }
+    assert_true(encodedLen > 0 as isize, "WAL encode failed")
+
     let frame: NoeWalFrame
     let decodeStatus: isize = noeWalDecodeFrame(slice(target), 0 as usize, slice(scratch), &frame)
-    if decodeStatus == 0 as isize && frame.transaction == 42 as u64 && frame.payloadSize == 4 as usize {
-        print("NoeSQL WAL Frame encode/decode round-trip: VERIFIED OK")
-    } else {
-        print("WAL decode failed")
-    }
+    assert_true(decodeStatus == 0 as isize && frame.transaction == 42 as u64 && frame.payloadSize == 4 as usize, "WAL decode failed")
+    print("NoeSQL WAL Frame encode/decode round-trip: VERIFIED OK")
+
+    // 2. Multi-transaction sequence (Tx 101, Tx 102) with genuine SHA-256 commit hashes
+    let stream: [u8; 1024]
+    let streamOffset: usize = 0 as usize
+
+    // --- Tx 101 ---
+    let empty: [u8; 0]
+    let bLen1: isize = noeWalEncodeFrame(slice(&stream[streamOffset], len(stream) - streamOffset), slice(scratch), noeWalBegin(), 101 as u64, 0 as u32, slice(empty))
+    streamOffset = streamOffset + bLen1 as usize
+
+    let img1: [u8; 8] = [65 as u8, 66 as u8, 67 as u8, 68 as u8, 69 as u8, 70 as u8, 71 as u8, 72 as u8]
+    let iLen1: isize = noeWalEncodeFrame(slice(&stream[streamOffset], len(stream) - streamOffset), slice(scratch), noeWalImage(), 101 as u64, 1 as u32, slice(img1))
+    streamOffset = streamOffset + iLen1 as usize
+
+    let hash1: [u8; 32]
+    assert_true(noeHostSha256(&img1[0], 8 as usize, &hash1[0], 32 as usize) == 0 as isize, "sha256 computation")
+    let cLen1: isize = noeWalEncodeFrame(slice(&stream[streamOffset], len(stream) - streamOffset), slice(scratch), noeWalCommit(), 101 as u64, 2 as u32, slice(hash1))
+    streamOffset = streamOffset + cLen1 as usize
+
+    // --- Tx 102 ---
+    let bLen2: isize = noeWalEncodeFrame(slice(&stream[streamOffset], len(stream) - streamOffset), slice(scratch), noeWalBegin(), 102 as u64, 0 as u32, slice(empty))
+    streamOffset = streamOffset + bLen2 as usize
+
+    let img2: [u8; 5] = [88 as u8, 89 as u8, 90 as u8, 91 as u8, 92 as u8]
+    let iLen2: isize = noeWalEncodeFrame(slice(&stream[streamOffset], len(stream) - streamOffset), slice(scratch), noeWalImage(), 102 as u64, 1 as u32, slice(img2))
+    streamOffset = streamOffset + iLen2 as usize
+
+    let hash2: [u8; 32]
+    assert_true(noeHostSha256(&img2[0], 5 as usize, &hash2[0], 32 as usize) == 0 as isize, "sha256 computation")
+    let cLen2: isize = noeWalEncodeFrame(slice(&stream[streamOffset], len(stream) - streamOffset), slice(scratch), noeWalCommit(), 102 as u64, 2 as u32, slice(hash2))
+    streamOffset = streamOffset + cLen2 as usize
+
+    // --- Verify multi-transaction scan ---
+    let off: usize = 0 as usize
+    let txId: u64 = 0 as u64
+    let imgStart: usize = 0 as usize
+    let imgLen: usize = 0 as usize
+    let nextOff: usize = 0 as usize
+
+    let st1: int = noeWalScanNext(slice(&stream[0], streamOffset), off, slice(scratch), &txId, &imgStart, &imgLen, &nextOff)
+    assert_true(st1 == 1, "scan Tx 101")
+    assert_true(txId == 101 as u64, "txId 101")
+    assert_true(imgLen == 8 as usize, "imgLen 8")
+    assert_true(stream[imgStart] == 65 as u8, "payload 65")
+
+    let st2: int = noeWalScanNext(slice(&stream[0], streamOffset), nextOff, slice(scratch), &txId, &imgStart, &imgLen, &off)
+    assert_true(st2 == 1, "scan Tx 102")
+    assert_true(txId == 102 as u64, "txId 102")
+    assert_true(imgLen == 5 as usize, "imgLen 5")
+    assert_true(stream[imgStart] == 88 as u8, "payload 88")
+
+    // End of stream
+    let st3: int = noeWalScanNext(slice(&stream[0], streamOffset), off, slice(scratch), &txId, &imgStart, &imgLen, &nextOff)
+    assert_true(st3 == 0, "EOF returned 0")
+
+    // Recovery summary
+    let rec: NoeWalRecovery
+    assert_true(noeWalRecover(slice(&stream[0], streamOffset), slice(scratch), &rec) == 0 as isize, "multi-tx recover")
+    assert_true(rec.status == noeWalFoundCommit(), "recovery found commit")
+    assert_true(rec.transaction == 102 as u64, "recovery transaction 102")
+    assert_true(rec.frames == 6 as usize, "recovery 6 frames")
+
+    print("Multi-Transaction WAL Scanning & Cryptographic Verification: ALL PASSED")
 }
+
 main()
