@@ -1,0 +1,115 @@
+import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing 40-Statement Single Transaction Recovery & TxID Monotonicity Across Checkpoint ===")
+    let dbPath: string = "tmp_test_multistmt_40.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    assert_true(openRes == 0 as isize, "open engine")
+
+    // 1. Create table schema
+    let txSchema: NoeWalTx
+    noeWalEngineBegin(&engine, &txSchema)
+    noeWalEngineExecute(&engine, &txSchema, "table accounts { id: int key auto, balance: int }")
+    noeWalEngineCommit(&engine, &txSchema)
+    let schemaTxId: u64 = txSchema.txId
+    assert_true(schemaTxId == 1 as u64, "schema txId is 1")
+
+    // 2. Execute ONE transaction containing 40 statements!
+    let tx40: NoeWalTx
+    let bRes: isize = noeWalEngineBegin(&engine, &tx40)
+    assert_true(bRes == 0 as isize, "begin 40-statement tx")
+    assert_true(tx40.txId == 2 as u64, "txId is 2")
+
+    let s: usize = 0 as usize
+    while s < 40 as usize {
+        let bal: i64 = ((s + 1 as usize) * 10 as usize) as i64
+        let stmt: string = "accounts add { balance: " + intToString(bal) + " }"
+        let eRes: isize = noeWalEngineExecute(&engine, &tx40, stmt)
+        assert_true(eRes == 0 as isize, "execute statement in 40-stmt tx")
+        s = s + 1 as usize
+    }
+
+    let cRes: isize = noeWalEngineCommit(&engine, &tx40)
+    assert_true(cRes == 0 as isize, "commit 40-statement tx")
+
+    let tIdx: isize = noeFindTable(&engine.db, "accounts")
+    let t: *NoeTableData = &engine.db.tables[tIdx as usize]
+    assert_true(t.rowCount == 40 as usize, "in-memory row count is 40")
+
+    // Close engine without checkpointing so recovery MUST replay all 40 statements from WAL!
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+
+    // 3. Cold reopen in fresh engine: verify ALL 40 statements survived (no 32-statement cap)!
+    let coldEngine: NoeWalEngine
+    let coldOpenRes: isize = noeWalEngineOpen(&coldEngine, dbPath)
+    assert_true(coldOpenRes == 0 as isize, "cold reopen")
+
+    let tColdIdx: isize = noeFindTable(&coldEngine.db, "accounts")
+    let tCold: *NoeTableData = &coldEngine.db.tables[tColdIdx as usize]
+    print("Cold Recovered Row Count: " + intToString(tCold.rowCount as i64))
+    assert_true(tCold.rowCount == 40 as usize, "all 40 statements recovered from WAL log")
+
+    // Verify key boundary statements: 1st (val 10), 32nd (val 320), 33rd (val 330), 40th (val 400)
+    let cell0: *NoeRowCell = &tCold.cells[0 * 16 as usize + 1 as usize]
+    let cell31: *NoeRowCell = &tCold.cells[31 * 16 as usize + 1 as usize]
+    let cell32: *NoeRowCell = &tCold.cells[32 * 16 as usize + 1 as usize]
+    let cell39: *NoeRowCell = &tCold.cells[39 * 16 as usize + 1 as usize]
+
+    assert_true(cell0.intVal == 10 as i64, "stmt 1 is 10")
+    assert_true(cell31.intVal == 320 as i64, "stmt 32 is 320")
+    assert_true(cell32.intVal == 330 as i64, "stmt 33 is 330 (survived beyond 32-entry barrier!)")
+    assert_true(cell39.intVal == 400 as i64, "stmt 40 is 400")
+
+    // 4. Test Checkpointing and TxID Monotonicity Across Restart
+    let ckptRes: isize = noeWalEngineCheckpoint(&coldEngine)
+    assert_true(ckptRes == 0 as isize, "checkpoint succeeds")
+    let lastTxBeforeClose: u64 = coldEngine.lastTxId
+    assert_true(lastTxBeforeClose == 2 as u64, "lastTxId before close is 2")
+
+    file_close(coldEngine.walFd)
+    file_close(coldEngine.lockFd)
+
+    // 5. Restart from cold disk after checkpoint: WAL is empty, must load lastTxId from snapshot!
+    let restartEngine: NoeWalEngine
+    let rOpen: isize = noeWalEngineOpen(&restartEngine, dbPath)
+    assert_true(rOpen == 0 as isize, "restart after checkpoint")
+
+    print("Restored lastTxId after checkpoint: " + intToString(restartEngine.lastTxId as i64))
+    assert_true(restartEngine.lastTxId == 2 as u64, "lastTxId preserved across checkpoint and restart")
+
+    // Begin new transaction: txId MUST be strictly monotonic (3, NOT 1 or 0!)
+    let txNew: NoeWalTx
+    let bNew: isize = noeWalEngineBegin(&restartEngine, &txNew)
+    assert_true(bNew == 0 as isize, "begin new tx after checkpoint restart")
+    print("New TxID: " + intToString(txNew.txId as i64))
+    assert_true(txNew.txId == 3 as u64, "txId is 3 (strictly monotonic, no reuse!)")
+
+    noeWalEngineExecute(&restartEngine, &txNew, "accounts add { balance: 500 }")
+    noeWalEngineCommit(&restartEngine, &txNew)
+
+    let tRest: *NoeTableData = &restartEngine.db.tables[tColdIdx as usize]
+    assert_true(tRest.rowCount == 41 as usize, "total rows is now 41")
+
+    file_close(restartEngine.walFd)
+    file_close(restartEngine.lockFd)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("40-Statement Single Transaction Recovery & TxID Monotonicity Across Checkpoint: ALL PASSED")
+}
+
+main()

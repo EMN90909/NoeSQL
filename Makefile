@@ -15,6 +15,7 @@ test: no-js no-c-family no-rust-zig
 	          tests/test_wal_engine_lifecycle.noqeri \
 	          tests/test_wal_rollback.noqeri \
 	          tests/test_wal_streaming_multistmt.noqeri \
+	          tests/test_wal_multistatement_40.noqeri \
 	          tests/test_wal_torn_tail.noqeri \
 	          tests/test_adversarial_fk.noqeri \
 	          tests/test_durability_fsync.noqeri \

@@ -86,10 +86,26 @@ function main(): void {
 
     file_close(coldEngine.walFd)
     file_close(coldEngine.lockFd)
+
+    // 5. SECOND COLD RESTART: Verify that row 6 genuinely survived on disk after torn tail repair!
+    let coldEngine2: NoeWalEngine
+    let coldOpenRes2: isize = noeWalEngineOpen(&coldEngine2, dbPath)
+    assert_true(coldOpenRes2 == 0 as isize, "second cold open succeeds cleanly")
+
+    let tIdx2: isize = noeFindTable(&coldEngine2.db, "accounts")
+    assert_true(tIdx2 >= 0 as isize, "find accounts table in second cold restart")
+    let t2: *NoeTableData = &coldEngine2.db.tables[tIdx2 as usize]
+
+    assert_true(t2.rowCount == 6 as usize, "all 6 rows survived on disk after second cold restart")
+    let rLast: *NoeRowCell = &t2.cells[5 * 16 as usize + 1 as usize]
+    assert_true(rLast.intVal == 600 as i64, "sixth row is 600 on second cold restart")
+
+    file_close(coldEngine2.walFd)
+    file_close(coldEngine2.lockFd)
     fs_remove_tree(dbPath)
     fs_remove(dbPath + ".lck")
 
-    print("Checkpoint Interruption & Torn Tail Recovery: ALL PASSED")
+    print("Checkpoint Interruption & Torn Tail Recovery (with Second Cold Restart): ALL PASSED")
 }
 
 main()

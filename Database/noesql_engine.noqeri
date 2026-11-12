@@ -150,6 +150,7 @@ record NoeDatabaseState {
     tables: [NoeTableData; 16]
     generation: u64
     inTransaction: bool
+    lastTxId: u64
 }
 
 // ----------------------------------------------------------------------------
@@ -161,6 +162,7 @@ export function noeEngineInit(db: *NoeDatabaseState, dbName: string): void {
     db.tableCount = 0 as usize
     db.generation = 1 as u64
     db.inTransaction = false
+    db.lastTxId = 0 as u64
 }
 
 export function noeFindTable(db: *NoeDatabaseState, name: string): isize {
@@ -490,9 +492,9 @@ export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
     file_write_all(genHandle as usize, slice(magic))
     noeWriteI64(genHandle as usize, nextGen as i64)
     noeWriteU32(genHandle as usize, db.tableCount as u32)
-    // Reserved / padding: 12 bytes
-    let pad: [u8; 12] = [0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
-    file_write_all(genHandle as usize, slice(pad))
+    // Persist lastTxId (8 bytes) + 4 bytes padding to preserve 32-byte header
+    noeWriteI64(genHandle as usize, db.lastTxId as i64)
+    noeWriteU32(genHandle as usize, 0 as u32)
 
     // 5. Serialize Tables, Field Definitions, and Actual Rows
     let tIdx: usize = 0 as usize
@@ -663,9 +665,12 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
     db.tableCount = tableCountU32 as usize
     db.inTransaction = false
 
-    // Skip reserved padding (12 bytes)
-    let padBuf: [u8; 12]
-    file_read_exact(h as usize, slice(padBuf))
+    // Read lastTxId (8 bytes) + 4 bytes padding
+    let lastTxI64: i64 = 0 as i64
+    noeReadI64(h as usize, &lastTxI64)
+    db.lastTxId = lastTxI64 as u64
+    let padU32: u32 = 0 as u32
+    noeReadU32(h as usize, &padU32)
 
     // Deserialize each table
     let tIdx: usize = 0 as usize

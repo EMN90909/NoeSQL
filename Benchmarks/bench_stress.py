@@ -145,7 +145,7 @@ def run_mysql_bench(num_rows=50):
 # --- 4. NoeSQL COW Benchmark ---
 def run_noesql_cow_bench(num_runs=5):
     latencies = []
-    cow_path = "/tmp/bench_noesql_cow.noedb"
+    cow_path = "/tmp/bench_noesql.noedb"
     for _ in range(num_runs):
         t0 = time.perf_counter()
         res = subprocess.run([NOQERI_BIN, "run", "Benchmarks/bench_noesql_worker.noqeri"], cwd=NOESQL_DIR, capture_output=True, text=True)
