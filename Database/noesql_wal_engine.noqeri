@@ -177,10 +177,14 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
         }
 
         if txCommitted {
-            // Pass 2: Replay all statements in this transaction in sequence (NO ARRAY LIMIT!)
-            if file_seek(walFd, firstImgOffset as i64, file_seek_start()) < 0 as isize {
-                return -108 as isize
-            }
+            // Checkpoint Watermark Protection:
+            // If txId <= engine.db.lastTxId, this transaction was already persisted into the base snapshot.
+            // Replaying it would duplicate writes if a crash occurred after snapshot publication but before WAL truncation.
+            if txId > engine.db.lastTxId {
+                // Pass 2: Replay all statements in this transaction in sequence (NO ARRAY LIMIT!)
+                if file_seek(walFd, firstImgOffset as i64, file_seek_start()) < 0 as isize {
+                    return -108 as isize
+                }
             let k: usize = 0 as usize
             while k < imageCount {
                 let imgHdr: [u8; 56]
@@ -206,6 +210,7 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
                     }
                 }
                 k = k + 1 as usize
+            }
             }
 
             if txId > engine.lastTxId {
@@ -245,6 +250,13 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
     }
 
     // 2. Check WAL.log for any newly committed transactions
+    if engine.walFd != 0 as usize {
+        let curSizeIs: isize = file_size(engine.walFd)
+        if curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset {
+            return 0 as isize // Fast-path: no external writes, avoid open/close syscalls
+        }
+    }
+
     let walPath: string = engine.dbPath + "/WAL.log"
     let walReadHandle: isize = file_open_read(walPath)
     if file_handle_valid(walReadHandle) {
@@ -381,6 +393,18 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
         }
     }
 
+    // If every transaction in WAL was already captured in the base snapshot (e.g. crash interrupted truncation),
+    // cleanly truncate WAL to 0 now under the exclusive lock to complete the interrupted checkpoint.
+    if engine.db.lastTxId > 0 as u64 && engine.lastTxId <= engine.db.lastTxId && engine.walCommittedOffset > 0 as usize {
+        let cleanHandle: isize = file_open_replace(walPath)
+        if file_handle_valid(cleanHandle) {
+            file_sync(cleanHandle as usize)
+            file_close(cleanHandle as usize)
+            engine.walCommittedOffset = 0 as usize
+            engine.walBytesWritten = 0 as usize
+        }
+    }
+
     // 4. Open WAL file in append mode for low-latency durability
     let h: isize = file_open_append(walPath)
     if !file_handle_valid(h) {
@@ -449,13 +473,15 @@ export function noeWalEngineExecute(engine: *NoeWalEngine, tx: *NoeWalTx, statem
     let stmtLen: usize = textLength(statement)
     if stmtLen == 0 as usize { return 0 as isize }
     if stmtLen > 2000 as usize {
-        // Reject oversized statement immediately: prevents memory / WAL divergence
+        // Reject oversized statement immediately: rollback transaction to release lock & prevent dangling state
+        noeWalEngineRollback(engine, tx)
         return -115 as isize
     }
 
     let stmtBuf: [u8; 2048]
     let sLen: usize = noeWalEncodeString(statement, slice(stmtBuf))
     if sLen != stmtLen {
+        noeWalEngineRollback(engine, tx)
         return -115 as isize // Truncation safety: encoded bytes must match string length
     }
 
@@ -528,11 +554,8 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
     // Durability sync barrier: sequential fsync on WAL log file descriptor
     let syncRes: isize = file_sync(engine.walFd)
 
-    // Update committed offset
-    let curSize: isize = file_size(engine.walFd)
-    if curSize > 0 as isize {
-        engine.walCommittedOffset = curSize as usize
-    }
+    // Update committed offset directly without redundant lseek/fstat syscalls
+    engine.walCommittedOffset = engine.walBytesWritten
 
     // Release cross-process single-writer exclusive lock
     file_unlock(engine.lockFd)

@@ -38,6 +38,7 @@ function main(): void {
     let overRes: isize = noeWalEngineExecute(&engine, &txOver, oversizedStmt)
     print("Oversized statement result code: " + intToString(overRes as i64))
     assert_true(overRes == -115 as isize, "rejected oversized statement with -115")
+    assert_true(!txOver.inProgress, "transaction auto-rolled back and marked inactive on validation error")
 
     let tIdx: isize = noeFindTable(&engine.db, "items")
     let t: *NoeTableData = &engine.db.tables[tIdx as usize]
@@ -149,7 +150,7 @@ function main(): void {
     fs_remove_tree(dbPath)
     fs_remove(dbPath + ".lck")
 
-    print("\nBoundary Durability: 257-512 Rows, Oversized Statements & Repair Fail-Closed: ALL PASSED")
+    print("\nBoundary Durability: 257-512 Rows & Oversized Statements Auto-Rollback: ALL PASSED")
 }
 
 main()

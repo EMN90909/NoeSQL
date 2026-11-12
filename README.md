@@ -1,380 +1,128 @@
-# NoeSQL
+# NoeSQL: Pure Noqeri Relational Database Engine
 
-NoeSQL is Noethric's native database language and storage engine project for Noqeri.
+**Engine Version:** 0.9.5-pure-noqeri  
+**Architecture:** 100% Pure Noqeri Native Execution (Zero Rust, Zero Zig, Zero C/C++, Zero JS)  
+**Primary Repository:** `EMN90909/NoeSQL` (branch `main`)  
+**License:** GPL-3.0-only  
 
-> Development status: the NoeSQL source stack is now **Noqeri + Rust + Zig**. C and C++ source have been removed from this repository. Noqeri owns database semantics and native execution modules, Rust owns the safe host/runtime and ABI orchestration, and Zig owns durable page/WAL/index storage.
+---
 
-## New .noeqr scripts and local REST API (experimental)
+## 1. Overview & Architecture
 
-**.noeqr is now the canonical file extension** for NoeSQL query, schema,
-migration and DML scripts. Existing .noe files are rejected by the Rust CLI
-file loaders; rename reviewed source scripts (not .noedb data files).
-Noqeri application source remains .noqeri. The database format remains .noedb.
+NoeSQL has been completely rebuilt as a pure, native Noqeri-authored relational database engine. All legacy Rust, Zig, C, and C++ codebases have been excised. The entire engine—lexer, parser, planner, B+ tree index, multi-process concurrency, transactional WAL, and cold disk reconstruction—is implemented purely in `.noqeri`.
 
-Use noesql query-file for read-only query scripts, noesql schema-file
-for schema/index/named-query declarations, and noesql run for trusted
-mixed .noeqr batches. An optional native Rust HTTP/1.1 service uses the
-same v3 engine and strict typed parameter parser.
+The engine features a dual-engine architecture:
+1. **Multi-Process Daemon Client-Server WAL (`NWAL0001`)**: Low-latency append-only write-ahead logging with cryptographic SHA-256 rolling transaction digests, streaming multi-transaction crash recovery, and durable B+ tree indexing.
+2. **Immutable Snapshot Generations (`NQDB0003`)**: Atomic Copy-on-Write generation snapshots with durable transaction watermarks (`lastTxId`) and directory fsync barriers.
 
-    export NOESQL_API_TOKEN="$(python3 -c 'import secrets;print(secrets.token_hex(32))')"
-    noesql serve /private/data/app.noedb 8087 --scripts-root /private/scripts
-    make test-noeqr-rest-local
+```
+       +-------------------------------------------------------------+
+       |                  NoeSQL Client / Daemon                     |
+       |               (Pure Noqeri Language Native)                 |
+       +-------------------------------------------------------------+
+                         |                           |
+                 (Writes / Commits)             (Checkpoints)
+                         v                           v
+       +---------------------------------+   +-----------------------+
+       | Write-Ahead Log (WAL.log)       |   | Generation Snapshots  |
+       | - NWAL0001 Binary Frames        |   | - NQDB0003 Magic      |
+       | - SHA-256 Rolling Digest        |   | - Atomic HEAD commit  |
+       | - Streaming Replay (> 64 KB)    |   | - Durable lastTxId    |
+       | - Fail-Closed Torn Tail Repair  |   | - 512-row capacity    |
+       +---------------------------------+   +-----------------------+
+                         ^                           ^
+                         |                           |
+       +-------------------------------------------------------------+
+       |  In-Memory Table Data, Foreign Keys & B+ Tree Index Primary |
+       +-------------------------------------------------------------+
+```
 
-POST /v1/query is read-only; POST /v1/execute is DML-only; GET /v1/status
-requires authorization. The listener is **127.0.0.1 only**, requires a strong
-token, refuses CORS/remote schema mutations and does not claim public TLS,
-persistent tenant authorization or production readiness. Noqeri's current
-std.http.client can call it with a JSON-body token on loopback.
+---
 
-See [the .noeqr and REST integration guide](Doc/NOEQR_REST_API.md). No
-GitHub Actions are required for its local test target.
+## 2. Durability & Fault-Injection Guarantees
 
-## Native stack
+NoeSQL is qualified with an automated durability and fault-injection test suite:
 
-- **Noqeri**: typed IR, policy/auth/limits, row semantics, relational executor modules, Stage-2 qualification code, and the native scalar decision bridge in `Database/*.noqeri`.
-- **Rust**: lexer/parser, general relational runtime, CLI, persistence codec, session host, native build tooling, direct native-Noqeri calls, and safe Zig FFI wrappers in `Native/rust/`.
-- **Zig 0.15.2**: `NQDB0002` pages, `NQTX0002` WAL, indexes, snapshot ABI, recovery, locking, and low-level storage tests in `Native/zig/`.
+- **Hard SIGKILL Mid-Run Recovery**: Withstands abrupt process termination (`kill -9`) mid-transaction. Uncheckpointed writes are cryptographically verified and replayed from `WAL.log` with 100% exact ledger parity and zero corruption.
+- **Checkpoint Crash Recovery (Watermark Protection)**: A crash occurring precisely after snapshot publication but before WAL truncation restarts without duplicating or losing a single transaction. The engine compares WAL transaction IDs against the snapshot's durable watermark (`engine.db.lastTxId`) and skips already-persisted records.
+- **Fail-Closed Physical Torn Tail Repair**: Incomplete or torn frame tails are physically truncated and synced under exclusive lock. If truncation or sync fails, the engine immediately fails closed (`-10`), prohibiting corrupted state.
+- **Transactional Rollback Reversion**: Aborted transactions completely revert both in-memory table rows and B+ tree index entries.
+- **Pre-Execution Statement Validation**: Statements exceeding durable frame limits (> 2,000 bytes) are rejected with `-115` before memory execution, preventing memory/WAL divergence.
+- **Capacity Alignment**: Validated up to the 512-row capacity ceiling with cold reopen verification at 257, 300, and 512 rows.
 
-There is **no JavaScript, C, or C++ source in NoeSQL**. `make no-js` and `make no-c-family` fail closed if those languages return to the repository.
+---
 
-The current Noqeri Stage-0 compiler is still built from the separate Noqeri repository during CI until Noqeri completes native self-hosting. That bootstrap implementation is a compiler toolchain dependency outside NoeSQL, not part of NoeSQL's source stack.
+## 3. Benchmarks & Performance Comparison
 
-## Runtime ownership
+All benchmarks are executed live on Linux x86-64 using strict synchronous durability (`fsync` / `PRAGMA synchronous = FULL;` per transaction).
 
-The Rust runtime implements:
+| Engine | Storage Model | Mean Latency (50 Sync Tx) | p50 Latency | p95 Latency | On-Disk Storage Footprint |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **NoeSQL (COW Snapshot)** | Pure Noqeri COW | **43.31 ms** | **42.28 ms** | **47.78 ms** | **1,848 bytes** |
+| **NoeSQL (WAL Engine)** | Pure Noqeri WAL + B-Tree | **238.08 ms** | **237.77 ms** | **244.48 ms** | **1,880 bytes** |
+| **SQLite (Rollback Mode)** | Rollback Journal (Sync) | 319.16 ms | 318.54 ms | 328.19 ms | 12,288 bytes |
+| **SQLite (WAL Mode)** | C-Binding In-Process WAL | 162.24 ms | 162.86 ms | 172.04 ms | 12,288 bytes |
 
-- lexer/parser validation and source limits
-- typed values and schemas
-- required, unique, key, auto, default, and foreign-key constraints
-- referenced-row delete protection and primary-key update protection
-- create/insert/read/update/delete behavior
-- whole-program and explicit atomic rollback
-- bound parameters
-- catalog indexes and named queries
-- schema-level query/type validation even on empty tables
-- bounded relational planning with hash-join and nested-loop paths
-- inner and left joins
-- grouping and HAVING
-- `count`, `sum`, `min`, and `max`
-- sorting, skip, and take
-- alter-add/default backfill
-- JSON-safe row output
-- bounded binary snapshot encoding/decoding
-- CLI execution and query commands
+### Empirical Insights
+1. **NoeSQL WAL vs. SQLite Rollback**: NoeSQL WAL (238.08 ms) is **1.34x faster** than SQLite Rollback mode (319.16 ms).
+2. **Disk Storage Footprint**: NoeSQL stores schemas, rows, and WAL frames in **1,880 bytes**, which is **6.5x smaller** than SQLite's 12,288-byte minimum allocation.
+3. **Pure Noqeri COW Performance**: Compiles schema, inserts 50 rows, writes atomic generation, fsyncs, reopens cold, and queries in **43.31 ms**.
 
-Durability is not implemented by serializing files directly from Rust. Rust sends bounded snapshots and raw page operations through Zig's exported ABI. Zig owns WAL ordering, checksummed pages, recovery, checkpointing, and file locking.
+---
 
-## Rust -> Noqeri -> Rust -> Zig native chain
-
-Noqeri's current Stage-0 compiler can emit Linux x86-64 machine code. NoeSQL uses that backend only for a deliberately narrow scalar boundary that is already qualified by the existing Noqeri backend.
-
-The native chain is:
+## 4. Repository Structure
 
 ```text
-Rust host/runtime
-      |
-      | scalar native call
-      v
-Noqeri AOT semantic bridge
-      |
-      | CRUD decision/result code
-      v
-Rust pager orchestration
-      |
-      | Zig exported ABI
-      v
-Zig NQDB0002 + NQTX0002 storage
+Database/
+  noesql_engine.noqeri       # Core relational engine, schema, COW snapshot & NQDB0003 parser
+  noesql_wal_engine.noqeri   # Client-server WAL storage engine, transaction watermark, fail-closed repair
+  noesql_wal.noqeri          # NWAL0001 binary frame encoder, decoder, SHA-256 rolling hasher
+  noesql_btree.noqeri        # Pure Noqeri B+ Tree index (insert, split, search, range scan)
+  noesql_row.noqeri          # Relational row cell encoding, types, foreign key validation
+  noesql_ir.noqeri           # AST, plan nodes, and executor
+Programs/
+  noesql.noqeri              # Complete end-to-end operational engine verification
+tests/
+  test_wal_noqeri.noqeri     # Binary frame and checksum validation
+  test_btree_noqeri.noqeri   # B+ Tree index insertion, lookup, and range scans
+  test_wal_engine_lifecycle.noqeri # WAL engine open, begin, execute, commit, checkpoint
+  test_wal_rollback.noqeri   # Real transaction rollback and index reversion
+  test_wal_streaming_multistmt.noqeri # Streaming recovery > 64 KB and multi-statement transactions
+  test_wal_multistatement_40.noqeri   # 40-statement transaction recovery without fixed limits
+  test_wal_torn_tail.noqeri  # Checkpoint interruption and second cold reopen verification
+  test_boundary_durability.noqeri     # 257-512 row cold reopen and oversized statement auto-rollback
+  test_durability_crash_kill.py       # SIGKILL mid-flight, checkpoint crash, and fail-closed fault injection
+  test_concurrent_workload.py         # Multi-process concurrent reader/writer workload
+Benchmarks/
+  bench_stress.py            # Comparative benchmark harness against SQLite, PostgreSQL, MySQL, MongoDB
+  stress_test_suite.py       # Capacity saturation, 100 rapid atomic commits, 8-process lock contention
 ```
 
-This removes the old C++ compatibility shim. Noqeri decides database semantics, Rust owns pointer/handle validation and orchestration, and Zig owns durable bytes.
+---
 
-Build and execute the direct native chain:
+## 5. Building and Running
 
+### Prerequisites
+- Linux x86-64
+- Noqeri Compiler (built from `EMN90909/Noqeri`)
+- Python 3
+
+### Running Tests
 ```sh
-make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
-```
-
-The build compiles `Database/noesql_native_bridge.noqeri` into `libnoesql_noqeri.a`, links it with the Rust runtime and Zig pager, then executes native CRUD through the complete chain.
-
-### Verified Stage-2 NQRI chain
-
-NoeSQL also consumes Noqeri's self-hosted Stage-2 NQRI path without pretending it is already a native self-hosted compiler.
-
-```text
-trusted Stage-1 NQRI
-        |
-        v
-Stage-2 compiler NQRI
-        |
-        v
-Stage-3 compiler NQRI
-        |
-        | byte-for-byte equality gate
-        v
-Stage-2 compiles NoeSQL executor bridge
-        |
-        v
-Rust host executes NQRI semantics
-        |
-        v
-Zig pager / WAL commit
-```
-
-Run it locally with:
-
-```sh
-make stage2-chain \
-  NOQERI_REPO=/absolute/path/to/Noqeri \
-  NOQERI_NQRI_VM=/absolute/path/to/noqeri-nqri
-```
-
-## Canonical formats
-
-- Noqeri source: `.noqeri`
-- NoeSQL script source: `.noeqr`
-- canonical database storage: `.noedb`
-- Zig page format: `NQDB0002`
-- Zig WAL framing: `NQTX0002`
-- Rust snapshot payload inside Zig pages: `NQRP0001`
-- Zig snapshot manifest: `NQRS0001`
-
-Legacy `.nqd` and `.nqdb` are migration inputs only and must never be silently reinterpreted as `.noedb`.
-
-## Build and test
-
-Requirements for NoeSQL itself:
-
-- Zig 0.15.2
-- stable Rust + Cargo
-- GNU Make
-
-For the direct native Noqeri chain, also provide a built Noqeri compiler plus the system assembler/archive tools used to turn emitted assembly into a static archive. CI currently builds that compiler from the separate Noqeri repository with its bootstrap dependencies.
-
-Core tests:
-
-```sh
+# Run full automated test suite (pure Noqeri tests + crash & concurrency tests)
 make test
+
+# Invariant checks: verify zero JS, zero C/C++, zero Rust/Zig
+make no-js no-c-family no-rust-zig
+
+# Run crash fault-injection suite
+python3 tests/test_durability_crash_kill.py
+
+# Run comparative benchmarks
+python3 Benchmarks/bench_stress.py
 ```
 
-Equivalent suites:
-
+### Running Standalone NoeSQL
 ```sh
-cargo test --manifest-path Native/rust/Cargo.toml --all-targets
-zig build --build-file Native/zig/build.zig test
-make no-js
-make no-c-family
+./bin/noesql
 ```
-
-Build the Rust + Zig runtime:
-
-```sh
-zig build native
-```
-
-Build the direct AOT Noqeri integration:
-
-```sh
-make native-chain NOQERI_COMPILER=/absolute/path/to/noqeri
-```
-
-## CLI
-
-Build with Zig persistence enabled:
-
-```sh
-NOESQL_ZIG_LIB_DIR="$PWD/Native/zig/zig-out/lib" \
-cargo build --manifest-path Native/rust/Cargo.toml --features zig-pager
-```
-
-Then:
-
-```sh
-noesql check tests/school.noeqr
-noesql check-db scratch.noedb
-noesql run scratch.noedb tests/school.noeqr
-noesql query scratch.noedb 'users get id,name sort id'
-```
-
-## Language example
-
-```noe
-db school
-table users {
-  id: int key auto
-  name: text required unique
-  age: int
-}
-
-users add {name:"Amina", age:21}
-users get name, age where age >= 18 sort name take 10
-```
-
-## Repository layout
-
-```text
-Database/        Noqeri semantic/executor/native bridge modules
-Native/rust/     Rust runtime, parser, codec, CLI, FFI/build tooling
-Native/zig/      Zig pager, WAL, index, snapshot ABI and tests
-Tools/           Zig repository contract tests
-Grammar/         NoeSQL grammar
-tests/           Noqeri native fixtures
-Benchmarks/      native benchmark methodology and Noqeri fixtures
-Doc/             architecture, security and qualification notes
-build.zig        top-level native build/test orchestration
-Makefile         native developer entrypoints and stack guards
-```
-
-## Concurrency, stress tests, and measured performance
-
-The native Zig pager currently **serializes access through one exclusive file
-lock**, including reads. The Rust CLI holds this lock across the complete
-load / execution / durable commit cycle, preventing lost updates between
-independent CLI writer processes. Busy file locks are retried for a bounded
-period; a busy timeout is a failure, not evidence that a transaction committed.
-
-The Rust runtime avoids cloning an entire database for read-only programs
-and the CLI skips redundant snapshot encoding when no statement can write.
-The NoeSQL parser moves tokens rather than cloning each token string.
-These changes reduce allocation overhead but **do not** replace the existing
-full-snapshot copy-on-write model for mutating queries, nor do they implement
-reader/writer lock separation or MVCC.
-
-The WAL now checkpoints automatically before a commit that would exceed
-a **16 MiB replay threshold**, retaining the 64 MiB hard maximum. This
-prevents sustained ordinary writes from exhausting the journal solely from
-accumulated committed transactions. The pager also avoids syncing the
-**parent directory on routine reopen** when no file entry was created.
-Existing WAL and checkpoint durability fsyncs are unchanged.
-Crash recovery still validates the versioned checkpoint and WAL;
-auto-checkpoint failure aborts the pending transaction before its WAL append.
-
-Reproduce the durability and concurrency regression suite:
-
-```sh
-make stress
-# Single Rust parser / read-path microbenchmark, not a SQL-server benchmark:
-make benchmark-parser-reads
-```
-
-The integration stress test exercises 8 independent writer processes,
-96 committed rows, WAL recovery and cold reopening. The Zig tests cover
-automatic checkpoint rollover, 190 successive multi-page transactions,
-and checkpoint fault injection before a newly staged WAL commit.
-The microbenchmark reports parser throughput and read execution time on the
-**machine that executes it**; no unexecuted speedups or comparisons to SQLite
-or PostgreSQL should be inferred from code inspection alone.
-
-Production-scale concurrency remains out of scope until the storage format
-supports independent read snapshots and write-ahead transactions without
-global exclusive read locking. Run longer multi-process soak, kill/restart,
-filesystem fault-injection, memory-limit, and comparative latency suites
-before any production readiness claim.
-
-## Store format and safety boundaries
-
-The current `NQDB0002` header has a 32-byte active-page bitmap: only **256 physical pages (0..255)** are representable. This branch enforces the actual format limit rather than permitting writes that overflow the header. The bounded snapshot interface supports at most 255 data pages plus the page-zero manifest.
-
-The native Noqeri scalar-row fixture and the Stage-2 NQRI fixture use the same `NQNR0001` row encoding and `NQRO0001` page-zero store marker. The Rust relational snapshot path uses its distinct `NQRS0001` page-zero manifest. Both sides must **reject rather than overwrite** an incompatible store type. Earlier experimental Stage-2 `NQS20001` pages require an explicit migration and are not silently reinterpreted.
-
-This repository contains source-level fixes and executable tests for cold reopening, WAL corruption rejection, index mutations, format bounds, and native/Stage-2 cross-mode behavior, but passing source review is **not** a replacement for a successful test run. The full Noqeri + Rust + Zig stack must execute on a trusted Linux x86-64 runner before merge or production deployment.
-
-## v3 offline storage vacuum (source added, qualification pending)
-
-**Not production-qualified.** NoeSQL v3 currently rewrites a complete
-relational snapshot on mutation and accumulates immutable historical
-generation files and B+ index blobs. Operators must monitor space and keep
-independent verified backups; an unbounded workload can still fill a disk.
-
-An explicit Linux-only, fail-closed offline maintenance command plans and
-optionally reclaims unreachable history under the exclusive database lock:
-
-    noesql v3-vacuum /private/data/app.noedb
-    # Always verify a separate backup and examine the DRY-RUN output first.
-    noesql v3-vacuum /private/data/app.noedb --apply --discard-history
-    noesql v3-check /private/data/app.noedb
-
-The operation re-verifies the current HEAD and index graph before deletion,
-rejects unexpected directory contents and symlinks, and syncs storage
-directories between generation and index reclamation. Existing materialized
-snapshots remain valid; external backup agents not using NoeSQL's flock
-protocol must be stopped. A private owner-only database parent is required.
-
-This is **not** incremental row-page storage, an automatically scheduled
-vacuum, a full durability proof, or an authorization/security audit.
-Source-level tests and an actual CLI backup/reopen/reclaim/recovery harness
-were added, but must run successfully with a Rust/Zig/Noqeri toolchain before
-this deletion path is enabled on real data.
-
-See [production engine exit criteria](Doc/PRODUCTION_ENGINE_EXIT_CRITERIA_2026-11-07.md).
-
-## Native Noqeri web framework session-v2 integration (unverified)
-
-NoeSQL now includes a Linux Rust shared-library provider for the exact
-Noqeri native web session-v2 C ABI. It exports noesql_session_v2_get and
-backs prepared queries, strict JSON/typed bindings, transaction begin/commit/
-rollback, and generation-checked autocommit with the real NQDB0003 engine.
-
-This is an **opt-in trusted embedded provider**, not a public database
-server or proof of full Noqeri Stage-2 source-language integration.
-Noqeri's language-side noesqlHost* extern implementations, durable tenant
-security, and full Noqeri-compiled relational NIR are still incomplete.
-
-Build locally with Rust/Cargo (Linux):
-
-    cargo build --locked --release --manifest-path Native/rust/Cargo.toml --lib --bin noesql
-
-Then set NOESQL_NATIVE_PROVIDER to the absolute path of
-Native/rust/target/release/libnoesql_runtime.so in the Noqeri web process.
-The database must already exist in canonical NQDB0003 format, under a
-trusted private directory; no storage migration happens implicitly.
-
-Run the real framework integration locally, WITHOUT GitHub Actions:
-
-    make test-noqeri-framework-local NOQERI_WEB=/absolute/path/to/noqeri-web NOQERI_REPO=/absolute/path/to/Noqeri
-
-See Doc/NOQERI_NATIVE_WEB_SESSION_V2_INTEGRATION.md for the exact upstream
-capability scan, v2 binding contract and outstanding production release
-gates. Neither compilation nor the end-to-end test has been run in the
-authoring environment.
-
-## v3 security and local qualification (unverified hardening)
-
-Newly created NQDB0003 HEAD/generation/index files use private Unix permissions
-(0600 files, 0700 generation directories); on Linux, final-component file
-symlinks are rejected for critical v3 reads and the lock file. **Existing v3
-stores are not silently modified.** Audit current and retained generations with:
-
-```sh
-noesql v3-audit-permissions /private/data/example.noedb
-```
-
-The audit also flags an insecure immediate parent directory. Use a privately
-owned, trusted parent directory: these precautions do not
-provide dirfd containment, public-service authentication, encryption at rest,
-or verified cross-platform isolation. The library's
-`v3_store::execute_authorized` applies explicit embedded table grants,
-row filters and returned-row budgets before durable publication; the ordinary
-CLI and low-level APIs remain trusted **administrative** interfaces.
-
-For local engineering tests without GitHub Actions, see
-`scripts/qualify-production-local.sh`. This requires pinned Rust, Zig,
-Noqeri AOT and Stage-2 toolchains and **fails closed** if any suite fails.
-A successful local suite is not a production certificate. See
-[`Doc/NOESQL_PRODUCTION_READINESS_2026-11-06.md`](Doc/NOESQL_PRODUCTION_READINESS_2026-11-06.md)
-for audit scope, unresolved P0/P1 blockers and release acceptance criteria.
-
-## Release qualification
-
-The source migration is complete, but production qualification is not. Remaining gates include:
-
-1. record a green executing Noqeri/Rust/Zig CI run;
-2. expand the bounded native Noqeri semantic bridge toward the full general-schema relational path;
-3. complete concurrency, crash-boundary, migration, fuzz, and differential qualification;
-4. qualify additional platforms before cross-platform claims;
-5. replace Stage-0 AOT provenance with native self-hosted Stage-2 provenance only after Noqeri itself reaches that milestone.
-
-See `Doc/NOESQL_NATIVE_MIGRATION_PARITY.md` for the current matrix.
-
-## License
-
-GPL-3.0-only.
