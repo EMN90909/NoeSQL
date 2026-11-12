@@ -615,4 +615,177 @@ if os.path.exists(MAINT_DB + ".lck"):
     try: os.remove(MAINT_DB + ".lck")
     except OSError: pass
 
+# -----------------------------------------------------------------------------
+# Test 6: Failed Commit Auto-Rollback & In-Memory Isolation (P0 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 6] Failed Commit Automatically Reverts In-Memory State")
+FAIL_COMMIT_DB = os.path.join(NOESQL_DIR, "tmp_fail_commit.noedb")
+if os.path.exists(FAIL_COMMIT_DB):
+    shutil.rmtree(FAIL_COMMIT_DB, ignore_errors=True)
+
+commit_fail_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_fail_commit.noedb"
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if openRes != 0 as isize { print("OPEN_FAILED") return }
+
+    let tx1: NoeWalTx
+    noeWalEngineBegin(&engine, &tx1)
+    noeWalEngineExecute(&engine, &tx1, "table balances { id: int key auto, amount: int }")
+    noeWalEngineExecute(&engine, &tx1, "balances add { amount: 100 }")
+    let c1: isize = noeWalEngineCommit(&engine, &tx1)
+    if c1 != 0 as isize { print("COMMIT1_FAILED") return }
+
+    // Begin tx2, execute an insert that modifies in-memory state
+    let tx2: NoeWalTx
+    noeWalEngineBegin(&engine, &tx2)
+    noeWalEngineExecute(&engine, &tx2, "balances add { amount: 9999 }")
+
+    // In-memory table now has 2 rows before commit
+    let tIdx: isize = noeFindTable(&engine.db, "balances")
+    let t: *NoeTableData = &engine.db.tables[tIdx as usize]
+    print("PRE_COMMIT_FAIL_ROWS:" + intToString(t.rowCount as i64))
+
+    // Close WAL fd to force file_write_all or sync failure during commit
+    file_close(engine.walFd)
+    engine.walFd = 99999 as usize // Invalid fd
+
+    // Attempt commit: must fail and automatically rollback memory!
+    let c2: isize = noeWalEngineCommit(&engine, &tx2)
+    print("FAILED_COMMIT_RES:" + intToString(c2 as i64))
+
+    // In-memory table row count must have been reverted to 1!
+    print("POST_REVERT_ROWS:" + intToString(t.rowCount as i64))
+    let cell: *NoeRowCell = &t.cells[0 * 16 as usize + 1 as usize]
+    print("SURVIVING_VAL:" + intToString(cell.intVal))
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+commit_fail_path = os.path.join(NOESQL_DIR, "tests", "tmp_fail_commit.noqeri")
+with open(commit_fail_path, "w") as f:
+    f.write(commit_fail_code)
+
+res_cfail = subprocess.run([NOQERI_BIN, "run", commit_fail_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Commit fail test output:\n", res_cfail.stdout.strip())
+assert "PRE_COMMIT_FAIL_ROWS:2" in res_cfail.stdout, "Pre-commit rows unexpected"
+assert "POST_REVERT_ROWS:1" in res_cfail.stdout, "In-memory state was NOT reverted after failed commit!"
+assert "SURVIVING_VAL:100" in res_cfail.stdout, "Surviving value corrupted"
+print("=> PASS: Failed commit automatically reverted in-memory state to clean committed snapshot!")
+
+# -----------------------------------------------------------------------------
+# Test 7: Missing WAL Fail-Closed Detection (P1 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 7] Missing WAL Log Fails Closed When Committed Offset > 0")
+MISSING_WAL_DB = os.path.join(NOESQL_DIR, "tmp_missing_wal.noedb")
+if os.path.exists(MISSING_WAL_DB):
+    shutil.rmtree(MISSING_WAL_DB, ignore_errors=True)
+
+missing_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_missing_wal.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+    let tx: NoeWalTx
+    noeWalEngineBegin(&engine, &tx)
+    noeWalEngineExecute(&engine, &tx, "table test_tbl { id: int key auto, val: int }")
+    noeWalEngineExecute(&engine, &tx, "test_tbl add { val: 555 }")
+    noeWalEngineCommit(&engine, &tx)
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+}
+main()
+"""
+missing_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_missing_init.noqeri")
+with open(missing_init_path, "w") as f:
+    f.write(missing_init_code)
+
+subprocess.run([NOQERI_BIN, "run", missing_init_path], cwd=NOESQL_DIR, check=True)
+
+# Delete WAL.log while committed transactions exist
+wal_to_delete = os.path.join(MISSING_WAL_DB, "WAL.log")
+assert os.path.exists(wal_to_delete), "WAL.log must exist before deletion"
+os.remove(wal_to_delete)
+
+missing_test_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_missing_wal.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineInit(&engine)
+    engine.dbPath = dbPath
+    engine.walCommittedOffset = 500 as usize // Engine expects committed transactions in WAL
+    engine.baseGeneration = 1 as u64
+
+    let refRes: isize = noeWalEngineRefresh(&engine)
+    print("REFRESH_MISSING_WAL:" + intToString(refRes as i64))
+
+    let revRes: isize = noeWalEngineRevert(&engine)
+    print("REVERT_MISSING_WAL:" + intToString(revRes as i64))
+}
+main()
+"""
+missing_test_path = os.path.join(NOESQL_DIR, "tests", "tmp_missing_test.noqeri")
+with open(missing_test_path, "w") as f:
+    f.write(missing_test_code)
+
+res_missing = subprocess.run([NOQERI_BIN, "run", missing_test_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Missing WAL test output:\n", res_missing.stdout.strip())
+assert "REFRESH_MISSING_WAL:-17" in res_missing.stdout, f"Expected -17 missing WAL in refresh, got: {res_missing.stdout}"
+assert "REVERT_MISSING_WAL:-17" in res_missing.stdout, f"Expected -17 missing WAL in revert, got: {res_missing.stdout}"
+print("=> PASS: Unexpectedly missing WAL fails closed with -17 in refresh and revert!")
+
+# -----------------------------------------------------------------------------
+# Test 8: Degraded Engine Resource Cleanup (P1 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 8] Degraded Engine Releases All File and Lock Descriptors on Close")
+degraded_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_fail_commit.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    // Mark engine degraded
+    engine.walOpen = false
+
+    // Close must clean up engine.lockFd and engine.walFd even when walOpen == false!
+    let cRes: isize = noeWalEngineClose(&engine)
+    print("CLOSE_RES:" + intToString(cRes as i64))
+    print("LOCK_FD_CLEARED:" + intToString(engine.lockFd as i64))
+    print("WAL_FD_CLEARED:" + intToString(engine.walFd as i64))
+
+    // Verify another engine instance can immediately open and lock the database
+    let engine2: NoeWalEngine
+    let open2: isize = noeWalEngineOpen(&engine2, dbPath)
+    print("REOPEN_AFTER_DEGRADED_CLOSE:" + intToString(open2 as i64))
+    noeWalEngineClose(&engine2)
+}
+main()
+"""
+degraded_path = os.path.join(NOESQL_DIR, "tests", "tmp_degraded_test.noqeri")
+with open(degraded_path, "w") as f:
+    f.write(degraded_code)
+
+res_degraded = subprocess.run([NOQERI_BIN, "run", degraded_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Degraded cleanup output:\n", res_degraded.stdout.strip())
+assert "CLOSE_RES:0" in res_degraded.stdout
+assert "LOCK_FD_CLEARED:0" in res_degraded.stdout
+assert "WAL_FD_CLEARED:0" in res_degraded.stdout
+assert "REOPEN_AFTER_DEGRADED_CLOSE:0" in res_degraded.stdout
+print("=> PASS: Degraded engine completely releases locks and descriptors on close without hanging!")
+
+# Cleanup temporary files
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path]:
+    if os.path.exists(p): os.remove(p)
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB]:
+    if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
+    if os.path.exists(d + ".lck"):
+        try: os.remove(d + ".lck")
+        except OSError: pass
+
 print("\nReal Crash & Fault Injection Durability Suite: ALL PASSED")
