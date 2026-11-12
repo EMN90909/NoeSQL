@@ -360,10 +360,24 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
     // If disk file is larger than verified committed offset, truncate garbage tail physically.
     if initialWalSize > engine.walCommittedOffset {
         let truncHandle: isize = file_open_write(walPath)
-        if file_handle_valid(truncHandle) {
-            file_truncate(truncHandle as usize, engine.walCommittedOffset as u64)
-            file_sync(truncHandle as usize)
+        if !file_handle_valid(truncHandle) {
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
+            return -10 as isize // Failed to open WAL for physical repair
+        }
+        let tRes: isize = file_truncate(truncHandle as usize, engine.walCommittedOffset as u64)
+        if tRes < 0 as isize {
             file_close(truncHandle as usize)
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
+            return tRes // Failed to truncate torn tail
+        }
+        let sRes: isize = file_sync(truncHandle as usize)
+        file_close(truncHandle as usize)
+        if sRes < 0 as isize {
+            file_unlock(engine.lockFd)
+            file_close(engine.lockFd)
+            return sRes // Failed to sync repaired WAL
         }
     }
 
@@ -431,14 +445,28 @@ export function noeWalEngineBegin(engine: *NoeWalEngine, tx: *NoeWalTx): isize {
 export function noeWalEngineExecute(engine: *NoeWalEngine, tx: *NoeWalTx, statement: string): isize {
     if engine == null || !engine.walOpen || tx == null || !tx.inProgress { return -1 as isize }
 
-    // Execute statement in active memory
+    // 1. Validate statement size against durable WAL frame capacity BEFORE memory execution
+    let stmtLen: usize = textLength(statement)
+    if stmtLen == 0 as usize { return 0 as isize }
+    if stmtLen > 2000 as usize {
+        // Reject oversized statement immediately: prevents memory / WAL divergence
+        return -115 as isize
+    }
+
+    let stmtBuf: [u8; 2048]
+    let sLen: usize = noeWalEncodeString(statement, slice(stmtBuf))
+    if sLen != stmtLen {
+        return -115 as isize // Truncation safety: encoded bytes must match string length
+    }
+
+    // 2. Execute statement in active memory
     let status: isize = noeExecuteStatement(&engine.db, statement)
     if status < 0 as isize {
         noeWalEngineRollback(engine, tx)
         return status
     }
 
-    // Update B-Tree index if table 0 row inserted
+    // 3. Update B-Tree index if table 0 row inserted
     if engine.db.tableCount > 0 as usize {
         let t: *NoeTableData = &engine.db.tables[0]
         if t.rowCount > 0 as usize {
@@ -450,20 +478,16 @@ export function noeWalEngineExecute(engine: *NoeWalEngine, tx: *NoeWalTx, statem
         }
     }
 
-    // Append WAL IMAGE frame with statement payload
-    let stmtBuf: [u8; 1024]
-    let sLen: usize = noeWalEncodeString(statement, slice(stmtBuf))
-    if sLen == 0 as usize { return 0 as isize }
-
-    // Compute rolling SHA-256 hash chaining across multiple statements in this transaction
+    // 4. Compute rolling SHA-256 hash chaining across multiple statements in this transaction
     let hashRes: isize = noeWalChainHash(&tx.imageDigest[0], &stmtBuf[0], sLen, &tx.imageDigest[0])
     if hashRes != 0 as isize {
         noeWalEngineRollback(engine, tx)
         return hashRes
     }
 
-    let target: [u8; 1200]
-    let scratch: [u8; 1200]
+    // 5. Append WAL IMAGE frame with full verified statement payload
+    let target: [u8; 2200]
+    let scratch: [u8; 2200]
     tx.sequence = tx.sequence + 1 as u32
     let frameLen: isize = noeWalEncodeFrame(slice(target), slice(scratch), noeWalImage(), tx.txId, tx.sequence, slice(&stmtBuf[0], sLen))
     if frameLen <= 0 as isize {

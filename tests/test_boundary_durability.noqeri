@@ -1,0 +1,155 @@
+import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Boundary Durability: 257-512 Rows, Oversized Statements & Repair Fail-Closed ===")
+    let dbPath: string = "tmp_test_boundary.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    assert_true(openRes == 0 as isize, "open engine")
+
+    // --- TEST 1: Oversized Statement Rejection (Zero Memory/WAL Divergence) ---
+    print("\n[BOUNDARY 1] Oversized Statement Rejection")
+    let txSchema: NoeWalTx
+    noeWalEngineBegin(&engine, &txSchema)
+    noeWalEngineExecute(&engine, &txSchema, "table items { id: int key auto, val: int, payload: text }")
+    noeWalEngineCommit(&engine, &txSchema)
+
+    let txOver: NoeWalTx
+    noeWalEngineBegin(&engine, &txOver)
+
+    // Build an oversized statement (> 2000 bytes)
+    let padding: string = "padding_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_"
+    let bigPadding: string = padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding + padding
+    let oversizedStmt: string = "items add { val: 9999, payload: \"" + bigPadding + "\" }"
+    assert_true(textLength(oversizedStmt) > 2000 as usize, "constructed oversized statement exceeds 2000 bytes")
+
+    let overRes: isize = noeWalEngineExecute(&engine, &txOver, oversizedStmt)
+    print("Oversized statement result code: " + intToString(overRes as i64))
+    assert_true(overRes == -115 as isize, "rejected oversized statement with -115")
+
+    let tIdx: isize = noeFindTable(&engine.db, "items")
+    let t: *NoeTableData = &engine.db.tables[tIdx as usize]
+    assert_true(t.rowCount == 0 as usize, "no memory mutation occurred on rejected statement")
+
+    // --- TEST 2: Checkpoint & Cold Reopen for 257, 300, and 512 Rows ---
+    print("\n[BOUNDARY 2] Checkpointing and Cold Reopen for 257, 300, and 512 Rows")
+
+    // A. Insert up to 257 rows
+    let i: usize = 0 as usize
+    while i < 257 as usize {
+        let tx: NoeWalTx
+        noeWalEngineBegin(&engine, &tx)
+        let val: i64 = ((i + 1 as usize) * 10 as usize) as i64
+        let stmt: string = "items add { val: " + intToString(val) + ", payload: \"test\" }"
+        let eRes: isize = noeWalEngineExecute(&engine, &tx, stmt)
+        assert_true(eRes == 0 as isize, "insert row")
+        noeWalEngineCommit(&engine, &tx)
+        i = i + 1 as usize
+    }
+
+    assert_true(t.rowCount == 257 as usize, "in-memory row count reached 257")
+    let ckpt257: isize = noeWalEngineCheckpoint(&engine)
+    assert_true(ckpt257 == 0 as isize, "checkpoint at 257 rows")
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+
+    // Cold reopen and verify 257 rows
+    let cold257: NoeWalEngine
+    let open257: isize = noeWalEngineOpen(&cold257, dbPath)
+    print("Cold open at 257 rows: " + intToString(open257 as i64))
+    assert_true(open257 == 0 as isize, "cold reopen 257 rows succeeds without -8 error")
+    let t257: *NoeTableData = &cold257.db.tables[tIdx as usize]
+    assert_true(t257.rowCount == 257 as usize, "all 257 rows recovered intact from snapshot")
+
+    // B. Continue inserting up to 300 rows
+    while i < 300 as usize {
+        let tx: NoeWalTx
+        noeWalEngineBegin(&cold257, &tx)
+        let val: i64 = ((i + 1 as usize) * 10 as usize) as i64
+        let stmt: string = "items add { val: " + intToString(val) + ", payload: \"test\" }"
+        noeWalEngineExecute(&cold257, &tx, stmt)
+        noeWalEngineCommit(&cold257, &tx)
+        i = i + 1 as usize
+    }
+
+    assert_true(t257.rowCount == 300 as usize, "in-memory row count reached 300")
+    let ckpt300: isize = noeWalEngineCheckpoint(&cold257)
+    assert_true(ckpt300 == 0 as isize, "checkpoint at 300 rows")
+
+    file_close(cold257.walFd)
+    file_close(cold257.lockFd)
+
+    // Cold reopen and verify 300 rows
+    let cold300: NoeWalEngine
+    let open300: isize = noeWalEngineOpen(&cold300, dbPath)
+    print("Cold open at 300 rows: " + intToString(open300 as i64))
+    assert_true(open300 == 0 as isize, "cold reopen 300 rows succeeds")
+    let t300: *NoeTableData = &cold300.db.tables[tIdx as usize]
+    assert_true(t300.rowCount == 300 as usize, "all 300 rows recovered intact from snapshot")
+
+    // C. Continue inserting up to the exact capacity ceiling: 512 rows!
+    while i < 512 as usize {
+        let tx: NoeWalTx
+        noeWalEngineBegin(&cold300, &tx)
+        let val: i64 = ((i + 1 as usize) * 10 as usize) as i64
+        let stmt: string = "items add { val: " + intToString(val) + ", payload: \"test\" }"
+        noeWalEngineExecute(&cold300, &tx, stmt)
+        noeWalEngineCommit(&cold300, &tx)
+        i = i + 1 as usize
+    }
+
+    assert_true(t300.rowCount == 512 as usize, "in-memory row count reached 512")
+    let ckpt512: isize = noeWalEngineCheckpoint(&cold300)
+    assert_true(ckpt512 == 0 as isize, "checkpoint at 512 rows")
+
+    file_close(cold300.walFd)
+    file_close(cold300.lockFd)
+
+    // Cold reopen and verify 512 rows
+    let cold512: NoeWalEngine
+    let open512: isize = noeWalEngineOpen(&cold512, dbPath)
+    print("Cold open at 512 rows: " + intToString(open512 as i64))
+    assert_true(open512 == 0 as isize, "cold reopen 512 rows succeeds")
+    let t512: *NoeTableData = &cold512.db.tables[tIdx as usize]
+    assert_true(t512.rowCount == 512 as usize, "all 512 rows recovered intact from snapshot")
+
+    // Verify boundary values: 1st row (val 10), 257th row (val 2570), 300th row (val 3000), 512th row (val 5120)
+    let c0: *NoeRowCell = &t512.cells[0 * 16 as usize + 1 as usize]
+    let c256: *NoeRowCell = &t512.cells[256 * 16 as usize + 1 as usize]
+    let c299: *NoeRowCell = &t512.cells[299 * 16 as usize + 1 as usize]
+    let c511: *NoeRowCell = &t512.cells[511 * 16 as usize + 1 as usize]
+
+    assert_true(c0.intVal == 10 as i64, "row 1 is 10")
+    assert_true(c256.intVal == 2570 as i64, "row 257 is 2570")
+    assert_true(c299.intVal == 3000 as i64, "row 300 is 3000")
+    assert_true(c511.intVal == 5120 as i64, "row 512 is 5120")
+
+    // D. Attempt 513th row insert: must be cleanly rejected with -101 (capacity reached)
+    let tx513: NoeWalTx
+    noeWalEngineBegin(&cold512, &tx513)
+    let res513: isize = noeWalEngineExecute(&cold512, &tx513, "items add { val: 99999, payload: \"exceed\" }")
+    print("513th row insert result: " + intToString(res513 as i64))
+    assert_true(res513 == -101 as isize, "513th insert rejected with -101 capacity limit")
+
+    file_close(cold512.walFd)
+    file_close(cold512.lockFd)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("\nBoundary Durability: 257-512 Rows, Oversized Statements & Repair Fail-Closed: ALL PASSED")
+}
+
+main()

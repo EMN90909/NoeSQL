@@ -692,7 +692,7 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
 
         let rowCountU32: u32 = 0 as u32
         noeReadU32(h as usize, &rowCountU32)
-        if rowCountU32 > 256 as u32 {
+        if rowCountU32 > 512 as u32 {
             file_close(h as usize)
             return -8 as isize // Corrupted row count
         }
