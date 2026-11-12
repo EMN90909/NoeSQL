@@ -1031,16 +1031,21 @@ export function noeDbBackup(db: *NoeDatabaseState, srcPath: string, backupPath: 
     if check < 0 as isize {
         return check // Source database corrupted or incomplete
     }
-    fs_ensure_directory(backupPath)
-    fs_ensure_directory(backupPath + "/versions")
+    let mk1: isize = fs_ensure_directory(backupPath)
+    let mk2: isize = fs_ensure_directory(backupPath + "/versions")
+    if mk1 < 0 as isize || mk2 < 0 as isize { return -1 as isize }
 
     let currentGen: u64 = noeReadActiveGeneration(srcPath)
     let genFileName: string = "/versions/generation-" + intToString(currentGen as i64) + ".pages"
 
     // Copy active HEAD and its corresponding generation pages
-    fs_copy_file_replace(srcPath + "/HEAD", backupPath + "/HEAD")
-    fs_copy_file_replace(srcPath + genFileName, backupPath + genFileName)
-    fs_directory_sync(backupPath)
+    let cpHead: isize = fs_copy_file_replace(srcPath + "/HEAD", backupPath + "/HEAD")
+    let cpPages: isize = fs_copy_file_replace(srcPath + genFileName, backupPath + genFileName)
+    if cpHead < 0 as isize || cpPages < 0 as isize { return -2 as isize }
+
+    let sV: isize = fs_directory_sync(backupPath + "/versions")
+    let sB: isize = fs_directory_sync(backupPath)
+    if sV < 0 as isize || sB < 0 as isize { return -3 as isize }
     return 0 as isize
 }
 

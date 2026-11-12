@@ -54,7 +54,7 @@ def test_cli_doctor():
         assert "Snapshot SHA-256 Checksum: VERIFIED (100% Valid)" in res_doc.stdout
         assert "Relational Catalog:" in res_doc.stdout
         assert "departments" in res_doc.stdout
-        assert "Overall Status: 100% HEALTHY" in res_doc.stdout
+        assert "Overall Status: SNAPSHOT & LEDGER VERIFIED" in res_doc.stdout
 
         # 3. Corrupted snapshot payload should be caught by Doctor's SHA-256 check
         res_b = run_cmd(["backup", "production.noedb", db_path])

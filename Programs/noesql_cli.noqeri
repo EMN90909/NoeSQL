@@ -171,11 +171,13 @@ export function noeCliDoctor(dbPath: string): isize {
 
     // Check WAL log
     let walPath: string = dbPath + "/WAL.log"
+    let walActive: bool = false
     if fs_exists(walPath) {
         let walSize: isize = fs_file_size(walPath)
         if walSize == 0 as isize {
             print("[+] Write-Ahead Log: CLEAN (0 bytes, fully checkpointed)")
         } else {
+            walActive = true
             print("[*] Write-Ahead Log: ACTIVE (" + noeIntToString(walSize as i64) + " uncheckpointed bytes)")
         }
     } else {
@@ -202,7 +204,12 @@ export function noeCliDoctor(dbPath: string): isize {
     }
 
     print("----------------------------------------------------------------")
-    print("  Overall Status: 100% HEALTHY (Production Qualified)")
+    if walActive {
+        print("  Overall Status: SNAPSHOT & LEDGER VERIFIED (Active WAL Unverified)")
+    } else {
+        print("  Overall Status: SNAPSHOT & LEDGER VERIFIED (Clean State)")
+    }
+    print("  Scope: Snapshot SHA-256 integrity & outcome ledger verified.")
     print("================================================================\n")
     return 0 as isize
 }
@@ -382,8 +389,15 @@ export function noeCliBackup(srcPath: string, targetPath: string): isize {
         fs_remove_tree(stagingPath)
         return -7 as isize
     }
-    file_sync(twHandle as usize)
+    let fsWalRes: isize = file_sync(twHandle as usize)
     file_close(twHandle as usize)
+    if fsWalRes < 0 as isize {
+        print("[-] Failed to sync empty WAL log in backup")
+        file_unlock(engine.lockFd)
+        noeWalEngineClose(&engine)
+        fs_remove_tree(stagingPath)
+        return -71 as isize
+    }
 
     let s1: isize = fs_directory_sync(stagingPath + "/versions")
     let s2: isize = fs_directory_sync(stagingPath)
@@ -404,7 +418,13 @@ export function noeCliBackup(srcPath: string, targetPath: string): isize {
         fs_remove_tree(stagingPath)
         return -9 as isize
     }
-    noeWalSyncDirectory(targetPath)
+    let sTgt: isize = noeWalSyncDirectory(targetPath)
+    if sTgt < 0 as isize {
+        print("[-] Failed to sync target backup directory")
+        file_unlock(engine.lockFd)
+        noeWalEngineClose(&engine)
+        return -91 as isize
+    }
 
     // Now release source lock and close engine
     file_unlock(engine.lockFd)
