@@ -779,10 +779,280 @@ assert "WAL_FD_CLEARED:0" in res_degraded.stdout
 assert "REOPEN_AFTER_DEGRADED_CLOSE:0" in res_degraded.stdout
 print("=> PASS: Degraded engine completely releases locks and descriptors on close without hanging!")
 
+# -----------------------------------------------------------------------------
+# Test 9: Active Unlinked WAL Detected on Open Descriptor (P0 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 9] Active Unlinked WAL Fails Closed with -17 and Quarantines Engine")
+ACTIVE_UNLINK_DB = os.path.join(NOESQL_DIR, "tmp_active_unlink.noedb")
+if os.path.exists(ACTIVE_UNLINK_DB): shutil.rmtree(ACTIVE_UNLINK_DB, ignore_errors=True)
+if os.path.exists(ACTIVE_UNLINK_DB + ".lck"):
+    try: os.remove(ACTIVE_UNLINK_DB + ".lck")
+    except OSError: pass
+
+active_unlink_code = """import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/thread.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_active_unlink.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if oRes != 0 as isize { print("OPEN_FAILED:" + intToString(oRes as i64)) return }
+
+    let tx1: NoeWalTx
+    noeWalEngineBegin(&engine, &tx1)
+    noeWalEngineExecute(&engine, &tx1, "table items { id: int key auto, val: int }")
+    noeWalEngineExecute(&engine, &tx1, "items add { val: 100 }")
+    noeWalEngineCommit(&engine, &tx1)
+
+    // Signal orchestrator that engine is open and holding active walFd
+    let sig: isize = file_open_create(dbPath + "/READY_FOR_UNLINK.flag")
+    if file_handle_valid(sig) { file_close(sig as usize) }
+
+    // Wait until orchestrator unlinks WAL.log
+    let waitIter: usize = 0 as usize
+    while waitIter < 500 as usize {
+        if fs_exists(dbPath + "/UNLINK_DONE.flag") { break }
+        thread_sleep_millis(10 as i64)
+        waitIter = waitIter + 1 as usize
+    }
+
+    // Attempt next transaction with live open descriptor on unlinked file
+    let tx2: NoeWalTx
+    let beginRes: isize = noeWalEngineBegin(&engine, &tx2)
+    print("BEGIN_ON_UNLINKED_WAL:" + intToString(beginRes as i64))
+    if engine.walOpen {
+        print("ENGINE_QUARANTINED:false")
+    } else {
+        print("ENGINE_QUARANTINED:true")
+    }
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+unlink_script_path = os.path.join(NOESQL_DIR, "tests", "tmp_active_unlink.noqeri")
+with open(unlink_script_path, "w") as f:
+    f.write(active_unlink_code)
+
+p_unlink = subprocess.Popen([NOQERI_BIN, "run", unlink_script_path], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+# Wait for READY_FOR_UNLINK.flag
+ready_flag = os.path.join(ACTIVE_UNLINK_DB, "READY_FOR_UNLINK.flag")
+while not os.path.exists(ready_flag):
+    time.sleep(0.01)
+    if p_unlink.poll() is not None:
+        break
+
+# Unlink WAL.log while the process holds the open descriptor
+wal_file = os.path.join(ACTIVE_UNLINK_DB, "WAL.log")
+assert os.path.exists(wal_file), "WAL.log must exist before unlink"
+os.remove(wal_file)
+
+# Signal worker that unlink is done
+with open(os.path.join(ACTIVE_UNLINK_DB, "UNLINK_DONE.flag"), "w") as f:
+    f.write("done")
+
+stdout_u, stderr_u = p_unlink.communicate(timeout=10)
+print("Active unlink test output:\n", stdout_u.strip())
+assert "BEGIN_ON_UNLINKED_WAL:-17" in stdout_u, f"Expected -17 on unlinked WAL begin, got: {stdout_u}"
+assert "ENGINE_QUARANTINED:true" in stdout_u, f"Expected engine to be quarantined, got: {stdout_u}"
+print("=> PASS: Live unlinked WAL fails closed with -17 and quarantines engine!")
+
+# -----------------------------------------------------------------------------
+# Test 10: Successful COMMIT Write Followed by Failed Fsync (P0 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 10] Ambiguous Outcome: Commit Frame Written But Fsync Fails (-18 Quarantine)")
+COMMIT_SYNC_DB = os.path.join(NOESQL_DIR, "tmp_commit_sync.noedb")
+if os.path.exists(COMMIT_SYNC_DB): shutil.rmtree(COMMIT_SYNC_DB, ignore_errors=True)
+if os.path.exists(COMMIT_SYNC_DB + ".lck"):
+    try: os.remove(COMMIT_SYNC_DB + ".lck")
+    except OSError: pass
+
+commit_sync_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_commit_sync.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    let tx1: NoeWalTx
+    noeWalEngineBegin(&engine, &tx1)
+    noeWalEngineExecute(&engine, &tx1, "table accounts { id: int key auto, balance: int }")
+    noeWalEngineExecute(&engine, &tx1, "accounts add { balance: 100 }")
+    noeWalEngineCommit(&engine, &tx1)
+
+    // Enable testing fault injection for failed commit fsync
+    let flag1: isize = file_open_create(dbPath + "/.noesql_testing_faults_enabled")
+    if file_handle_valid(flag1) { file_close(flag1 as usize) }
+    let flag2: isize = file_open_create(dbPath + "/FAULT_COMMIT_SYNC_FAIL.flag")
+    if file_handle_valid(flag2) { file_close(flag2 as usize) }
+
+    let tx2: NoeWalTx
+    noeWalEngineBegin(&engine, &tx2)
+    noeWalEngineExecute(&engine, &tx2, "accounts add { balance: 200 }")
+    let cRes: isize = noeWalEngineCommit(&engine, &tx2)
+    print("COMMIT_SYNC_FAIL_RES:" + intToString(cRes as i64))
+    if engine.walOpen {
+        print("WRITER_QUARANTINED:false")
+    } else {
+        print("WRITER_QUARANTINED:true")
+    }
+
+    // Subsequent operation on quarantined engine must fail
+    let tx3: NoeWalTx
+    let b3: isize = noeWalEngineBegin(&engine, &tx3)
+    print("SUBSEQUENT_BEGIN_REJECTED:" + intToString(b3 as i64))
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+commit_sync_path = os.path.join(NOESQL_DIR, "tests", "tmp_commit_sync.noqeri")
+with open(commit_sync_path, "w") as f:
+    f.write(commit_sync_code)
+
+res_csync = subprocess.run([NOQERI_BIN, "run", commit_sync_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Commit fsync fail output:\n", res_csync.stdout.strip())
+assert "COMMIT_SYNC_FAIL_RES:-18" in res_csync.stdout, f"Expected -18, got: {res_csync.stdout}"
+assert "WRITER_QUARANTINED:true" in res_csync.stdout, f"Expected writer quarantined, got: {res_csync.stdout}"
+assert "SUBSEQUENT_BEGIN_REJECTED:-1" in res_csync.stdout, f"Expected -1 on subsequent begin, got: {res_csync.stdout}"
+
+# Now verify cold recovery: remove fault flags and reopen database
+os.remove(os.path.join(COMMIT_SYNC_DB, "FAULT_COMMIT_SYNC_FAIL.flag"))
+
+verify_sync_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_commit_sync.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("COLD_REOPEN_RES:" + intToString(oRes as i64))
+    if oRes == 0 as isize {
+        let t: *NoeTableData = &engine.db.tables[0]
+        print("VERIFIED_ROWS:" + intToString(t.rowCount as i64))
+    }
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+verify_sync_path = os.path.join(NOESQL_DIR, "tests", "tmp_verify_sync.noqeri")
+with open(verify_sync_path, "w") as f:
+    f.write(verify_sync_code)
+
+res_vsync = subprocess.run([NOQERI_BIN, "run", verify_sync_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Cold reopen output:\n", res_vsync.stdout.strip())
+assert "COLD_REOPEN_RES:0" in res_vsync.stdout
+# Because the COMMIT frame was physically written to disk, cold recovery verified and recovered it cleanly
+assert "VERIFIED_ROWS:2" in res_vsync.stdout
+print("=> PASS: Failed commit fsync returns -18, writer quarantined, cold recovery succeeds cleanly!")
+
+# -----------------------------------------------------------------------------
+# Test 11: Snapshot Persistence Failures in Checkpoint (P0 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 11] Checkpoint Fails Closed on Snapshot/HEAD Failure and Preserves WAL")
+CP_FAULT_DB = os.path.join(NOESQL_DIR, "tmp_cp_fault.noedb")
+if os.path.exists(CP_FAULT_DB): shutil.rmtree(CP_FAULT_DB, ignore_errors=True)
+if os.path.exists(CP_FAULT_DB + ".lck"):
+    try: os.remove(CP_FAULT_DB + ".lck")
+    except OSError: pass
+
+cp_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_cp_fault.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    let tx1: NoeWalTx
+    noeWalEngineBegin(&engine, &tx1)
+    noeWalEngineExecute(&engine, &tx1, "table users { id: int key auto, name: string }")
+    noeWalEngineExecute(&engine, &tx1, "users add { name: 'alice' }")
+    noeWalEngineExecute(&engine, &tx1, "users add { name: 'bob' }")
+    noeWalEngineCommit(&engine, &tx1)
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+    engine.walOpen = false
+}
+main()
+"""
+cp_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_cp_init.noqeri")
+with open(cp_init_path, "w") as f:
+    f.write(cp_init_code)
+subprocess.run([NOQERI_BIN, "run", cp_init_path], cwd=NOESQL_DIR, check=True)
+
+# Test 11a: Snapshot write failure injection
+with open(os.path.join(CP_FAULT_DB, ".noesql_testing_faults_enabled"), "w") as f: f.write("1")
+with open(os.path.join(CP_FAULT_DB, "FAULT_SNAPSHOT_SAVE_FAIL.flag"), "w") as f: f.write("1")
+
+cp_run_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_cp_fault.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+    let cp: isize = noeWalEngineCheckpoint(&engine)
+    print("CP_RES:" + intToString(cp as i64))
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+    engine.walOpen = false
+}
+main()
+"""
+cp_run_path = os.path.join(NOESQL_DIR, "tests", "tmp_cp_run.noqeri")
+with open(cp_run_path, "w") as f:
+    f.write(cp_run_code)
+
+res_cp1 = subprocess.run([NOQERI_BIN, "run", cp_run_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Checkpoint snapshot fault output:\n", res_cp1.stdout.strip())
+assert "CP_RES:-25" in res_cp1.stdout, f"Expected -25, got: {res_cp1.stdout}"
+
+# Test 11b: HEAD sync failure injection
+os.remove(os.path.join(CP_FAULT_DB, "FAULT_SNAPSHOT_SAVE_FAIL.flag"))
+with open(os.path.join(CP_FAULT_DB, "FAULT_HEAD_SYNC_FAIL.flag"), "w") as f: f.write("1")
+
+res_cp2 = subprocess.run([NOQERI_BIN, "run", cp_run_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Checkpoint HEAD sync fault output:\n", res_cp2.stdout.strip())
+assert "CP_RES:-26" in res_cp2.stdout, f"Expected -26, got: {res_cp2.stdout}"
+
+os.remove(os.path.join(CP_FAULT_DB, "FAULT_HEAD_SYNC_FAIL.flag"))
+os.remove(os.path.join(CP_FAULT_DB, ".noesql_testing_faults_enabled"))
+
+# Verify WAL.log was NOT truncated and still exists
+wal_cp = os.path.join(CP_FAULT_DB, "WAL.log")
+assert os.path.exists(wal_cp), "WAL.log must be preserved on checkpoint failure"
+assert os.path.getsize(wal_cp) > 0, "WAL.log must not be truncated when checkpoint fails"
+
+# Verify cold recovery recovers all rows from preserved WAL
+cp_verify_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_cp_fault.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("RECOVER_AFTER_CP_FAIL_OPEN:" + intToString(oRes as i64))
+    if oRes == 0 as isize {
+        let t: *NoeTableData = &engine.db.tables[0]
+        print("RECOVERED_ROWS:" + intToString(t.rowCount as i64))
+    }
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+cp_verify_path = os.path.join(NOESQL_DIR, "tests", "tmp_cp_verify.noqeri")
+with open(cp_verify_path, "w") as f:
+    f.write(cp_verify_code)
+
+res_cpv = subprocess.run([NOQERI_BIN, "run", cp_verify_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Recovery after failed checkpoint output:\n", res_cpv.stdout.strip())
+assert "RECOVER_AFTER_CP_FAIL_OPEN:0" in res_cpv.stdout
+assert "RECOVERED_ROWS:2" in res_cpv.stdout
+print("=> PASS: Checkpoint aborts on snapshot/HEAD failure, preserving WAL with complete recovery!")
+
 # Cleanup temporary files
-for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path]:
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path]:
     if os.path.exists(p): os.remove(p)
-for d in [FAIL_COMMIT_DB, MISSING_WAL_DB]:
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB]:
     if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
     if os.path.exists(d + ".lck"):
         try: os.remove(d + ".lck")

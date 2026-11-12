@@ -456,11 +456,17 @@ function noeReadActiveGeneration(dbPath: string): u64 {
 }
 
 export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
+    // Fault injection check
+    if fs_exists(dbPath + "/.noesql_testing_faults_enabled") && fs_exists(dbPath + "/FAULT_SNAPSHOT_SAVE_FAIL.flag") {
+        return -25 as isize
+    }
+
     // 1. Ensure database directories exist
     let dirOk: isize = fs_ensure_directory(dbPath)
     if dirOk < 0 as isize { return dirOk }
     let versionsDir: string = dbPath + "/versions"
-    fs_ensure_directory(versionsDir)
+    let vDirOk: isize = fs_ensure_directory(versionsDir)
+    if vDirOk < 0 as isize { return vDirOk }
 
     // 2. Open and acquire cross-process advisory lock
     let lockPath: string = dbPath + ".lck"
@@ -489,55 +495,55 @@ export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
     // 4. Serialize NQDB0003 Header (32 bytes)
     // Magic: "NQDB0003"
     let magic: [u8; 8] = [78 as u8, 81 as u8, 68 as u8, 66 as u8, 48 as u8, 48 as u8, 48 as u8, 51 as u8]
-    file_write_all(genHandle as usize, slice(magic))
-    noeWriteI64(genHandle as usize, nextGen as i64)
-    noeWriteU32(genHandle as usize, db.tableCount as u32)
-    // Persist lastTxId (8 bytes) + 4 bytes padding to preserve 32-byte header
-    noeWriteI64(genHandle as usize, db.lastTxId as i64)
-    noeWriteU32(genHandle as usize, 0 as u32)
+    let wMagic: isize = file_write_all(genHandle as usize, slice(magic))
+    if wMagic < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return wMagic }
+    if noeWriteI64(genHandle as usize, nextGen as i64) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -20 as isize }
+    if noeWriteU32(genHandle as usize, db.tableCount as u32) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -21 as isize }
+    if noeWriteI64(genHandle as usize, db.lastTxId as i64) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -22 as isize }
+    if noeWriteU32(genHandle as usize, 0 as u32) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -23 as isize }
 
     // 5. Serialize Tables, Field Definitions, and Actual Rows
     let tIdx: usize = 0 as usize
     while tIdx < db.tableCount {
         let t: *NoeTableData = &db.tables[tIdx]
-        noeWriteString(genHandle as usize, t.name)
-        noeWriteU32(genHandle as usize, t.fieldCount as u32)
-        noeWriteI64(genHandle as usize, t.autoSequence)
-        noeWriteU32(genHandle as usize, t.rowCount as u32)
+        if noeWriteString(genHandle as usize, t.name) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -30 as isize }
+        if noeWriteU32(genHandle as usize, t.fieldCount as u32) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -31 as isize }
+        if noeWriteI64(genHandle as usize, t.autoSequence) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -32 as isize }
+        if noeWriteU32(genHandle as usize, t.rowCount as u32) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -33 as isize }
 
         // Serialize fields
         let fIdx: usize = 0 as usize
         while fIdx < t.fieldCount {
             let f: *NoeFieldDef = &t.fields[fIdx]
-            noeWriteString(genHandle as usize, f.name)
-            noeWriteU32(genHandle as usize, f.kind as u32)
+            if noeWriteString(genHandle as usize, f.name) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -34 as isize }
+            if noeWriteU32(genHandle as usize, f.kind as u32) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -35 as isize }
             let reqB: u8 = 0 as u8
             if f.required { reqB = 1 as u8 }
-            noeWriteU8(genHandle as usize, reqB)
+            if noeWriteU8(genHandle as usize, reqB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -36 as isize }
 
             let unqB: u8 = 0 as u8
             if f.unique { unqB = 1 as u8 }
-            noeWriteU8(genHandle as usize, unqB)
+            if noeWriteU8(genHandle as usize, unqB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -37 as isize }
 
             let keyB: u8 = 0 as u8
             if f.isKey { keyB = 1 as u8 }
-            noeWriteU8(genHandle as usize, keyB)
+            if noeWriteU8(genHandle as usize, keyB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -38 as isize }
 
             let autoB: u8 = 0 as u8
             if f.auto { autoB = 1 as u8 }
-            noeWriteU8(genHandle as usize, autoB)
+            if noeWriteU8(genHandle as usize, autoB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -39 as isize }
 
             let defB: u8 = 0 as u8
             if f.hasDefault { defB = 1 as u8 }
-            noeWriteU8(genHandle as usize, defB)
+            if noeWriteU8(genHandle as usize, defB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -40 as isize }
 
-            noeWriteI64(genHandle as usize, f.defaultInt)
+            if noeWriteI64(genHandle as usize, f.defaultInt) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -41 as isize }
 
             let defBoolB: u8 = 0 as u8
             if f.defaultBool { defBoolB = 1 as u8 }
-            noeWriteU8(genHandle as usize, defBoolB)
+            if noeWriteU8(genHandle as usize, defBoolB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -42 as isize }
 
-            noeWriteString(genHandle as usize, f.refTable)
+            if noeWriteString(genHandle as usize, f.refTable) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -43 as isize }
             fIdx = fIdx + 1 as usize
         }
 
@@ -549,18 +555,18 @@ export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
                 let cell: *NoeRowCell = &t.cells[rIdx * 16 as usize + cIdx]
                 let nullB: u8 = 0 as u8
                 if cell.isNull { nullB = 1 as u8 }
-                noeWriteU8(genHandle as usize, nullB)
+                if noeWriteU8(genHandle as usize, nullB) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -44 as isize }
 
                 if !cell.isNull {
                     let kind: int = t.fields[cIdx].kind
                     if kind == noeTypeInt() {
-                        noeWriteI64(genHandle as usize, cell.intVal)
+                        if noeWriteI64(genHandle as usize, cell.intVal) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -45 as isize }
                     } else if kind == noeTypeBool() {
                         let bVal: u8 = 0 as u8
                         if cell.boolVal { bVal = 1 as u8 }
-                        noeWriteU8(genHandle as usize, bVal)
+                        if noeWriteU8(genHandle as usize, bVal) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -46 as isize }
                     } else if kind == noeTypeText() {
-                        noeWriteString(genHandle as usize, cell.textVal)
+                        if noeWriteString(genHandle as usize, cell.textVal) < 0 as isize { file_close(genHandle as usize); file_unlock(lockHandle as usize); file_close(lockHandle as usize); return -47 as isize }
                     }
                 }
                 cIdx = cIdx + 1 as usize
@@ -579,29 +585,62 @@ export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
         return syncPages
     }
 
+    // Fsync versions directory to persist generation file creation
+    let vSync: isize = fs_directory_sync(versionsDir)
+    if vSync < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return vSync
+    }
+
     // 7. Atomic HEAD commit: write to HEAD.tmp, fsync, then atomic rename
     let headTmp: string = dbPath + "/HEAD.tmp"
     let headFinal: string = dbPath + "/HEAD"
     let headHandle: isize = file_open_replace(headTmp)
-    if headHandle >= 0 as isize {
-        let genStr: string = intToString(nextGen as i64) + "\n"
-        let genBuf: [u8; 64]
-        let genBytes: usize = stringToBytes(genStr, &genBuf[0], 64 as usize)
-        file_write_all(headHandle as usize, slice(genBuf, genBytes))
-        file_sync(headHandle as usize)
+    if headHandle < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return headHandle
+    }
+    let genStr: string = intToString(nextGen as i64) + "\n"
+    let genBuf: [u8; 64]
+    let genBytes: usize = stringToBytes(genStr, &genBuf[0], 64 as usize)
+    let wHead: isize = file_write_all(headHandle as usize, slice(genBuf, genBytes))
+    if wHead < 0 as isize {
         file_close(headHandle as usize)
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return wHead
+    }
+    if fs_exists(dbPath + "/.noesql_testing_faults_enabled") && fs_exists(dbPath + "/FAULT_HEAD_SYNC_FAIL.flag") {
+        file_close(headHandle as usize)
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return -26 as isize // Injected HEAD sync failure
+    }
+    let syncHead: isize = file_sync(headHandle as usize)
+    file_close(headHandle as usize)
+    if syncHead < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return syncHead
+    }
 
-        // Atomic replace rename without pre-removing destination
-        let mvOk: isize = fs_move_replace(headTmp, headFinal)
-        if mvOk < 0 as isize {
-            file_unlock(lockHandle as usize)
-            file_close(lockHandle as usize)
-            return mvOk
-        }
+    // Atomic replace rename without pre-removing destination
+    let mvOk: isize = fs_move_replace(headTmp, headFinal)
+    if mvOk < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return mvOk
     }
 
     // 8. Directory synchronization
-    fs_directory_sync(dbPath)
+    let dSync: isize = fs_directory_sync(dbPath)
+    if dSync < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return dSync
+    }
 
     // 9. Release lock
     file_unlock(lockHandle as usize)

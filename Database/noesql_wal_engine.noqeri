@@ -71,14 +71,31 @@ function noeWalRebuildIndex(engine: *NoeWalEngine): void {
     }
 }
 
-function noeWalSyncDirectory(path: string): isize {
-    let dHandle: isize = file_open_read(path)
-    if file_handle_valid(dHandle) {
-        let sRes: isize = file_sync(dHandle as usize)
-        file_close(dHandle as usize)
-        return sRes
+extern function stringToBytes(s: string, dst: *u8, maxLen: usize): usize
+extern function bytesToString(src: *u8, len: usize): string
+
+function noeWalGetParentDir(path: string): string {
+    let buf: [u8; 1024]
+    let pLen: usize = stringToBytes(path, &buf[0], 1024 as usize)
+    let lastSlash: isize = -1 as isize
+    let i: usize = 0 as usize
+    while i < pLen {
+        if buf[i] == 47 as u8 { // '/'
+            lastSlash = i as isize
+        }
+        i = i + 1 as usize
     }
-    return 0 as isize
+    if lastSlash <= 0 as isize {
+        return "."
+    }
+    return bytesToString(&buf[0], lastSlash as usize)
+}
+
+function noeWalSyncDirectory(path: string): isize {
+    let res: isize = fs_directory_sync(path)
+    if res < 0 as isize { return res }
+    let parentDir: string = noeWalGetParentDir(path)
+    return fs_directory_sync(parentDir)
 }
 
 // Streaming WAL Replay: reads sequentially without memory limits or statement count caps.
@@ -98,14 +115,15 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
             return -101 as isize
         }
 
-        let hdr: [u8; 56]
-        let rHdr: isize = file_read_into(walFd, slice(hdr))
-        if rHdr < 0 as isize {
-            return rHdr // I/O read failure -> fail closed!
-        }
-        if rHdr < 56 as isize {
-            // Incomplete header tail -> stop cleanly at uncommitted tail
+        if currOffset + 56 as usize > fSize {
+            // Incomplete header tail at EOF -> stop cleanly
             break
+        }
+
+        let hdr: [u8; 56]
+        let rHdr: isize = file_read_exact(walFd, slice(hdr))
+        if rHdr < 0 as isize {
+            return -102 as isize // I/O read failure or short read -> fail closed!
         }
 
         if hdr[0] != 78 as u8 || hdr[1] != 87 as u8 || hdr[2] != 65 as u8 || hdr[3] != 76 as u8 {
@@ -137,10 +155,12 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
 
         while scanOff < fSize {
             if file_seek(walFd, scanOff as i64, file_seek_start()) < 0 as isize { return -101 as isize }
+
+            if scanOff + 56 as usize > fSize { break } // incomplete frame tail at EOF
+
             let nextHdr: [u8; 56]
-            let rNextHdr: isize = file_read_into(walFd, slice(nextHdr))
-            if rNextHdr < 0 as isize { return rNextHdr } // I/O read failure -> fail closed!
-            if rNextHdr < 56 as isize { break } // incomplete frame tail
+            let rNextHdr: isize = file_read_exact(walFd, slice(nextHdr))
+            if rNextHdr < 0 as isize { return -103 as isize } // I/O read failure or short read -> fail closed!
 
             if nextHdr[0] != 78 as u8 || nextHdr[1] != 87 as u8 || nextHdr[2] != 65 as u8 || nextHdr[3] != 76 as u8 {
                 return -103 as isize // Corrupt frame
@@ -162,9 +182,9 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
                 let payloadBuf: [u8; 2048]
                 if nextPSize > 2048 as usize { return -105 as isize }
                 if nextPSize > 0 as usize {
-                    let rPay: isize = file_read_into(walFd, slice(&payloadBuf[0], nextPSize))
-                    if rPay < 0 as isize { return rPay } // I/O read failure -> fail closed!
-                    if rPay < nextPSize as isize { break } // incomplete payload tail
+                    if scanOff + 56 as usize + nextPSize > fSize { break } // incomplete payload tail at EOF
+                    let rPay: isize = file_read_exact(walFd, slice(&payloadBuf[0], nextPSize))
+                    if rPay < 0 as isize { return -105 as isize } // I/O read failure or short read -> fail closed!
                     noeWalChainHash(&rollDigest[0], &payloadBuf[0], nextPSize, &rollDigest[0])
                 }
                 imageCount = imageCount + 1 as usize
@@ -174,10 +194,10 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
 
             if nextKind == noeWalCommit() {
                 if nextTx != txId || nextPSize != 32 as usize { return -106 as isize }
+                if scanOff + 56 as usize + 32 as usize > fSize { break } // incomplete commit tail at EOF
                 let commitPayload: [u8; 32]
-                let rC: isize = file_read_into(walFd, slice(commitPayload))
-                if rC < 0 as isize { return rC } // I/O read failure -> fail closed!
-                if rC < 32 as isize { break }
+                let rC: isize = file_read_exact(walFd, slice(commitPayload))
+                if rC < 0 as isize { return -106 as isize } // I/O read failure or short read -> fail closed!
 
                 // Check chained rolling digest
                 let matchFail: bool = false
@@ -208,13 +228,13 @@ export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize
                 let k: usize = 0 as usize
                 while k < imageCount {
                     let imgHdr: [u8; 56]
-                    let rIHdr: isize = file_read_into(walFd, slice(imgHdr))
-                    if rIHdr < 56 as isize { return -109 as isize }
+                    let rIHdr: isize = file_read_exact(walFd, slice(imgHdr))
+                    if rIHdr < 0 as isize { return -109 as isize }
                     let imgLen: usize = noeWalGetNumber(slice(imgHdr), 20 as usize, 4 as usize) as usize
                     if imgLen > 0 as usize && imgLen <= 2048 as usize {
                         let stmtBuf: [u8; 2048]
-                        let rStmt: isize = file_read_into(walFd, slice(&stmtBuf[0], imgLen))
-                        if rStmt < imgLen as isize { return -110 as isize }
+                        let rStmt: isize = file_read_exact(walFd, slice(&stmtBuf[0], imgLen))
+                        if rStmt < 0 as isize { return -110 as isize }
                         let stmt: string = bytesToString(&stmtBuf[0], imgLen)
                         noeExecuteStatement(&engine.db, stmt)
                         if engine.db.tableCount > 0 as usize {
@@ -268,49 +288,78 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
         noeWalRebuildIndex(engine)
     }
 
-    // 2. Check WAL.log for any newly committed transactions
+    let walPath: string = engine.dbPath + "/WAL.log"
+    if !fs_exists(walPath) {
+        if engine.walFd != 0 as usize {
+            file_close(engine.walFd)
+            engine.walFd = 0 as usize
+        }
+        engine.walOpen = false
+        return -17 as isize // Missing WAL.log / unlinked WAL
+    }
+
+    // Inspect actual disk file size to prevent bypass via unlinked/replaced open descriptor
+    let diskWalHandle: isize = file_open_read(walPath)
+    if !file_handle_valid(diskWalHandle) {
+        if engine.walFd != 0 as usize {
+            file_close(engine.walFd)
+            engine.walFd = 0 as usize
+        }
+        engine.walOpen = false
+        return -17 as isize
+    }
+    let diskSizeIs: isize = file_size(diskWalHandle as usize)
+    file_close(diskWalHandle as usize)
+    if diskSizeIs < 0 as isize {
+        if engine.walFd != 0 as usize {
+            file_close(engine.walFd)
+            engine.walFd = 0 as usize
+        }
+        engine.walOpen = false
+        return -17 as isize
+    }
+
+    let diskSize: usize = diskSizeIs as usize
+
+    // 2. Fast-path: if disk WAL size matches our verified committed offset
+    // AND our open walFd size matches diskSize, no external writes occurred.
     if engine.walFd != 0 as usize {
         let curSizeIs: isize = file_size(engine.walFd)
-        if curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset {
+        if curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset && diskSize == engine.walCommittedOffset {
             engine.walBytesWritten = engine.walCommittedOffset
             return 0 as isize // Fast-path: no external writes, avoid open/close syscalls
         }
+        if curSizeIs < 0 as isize || (curSizeIs as usize) != diskSize {
+            // Re-bind walFd if file was replaced or truncated by external process
+            file_close(engine.walFd)
+            let appHandle: isize = file_open_append(walPath)
+            if !file_handle_valid(appHandle) {
+                engine.walFd = 0 as usize
+                engine.walOpen = false
+                return -14 as isize
+            }
+            engine.walFd = appHandle as usize
+        }
     }
 
-    let walPath: string = engine.dbPath + "/WAL.log"
-    if fs_exists(walPath) {
-        let walReadHandle: isize = file_open_read(walPath)
-        if !file_handle_valid(walReadHandle) {
-            return -14 as isize
-        }
-        let fSizeIs: isize = file_size(walReadHandle as usize)
-        if fSizeIs < 0 as isize {
+    if diskSize > 0 as usize {
+        if diskSize > engine.walCommittedOffset {
+            let walReadHandle: isize = file_open_read(walPath)
+            if !file_handle_valid(walReadHandle) { return -14 as isize }
+            let repRes: isize = noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, engine.walCommittedOffset)
             file_close(walReadHandle as usize)
-            return fSizeIs
-        }
-        if fSizeIs > 0 as isize {
-            let fSize: usize = fSizeIs as usize
-            if fSize > engine.walCommittedOffset {
-                let repRes: isize = noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, engine.walCommittedOffset)
-                file_close(walReadHandle as usize)
-                if repRes < 0 as isize { return repRes }
-            } else if fSize < engine.walCommittedOffset {
-                // WAL was truncated (checkpoint)
-                engine.walCommittedOffset = 0 as usize
-                let repRes: isize = noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, 0 as usize)
-                file_close(walReadHandle as usize)
-                if repRes < 0 as isize { return repRes }
-            } else {
-                file_close(walReadHandle as usize)
-            }
-        } else {
+            if repRes < 0 as isize { return repRes }
+        } else if diskSize < engine.walCommittedOffset {
+            // WAL was truncated (checkpoint)
             engine.walCommittedOffset = 0 as usize
+            let walReadHandle: isize = file_open_read(walPath)
+            if !file_handle_valid(walReadHandle) { return -14 as isize }
+            let repRes: isize = noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, 0 as usize)
             file_close(walReadHandle as usize)
+            if repRes < 0 as isize { return repRes }
         }
     } else {
-        if engine.walCommittedOffset > 0 as usize {
-            return -17 as isize // Missing WAL.log when committed offset > 0!
-        }
+        engine.walCommittedOffset = 0 as usize
     }
 
     // Always synchronize walBytesWritten with verified committed offset
@@ -624,6 +673,18 @@ export function noeWalEngineExecute(engine: *NoeWalEngine, tx: *NoeWalTx, statem
 export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize {
     if engine == null || !engine.walOpen || tx == null || !tx.inProgress { return -1 as isize }
 
+    let walPath: string = engine.dbPath + "/WAL.log"
+    if !fs_exists(walPath) {
+        if engine.walFd != 0 as usize {
+            file_close(engine.walFd)
+            engine.walFd = 0 as usize
+        }
+        engine.walOpen = false
+        tx.inProgress = false
+        file_unlock(engine.lockFd)
+        return -17 as isize
+    }
+
     // Encode WAL COMMIT frame with authentic chained rolling SHA-256 hash of images
     let target: [u8; 128]
     let scratch: [u8; 128]
@@ -642,10 +703,25 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
     engine.walBytesWritten = engine.walBytesWritten + frameLen as usize
 
     // Durability sync barrier: sequential fsync on WAL log file descriptor
-    let syncRes: isize = file_sync(engine.walFd)
+    let syncRes: isize = 0 as isize
+    if fs_exists(engine.dbPath + "/.noesql_testing_faults_enabled") && fs_exists(engine.dbPath + "/FAULT_COMMIT_SYNC_FAIL.flag") {
+        syncRes = -18 as isize
+    } else {
+        syncRes = file_sync(engine.walFd)
+    }
     if syncRes < 0 as isize {
-        noeWalEngineRollback(engine, tx)
-        return syncRes
+        // P0 Durability Rule:
+        // A successful COMMIT frame write followed by a failed fsync leaves the transaction outcome ambiguous.
+        // DO NOT call noeWalEngineRollback! Rollback would read back the written COMMIT frame from disk and replay it!
+        // Instead:
+        // 1. Mark the transaction inactive
+        // 2. Quarantine the engine (engine.walOpen = false) so no further writes are accepted on this corrupted/uncertain handle
+        // 3. Release the exclusive lock so other processes or cold restart can perform recovery
+        // 4. Return -18 as isize (uncertain commit outcome)
+        tx.inProgress = false
+        engine.walOpen = false
+        file_unlock(engine.lockFd)
+        return -18 as isize
     }
 
     // Derive committed offset directly from verified physical position under lock
