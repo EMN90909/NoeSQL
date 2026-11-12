@@ -36,6 +36,22 @@ export function noeWalFoundCommit(): int { return 1 }
 export function noeWalUncommitted(): int { return 0 }
 export function noeWalCorrupt(): int { return -1 }
 
+export function noeWalChainHash(currentDigest: *u8, payload: *u8, payloadLen: usize, outDigest: *u8): isize {
+    let buf: [u8; 4128]
+    if payloadLen > 4096 as usize { return -1 as isize }
+    let i: usize = 0 as usize
+    while i < 32 as usize {
+        buf[i] = currentDigest[i]
+        i = i + 1 as usize
+    }
+    i = 0 as usize
+    while i < payloadLen {
+        buf[32 as usize + i] = payload[i]
+        i = i + 1 as usize
+    }
+    return noeHostSha256(&buf[0], 32 as usize + payloadLen, outDigest, 32 as usize)
+}
+
 function noeWalPutNumber(bytes: []u8, at: usize, count: usize, value: u64): bool {
     if at > len(bytes) || count > len(bytes) - at { return false }
     let n: u64 = value

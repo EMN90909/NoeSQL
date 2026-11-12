@@ -9,7 +9,8 @@ import "../../Noqeri/Lib/std/fs.noqeri"
 // NoeSQL High-Performance Client-Server WAL Storage Engine
 // Multi-Process Daemon Architecture with Sequential WAL Framing,
 // Power-Loss Durability, Genuine Multi-Transaction Replay, Single-Writer
-// Concurrency Protocol, and B-Tree Index Maintenance.
+// Concurrency Protocol, Cross-Process Refresh, Full Rollback Reversion,
+// Multi-Statement Transactions, and B-Tree Index Maintenance.
 
 record NoeWalTx {
     txId: u64
@@ -29,6 +30,8 @@ record NoeWalEngine {
     walBytesWritten: usize
     checkpointThreshold: usize
     primaryIndex: NoeBTree
+    walCommittedOffset: usize
+    baseGeneration: u64
 }
 
 function noeWalEncodeString(s: string, out: []u8): usize {
@@ -44,7 +47,247 @@ export function noeWalEngineInit(engine: *NoeWalEngine): void {
     engine.walSequence = 0 as u32
     engine.walBytesWritten = 0 as usize
     engine.checkpointThreshold = 65536 as usize
+    engine.walCommittedOffset = 0 as usize
+    engine.baseGeneration = 0 as u64
     noeBTreeInit(&engine.primaryIndex)
+}
+
+function noeWalRebuildIndex(engine: *NoeWalEngine): void {
+    noeBTreeInit(&engine.primaryIndex)
+    if engine.db.tableCount > 0 as usize {
+        let t: *NoeTableData = &engine.db.tables[0]
+        let r: usize = 0 as usize
+        while r < t.rowCount {
+            let cell: *NoeRowCell = &t.cells[r * 16 as usize + 0 as usize]
+            if !cell.isNull {
+                noeBTreeInsert(&engine.primaryIndex, cell.intVal, r)
+            }
+            r = r + 1 as usize
+        }
+    }
+}
+
+// Streaming WAL Replay: reads sequentially from startOffset to EOF without memory limit.
+// Supports multi-statement transactions, chained cryptographic rolling hashes,
+// and atomic application only upon verified COMMIT.
+export function noeWalEngineStreamReplayFrom(engine: *NoeWalEngine, walFd: usize, startOffset: usize): isize {
+    let fSizeIs: isize = file_size(walFd)
+    if fSizeIs <= 0 as isize { return 0 as isize }
+    let fSize: usize = fSizeIs as usize
+    if startOffset >= fSize { return 0 as isize }
+
+    let currOffset: usize = startOffset
+    while currOffset < fSize {
+        if file_seek(walFd, currOffset as i64, file_seek_start()) < 0 as isize {
+            return -101 as isize
+        }
+
+        let hdr: [u8; 56]
+        let rHdr: isize = file_read_into(walFd, slice(hdr))
+        if rHdr < 56 as isize {
+            // Incomplete header tail -> stop cleanly
+            break
+        }
+
+        if hdr[0] != 78 as u8 || hdr[1] != 87 as u8 || hdr[2] != 65 as u8 || hdr[3] != 76 as u8 {
+            return -102 as isize // Corrupt header
+        }
+
+        let kind: int = hdr[6] as int
+        let txId: u64 = noeWalGetNumber(slice(hdr), 8 as usize, 8 as usize)
+        let seq: u32 = noeWalGetNumber(slice(hdr), 16 as usize, 4 as usize) as u32
+        let pSize: usize = noeWalGetNumber(slice(hdr), 20 as usize, 4 as usize) as usize
+
+        if kind != noeWalBegin() {
+            // Not a BEGIN frame; advance past it
+            currOffset = currOffset + 56 as usize + pSize
+            continue
+        }
+
+        // Initialize rolling hash for this transaction
+        let rollDigest: [u8; 32]
+        let di: usize = 0 as usize
+        while di < 32 as usize { rollDigest[di] = 0 as u8 di = di + 1 as usize }
+
+        let imgOffsets: [usize; 32]
+        let imgLengths: [usize; 32]
+        let imgCount: usize = 0 as usize
+
+        let scanOff: usize = currOffset + 56 as usize + pSize
+        let txCommitted: bool = false
+        let nextTxOffset: usize = scanOff
+
+        while scanOff < fSize {
+            if file_seek(walFd, scanOff as i64, file_seek_start()) < 0 as isize { break }
+            let nextHdr: [u8; 56]
+            let rNextHdr: isize = file_read_into(walFd, slice(nextHdr))
+            if rNextHdr < 56 as isize { break } // incomplete frame tail
+
+            if nextHdr[0] != 78 as u8 || nextHdr[1] != 87 as u8 || nextHdr[2] != 65 as u8 || nextHdr[3] != 76 as u8 {
+                return -103 as isize
+            }
+
+            let nextKind: int = nextHdr[6] as int
+            let nextTx: u64 = noeWalGetNumber(slice(nextHdr), 8 as usize, 8 as usize)
+            let nextSeq: u32 = noeWalGetNumber(slice(nextHdr), 16 as usize, 4 as usize) as u32
+            let nextPSize: usize = noeWalGetNumber(slice(nextHdr), 20 as usize, 4 as usize) as usize
+
+            if nextKind == noeWalBegin() {
+                // Prior transaction aborted before COMMIT
+                nextTxOffset = scanOff
+                break
+            }
+
+            if nextKind == noeWalImage() {
+                if nextTx != txId { return -104 as isize }
+                let payloadBuf: [u8; 2048]
+                if nextPSize > 2048 as usize { return -105 as isize }
+                if nextPSize > 0 as usize {
+                    let rPay: isize = file_read_into(walFd, slice(&payloadBuf[0], nextPSize))
+                    if rPay < nextPSize as isize { break } // incomplete payload tail
+                    noeWalChainHash(&rollDigest[0], &payloadBuf[0], nextPSize, &rollDigest[0])
+                }
+
+                if imgCount < 32 as usize {
+                    imgOffsets[imgCount] = scanOff + 56 as usize
+                    imgLengths[imgCount] = nextPSize
+                    imgCount = imgCount + 1 as usize
+                }
+                scanOff = scanOff + 56 as usize + nextPSize
+                continue
+            }
+
+            if nextKind == noeWalCommit() {
+                if nextTx != txId || nextPSize != 32 as usize { return -106 as isize }
+                let commitPayload: [u8; 32]
+                let rC: isize = file_read_into(walFd, slice(commitPayload))
+                if rC < 32 as isize { break }
+
+                // Cryptographic rolling digest check against COMMIT frame payload
+                let matchFail: bool = false
+                let ci: usize = 0 as usize
+                while ci < 32 as usize {
+                    if rollDigest[ci] != commitPayload[ci] { matchFail = true }
+                    ci = ci + 1 as usize
+                }
+                if matchFail { return -107 as isize }
+
+                txCommitted = true
+                nextTxOffset = scanOff + 56 as usize + 32 as usize
+                break
+            }
+
+            scanOff = scanOff + 56 as usize + nextPSize
+        }
+
+        if txCommitted {
+            // Replay all statement images for this verified transaction in order
+            let k: usize = 0 as usize
+            while k < imgCount {
+                let offK: usize = imgOffsets[k]
+                let lenK: usize = imgLengths[k]
+                if lenK > 0 as usize && lenK <= 2048 as usize {
+                    if file_seek(walFd, offK as i64, file_seek_start()) >= 0 as isize {
+                        let stmtBuf: [u8; 2048]
+                        let rStmt: isize = file_read_into(walFd, slice(&stmtBuf[0], lenK))
+                        if rStmt == lenK as isize {
+                            let stmt: string = bytesToString(&stmtBuf[0], lenK)
+                            noeExecuteStatement(&engine.db, stmt)
+                            if engine.db.tableCount > 0 as usize {
+                                let t: *NoeTableData = &engine.db.tables[0]
+                                if t.rowCount > 0 as usize {
+                                    let lastRow: usize = t.rowCount - 1 as usize
+                                    let cell: *NoeRowCell = &t.cells[lastRow * 16 as usize + 0 as usize]
+                                    if !cell.isNull {
+                                        noeBTreeInsert(&engine.primaryIndex, cell.intVal, lastRow)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                k = k + 1 as usize
+            }
+
+            if txId > engine.lastTxId {
+                engine.lastTxId = txId
+            }
+            engine.walCommittedOffset = nextTxOffset
+            currOffset = nextTxOffset
+        } else {
+            // Uncommitted transaction or torn tail
+            if nextTxOffset > currOffset {
+                currOffset = nextTxOffset
+            } else {
+                break
+            }
+        }
+    }
+
+    return 0 as isize
+}
+
+// Cross-process state refresh: guarantees in-memory database and lastTxId are
+// up-to-date with any checkpoints or writes committed by other processes.
+export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
+    if engine == null { return -1 as isize }
+
+    // 1. Check if HEAD points to a newer generation (checkpoint in another process)
+    let currentGen: u64 = noeReadActiveGeneration(engine.dbPath)
+    if currentGen > engine.baseGeneration {
+        let openStatus: isize = noeDbOpenV3(&engine.db, engine.dbPath)
+        if openStatus != 0 as isize { return openStatus }
+        engine.baseGeneration = currentGen
+        engine.walCommittedOffset = 0 as usize
+        noeWalRebuildIndex(engine)
+    }
+
+    // 2. Check WAL.log for any newly committed transactions
+    let walPath: string = engine.dbPath + "/WAL.log"
+    let walReadHandle: isize = file_open_read(walPath)
+    if file_handle_valid(walReadHandle) {
+        let fSizeIs: isize = file_size(walReadHandle as usize)
+        if fSizeIs > 0 as isize {
+            let fSize: usize = fSizeIs as usize
+            if fSize > engine.walCommittedOffset {
+                noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, engine.walCommittedOffset)
+            } else if fSize < engine.walCommittedOffset {
+                // WAL was truncated (checkpoint)
+                engine.walCommittedOffset = 0 as usize
+                noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, 0 as usize)
+            }
+        } else {
+            engine.walCommittedOffset = 0 as usize
+        }
+        file_close(walReadHandle as usize)
+    }
+
+    return 0 as isize
+}
+
+// Reverts in-memory database and B-tree to the exact last committed state
+export function noeWalEngineRevert(engine: *NoeWalEngine): isize {
+    if engine == null { return -1 as isize }
+
+    // 1. Reload base database snapshot
+    let openStatus: isize = noeDbOpenV3(&engine.db, engine.dbPath)
+    if openStatus != 0 as isize { return openStatus }
+    engine.baseGeneration = engine.db.generation
+    noeWalRebuildIndex(engine)
+
+    // 2. Replay verified committed transactions from WAL log
+    if engine.walCommittedOffset > 0 as usize {
+        let walPath: string = engine.dbPath + "/WAL.log"
+        let walReadHandle: isize = file_open_read(walPath)
+        if file_handle_valid(walReadHandle) {
+            let targetOffset: usize = engine.walCommittedOffset
+            engine.walCommittedOffset = 0 as usize
+            noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, 0 as usize)
+            file_close(walReadHandle as usize)
+        }
+    }
+
+    return 0 as isize
 }
 
 export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
@@ -58,12 +301,14 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
         if openStatus != 0 as isize {
             return openStatus
         }
+        engine.baseGeneration = engine.db.generation
     } else {
         noeEngineInit(&engine.db, "main")
         let initSave: isize = noeDbSaveV3(&engine.db, path)
         if initSave != 0 as isize {
             return initSave
         }
+        engine.baseGeneration = 1 as u64
     }
 
     // 2. Open cross-process lock descriptor for strict single-writer transaction protocol
@@ -74,49 +319,16 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
     }
     engine.lockFd = lFd as usize
 
-    // 3. Crash Recovery: Check if WAL.log exists and replay ALL committed frames
+    // 3. Crash Recovery: Check if WAL.log exists and replay ALL committed frames via streaming recovery
     let walPath: string = path + "/WAL.log"
     if fs_exists(walPath) {
         let walReadHandle: isize = file_open_read(walPath)
         if file_handle_valid(walReadHandle) {
-            let fSize: isize = file_size(walReadHandle as usize)
-            if fSize > 0 as isize {
-                let walBuf: [u8; 65536]
-                let scratchBuf: [u8; 1024]
-                let toRead: usize = fSize as usize
-                if toRead > 65536 as usize { toRead = 65536 as usize }
-                let readBytes: isize = file_read_into(walReadHandle as usize, slice(&walBuf[0], toRead))
-                file_close(walReadHandle as usize)
-
-                if readBytes > 0 as isize {
-                    let off: usize = 0 as usize
-                    let txCount: usize = 0 as usize
-
-                    while off < readBytes as usize {
-                        let txId: u64 = 0 as u64
-                        let imgStart: usize = 0 as usize
-                        let imgLen: usize = 0 as usize
-                        let nextOff: usize = 0 as usize
-
-                        let st: int = noeWalScanNext(slice(&walBuf[0], readBytes as usize), off, slice(scratchBuf), &txId, &imgStart, &imgLen, &nextOff)
-                        if st == 1 {
-                            // Replay committed transaction into memory
-                            let replayStmt: string = bytesToString(&walBuf[imgStart], imgLen)
-                            noeExecuteStatement(&engine.db, replayStmt)
-                            engine.lastTxId = txId
-                            txCount = txCount + 1 as usize
-                            off = nextOff
-                        } else if st == 0 {
-                            // Reached uncommitted tail or clean EOF: stop replay cleanly
-                            break
-                        } else {
-                            // Corrupt frame detected
-                            return -501 as isize
-                        }
-                    }
-                }
-            } else {
-                file_close(walReadHandle as usize)
+            let repRes: isize = noeWalEngineStreamReplayFrom(engine, walReadHandle as usize, 0 as usize)
+            file_close(walReadHandle as usize)
+            if repRes < 0 as isize {
+                file_close(engine.lockFd)
+                return repRes
             }
         }
     }
@@ -131,17 +343,7 @@ export function noeWalEngineOpen(engine: *NoeWalEngine, path: string): isize {
     engine.walOpen = true
 
     // 5. Rebuild B-tree index on first table primary keys
-    if engine.db.tableCount > 0 as usize {
-        let t: *NoeTableData = &engine.db.tables[0]
-        let r: usize = 0 as usize
-        while r < t.rowCount {
-            let cell: *NoeRowCell = &t.cells[r * 16 as usize + 0 as usize]
-            if !cell.isNull {
-                noeBTreeInsert(&engine.primaryIndex, cell.intVal, r)
-            }
-            r = r + 1 as usize
-        }
-    }
+    noeWalRebuildIndex(engine)
 
     return 0 as isize
 }
@@ -152,6 +354,13 @@ export function noeWalEngineBegin(engine: *NoeWalEngine, tx: *NoeWalTx): isize {
     // Enforce strict single-writer transaction protocol via cross-process exclusive lock
     let lockRes: isize = file_lock(engine.lockFd, true)
     if lockRes < 0 as isize { return lockRes }
+
+    // Refresh committed database state under the lock!
+    let refRes: isize = noeWalEngineRefresh(engine)
+    if refRes != 0 as isize {
+        file_unlock(engine.lockFd)
+        return refRes
+    }
 
     engine.lastTxId = engine.lastTxId + 1 as u64
     tx.txId = engine.lastTxId
@@ -209,8 +418,8 @@ export function noeWalEngineExecute(engine: *NoeWalEngine, tx: *NoeWalTx, statem
     let sLen: usize = noeWalEncodeString(statement, slice(stmtBuf))
     if sLen == 0 as usize { return 0 as isize }
 
-    // Compute genuine SHA-256 hash of the statement image payload
-    let hashRes: isize = noeHostSha256(&stmtBuf[0], sLen, &tx.imageDigest[0], 32 as usize)
+    // Compute rolling SHA-256 hash chaining across multiple statements in this transaction
+    let hashRes: isize = noeWalChainHash(&tx.imageDigest[0], &stmtBuf[0], sLen, &tx.imageDigest[0])
     if hashRes != 0 as isize {
         noeWalEngineRollback(engine, tx)
         return hashRes
@@ -238,7 +447,7 @@ export function noeWalEngineExecute(engine: *NoeWalEngine, tx: *NoeWalTx, statem
 export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize {
     if engine == null || !engine.walOpen || tx == null || !tx.inProgress { return -1 as isize }
 
-    // Encode WAL COMMIT frame with the genuine SHA-256 hash of the transaction image!
+    // Encode WAL COMMIT frame with authentic chained rolling SHA-256 hash of images
     let target: [u8; 128]
     let scratch: [u8; 128]
     tx.sequence = tx.sequence + 1 as u32
@@ -258,6 +467,12 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
     // Durability sync barrier: sequential fsync on WAL log file descriptor
     let syncRes: isize = file_sync(engine.walFd)
 
+    // Update committed offset
+    let curSize: isize = file_size(engine.walFd)
+    if curSize > 0 as isize {
+        engine.walCommittedOffset = curSize as usize
+    }
+
     // Release cross-process single-writer exclusive lock
     file_unlock(engine.lockFd)
     tx.inProgress = false
@@ -275,6 +490,7 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
 export function noeWalEngineRollback(engine: *NoeWalEngine, tx: *NoeWalTx): isize {
     if engine == null || tx == null || !tx.inProgress { return 0 as isize }
     tx.inProgress = false
+    noeWalEngineRevert(engine)
     file_unlock(engine.lockFd)
     return 0 as isize
 }
@@ -285,12 +501,16 @@ export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
     // Acquire lock for checkpointing
     file_lock(engine.lockFd, true)
 
+    // Refresh database state under the lock to include all committed writes from any process!
+    noeWalEngineRefresh(engine)
+
     // 1. Flush complete active database memory to base .noedb snapshot
     let saveRes: isize = noeDbSaveV3(&engine.db, engine.dbPath)
     if saveRes != 0 as isize {
         file_unlock(engine.lockFd)
         return saveRes
     }
+    engine.baseGeneration = engine.db.generation
 
     // 2. Truncate WAL file to 0 bytes
     file_close(engine.walFd)
@@ -311,6 +531,7 @@ export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
     }
     engine.walFd = appHandle as usize
     engine.walBytesWritten = 0 as usize
+    engine.walCommittedOffset = 0 as usize
 
     file_unlock(engine.lockFd)
     return 0 as isize

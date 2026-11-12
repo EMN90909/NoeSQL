@@ -13,6 +13,9 @@ test: no-js no-c-family no-rust-zig
 	          tests/test_wal_noqeri.noqeri \
 	          tests/test_btree_noqeri.noqeri \
 	          tests/test_wal_engine_lifecycle.noqeri \
+	          tests/test_wal_rollback.noqeri \
+	          tests/test_wal_streaming_multistmt.noqeri \
+	          tests/test_wal_torn_tail.noqeri \
 	          tests/test_adversarial_fk.noqeri \
 	          tests/test_durability_fsync.noqeri \
 	          tests/test_injection_resistance.noqeri \
@@ -25,6 +28,8 @@ test: no-js no-c-family no-rust-zig
 	done
 	@python3 tests/test_concurrent_workload.py || exit 1
 	@python3 tests/test_durability_crash_kill.py || exit 1
+	@python3 tests/test_wal_cross_process_refresh.py || exit 1
+	@python3 tests/test_wal_checkpoint_isolation.py || exit 1
 	@echo "=== All Pure Noqeri Tests Passed ==="
 
 no-js:

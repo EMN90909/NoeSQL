@@ -1,0 +1,99 @@
+import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Real Transaction Rollback (In-Memory & Index Reversion) ===")
+    let dbPath: string = "tmp_test_rollback.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    assert_true(openRes == 0 as isize, "open engine")
+
+    // 1. Create table and commit
+    let tx1: NoeWalTx
+    noeWalEngineBegin(&engine, &tx1)
+    noeWalEngineExecute(&engine, &tx1, "table items { id: int key auto, val: int }")
+    noeWalEngineCommit(&engine, &tx1)
+
+    // 2. Insert committed row 1
+    let tx2: NoeWalTx
+    noeWalEngineBegin(&engine, &tx2)
+    noeWalEngineExecute(&engine, &tx2, "items add { val: 100 }")
+    noeWalEngineCommit(&engine, &tx2)
+
+    let tIdx: isize = noeFindTable(&engine.db, "items")
+    assert_true(tIdx >= 0 as isize, "find table items")
+    let t: *NoeTableData = &engine.db.tables[tIdx as usize]
+    assert_true(t.rowCount == 1 as usize, "row count is 1 after commit")
+
+    // 3. Begin transaction 3, insert 2 rows, but ROLLBACK!
+    let tx3: NoeWalTx
+    noeWalEngineBegin(&engine, &tx3)
+    noeWalEngineExecute(&engine, &tx3, "items add { val: 200 }")
+    noeWalEngineExecute(&engine, &tx3, "items add { val: 300 }")
+
+    // Before rollback, rows exist in memory:
+    assert_true(t.rowCount == 3 as usize, "row count is 3 mid-transaction")
+    let hitMid: isize = noeBTreeSearch(&engine.primaryIndex, 2 as i64)
+    assert_true(hitMid >= 0 as isize, "index has uncommitted key before rollback")
+
+    // Now execute ROLLBACK!
+    let rbRes: isize = noeWalEngineRollback(&engine, &tx3)
+    assert_true(rbRes == 0 as isize, "rollback returns 0")
+
+    // After rollback: row count MUST be restored to 1!
+    let tPost: *NoeTableData = &engine.db.tables[tIdx as usize]
+    assert_true(tPost.rowCount == 1 as usize, "row count reverted to 1 after rollback")
+    let cell0: *NoeRowCell = &tPost.cells[0 * 16 as usize + 1 as usize]
+    assert_true(cell0.intVal == 100 as i64, "row 0 remains val 100")
+
+    // Index MUST NOT have rolled-back keys!
+    let hitPost1: isize = noeBTreeSearch(&engine.primaryIndex, 2 as i64)
+    assert_true(hitPost1 < 0 as isize, "index no longer has rolled-back key 2")
+    let hitPost2: isize = noeBTreeSearch(&engine.primaryIndex, 3 as i64)
+    assert_true(hitPost2 < 0 as isize, "index no longer has rolled-back key 3")
+
+    // 4. Verify new transaction commits successfully after rollback
+    let tx4: NoeWalTx
+    noeWalEngineBegin(&engine, &tx4)
+    noeWalEngineExecute(&engine, &tx4, "items add { val: 400 }")
+    noeWalEngineCommit(&engine, &tx4)
+
+    assert_true(tPost.rowCount == 2 as usize, "row count is 2 after tx4 commit")
+    let cell1: *NoeRowCell = &tPost.cells[1 * 16 as usize + 1 as usize]
+    assert_true(cell1.intVal == 400 as i64, "row 1 is val 400")
+
+    // 5. Cold reopen: verify disk state matches exact committed state (rows 100 and 400 only)
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+
+    let coldEngine: NoeWalEngine
+    let coldOpen: isize = noeWalEngineOpen(&coldEngine, dbPath)
+    assert_true(coldOpen == 0 as isize, "cold open")
+
+    let tColdIdx: isize = noeFindTable(&coldEngine.db, "items")
+    let tCold: *NoeTableData = &coldEngine.db.tables[tColdIdx as usize]
+    assert_true(tCold.rowCount == 2 as usize, "cold recovered row count is 2")
+    let r0: *NoeRowCell = &tCold.cells[0 * 16 as usize + 1 as usize]
+    let r1: *NoeRowCell = &tCold.cells[1 * 16 as usize + 1 as usize]
+    assert_true(r0.intVal == 100 as i64 && r1.intVal == 400 as i64, "cold records are exactly 100 and 400")
+
+    file_close(coldEngine.walFd)
+    file_close(coldEngine.lockFd)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("Real Transaction Rollback (In-Memory & Index Reversion): ALL PASSED")
+}
+
+main()

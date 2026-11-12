@@ -1,0 +1,100 @@
+import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Streaming WAL Recovery Beyond 64 KB & Multi-Statement Transactions ===")
+    let dbPath: string = "tmp_test_streaming.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    assert_true(openRes == 0 as isize, "open engine")
+
+    // Disable auto-checkpointing so WAL grows beyond 64 KB threshold
+    engine.checkpointThreshold = 10000000 as usize
+
+    // 1. Create table with multi-statement transaction
+    let txSchema: NoeWalTx
+    noeWalEngineBegin(&engine, &txSchema)
+    noeWalEngineExecute(&engine, &txSchema, "table logs { id: int key auto, code: int, message: text }")
+    noeWalEngineCommit(&engine, &txSchema)
+
+    // 2. Multi-statement transaction: 3 execute statements in ONE transaction!
+    let txMulti: NoeWalTx
+    noeWalEngineBegin(&engine, &txMulti)
+    noeWalEngineExecute(&engine, &txMulti, "logs add { code: 101, message: \"init_system\" }")
+    noeWalEngineExecute(&engine, &txMulti, "logs add { code: 102, message: \"configure_network\" }")
+    noeWalEngineExecute(&engine, &txMulti, "logs add { code: 103, message: \"ready_state\" }")
+    let cMulti: isize = noeWalEngineCommit(&engine, &txMulti)
+    assert_true(cMulti == 0 as isize, "multi-stmt commit")
+
+    // 3. Write over 70 KB of data to exceed the 64 KB reader buffer limit
+    // Each statement is ~300 bytes of repetitive padding
+    let i: usize = 0 as usize
+    while i < 180 as usize {
+        let tx: NoeWalTx
+        noeWalEngineBegin(&engine, &tx)
+        let cVal: i64 = (i + 1000 as usize) as i64
+        let stmt: string = "logs add { code: " + intToString(cVal) + ", message: \"payload_padding_data_block_for_wal_streaming_verification_0123456789_abcdefghijklmnopqrstuvwxyz_ABCDEFGHIJKLMNOPQRSTUVWXYZ_padding_block_number_" + intToString(cVal) + "\" }"
+        noeWalEngineExecute(&engine, &tx, stmt)
+        noeWalEngineCommit(&engine, &tx)
+        i = i + 1 as usize
+    }
+
+    // Check WAL size on disk
+    let walPath: string = dbPath + "/WAL.log"
+    let checkH: isize = file_open_read(walPath)
+    assert_true(checkH >= 0 as isize, "open wal for size check")
+    let walSizeBytes: isize = file_size(checkH as usize)
+    file_close(checkH as usize)
+
+    print("WAL Size on Disk: " + intToString(walSizeBytes as i64) + " bytes")
+    assert_true(walSizeBytes > 65536 as isize, "WAL size strictly exceeds 64 KB boundary")
+
+    // Close without checkpointing
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+
+    // 4. Cold reopen in fresh engine instance: must stream beyond 64 KB!
+    let coldEngine: NoeWalEngine
+    let coldOpenRes: isize = noeWalEngineOpen(&coldEngine, dbPath)
+    assert_true(coldOpenRes == 0 as isize, "cold open with streaming recovery")
+
+    let tIdx: isize = noeFindTable(&coldEngine.db, "logs")
+    assert_true(tIdx >= 0 as isize, "find logs table")
+    let t: *NoeTableData = &coldEngine.db.tables[tIdx as usize]
+
+    // Total rows expected: 3 from multi-stmt transaction + 180 sequential = 183 rows!
+    print("Total Cold Recovered Rows: " + intToString(t.rowCount as i64))
+    assert_true(t.rowCount == 183 as usize, "all 183 rows recovered across 64 KB boundary")
+
+    // Verify multi-statement records
+    let cell0: *NoeRowCell = &t.cells[0 * 16 as usize + 1 as usize]
+    let cell1: *NoeRowCell = &t.cells[1 * 16 as usize + 1 as usize]
+    let cell2: *NoeRowCell = &t.cells[2 * 16 as usize + 1 as usize]
+    assert_true(cell0.intVal == 101 as i64, "multi-stmt row 1 is 101")
+    assert_true(cell1.intVal == 102 as i64, "multi-stmt row 2 is 102")
+    assert_true(cell2.intVal == 103 as i64, "multi-stmt row 3 is 103")
+
+    // Verify last record beyond 64 KB boundary
+    let cellLast: *NoeRowCell = &t.cells[182 * 16 as usize + 1 as usize]
+    assert_true(cellLast.intVal == 1179 as i64, "last row recovered beyond 64 KB boundary is 1179")
+
+    file_close(coldEngine.walFd)
+    file_close(coldEngine.lockFd)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("Streaming WAL Recovery Beyond 64 KB & Multi-Statement Transactions: ALL PASSED")
+}
+
+main()

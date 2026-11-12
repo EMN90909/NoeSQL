@@ -1,0 +1,95 @@
+import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/fs.noqeri"
+
+function assert_true(cond: bool, msg: string): void {
+    if !cond {
+        print("FATAL ERROR: " + msg)
+        let trap: *u8 = 0 as *u8
+        print(trap[0])
+    }
+}
+
+function main(): void {
+    print("=== Testing Checkpoint Interruption & Torn Tail Recovery ===")
+    let dbPath: string = "tmp_test_torn_tail.noedb"
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    let engine: NoeWalEngine
+    let openRes: isize = noeWalEngineOpen(&engine, dbPath)
+    assert_true(openRes == 0 as isize, "open engine")
+
+    // 1. Create table and commit 5 transactions
+    let txSchema: NoeWalTx
+    noeWalEngineBegin(&engine, &txSchema)
+    noeWalEngineExecute(&engine, &txSchema, "table accounts { id: int key auto, balance: int }")
+    noeWalEngineCommit(&engine, &txSchema)
+
+    let i: usize = 0 as usize
+    while i < 5 as usize {
+        let tx: NoeWalTx
+        noeWalEngineBegin(&engine, &tx)
+        let bal: i64 = ((i + 1 as usize) * 100 as usize) as i64
+        noeWalEngineExecute(&engine, &tx, "accounts add { balance: " + intToString(bal) + " }")
+        noeWalEngineCommit(&engine, &tx)
+        i = i + 1 as usize
+    }
+
+    file_close(engine.walFd)
+    file_close(engine.lockFd)
+
+    // 2. Corrupt/Tear the tail: append half a header + junk payload to simulate power failure / interruption
+    let walPath: string = dbPath + "/WAL.log"
+    let appendH: isize = file_open_append(walPath)
+    assert_true(appendH >= 0 as isize, "open wal for torn tail injection")
+
+    let tornTail: [u8; 35] = [
+        78 as u8, 87 as u8, 65 as u8, 76 as u8, // NWAL
+        1 as u8, 0 as u8,                       // version 1
+        2 as u8, 0 as u8,                       // type 2 (IMAGE)
+        99 as u8, 0 as u8, 0 as u8, 0 as u8,    // tx 99
+        0 as u8, 0 as u8, 0 as u8, 0 as u8,
+        1 as u8, 0 as u8, 0 as u8, 0 as u8,    // seq 1
+        50 as u8, 0 as u8, 0 as u8, 0 as u8,   // payload size 50 (but only 11 bytes follow!)
+        255 as u8, 255 as u8, 255 as u8, 255 as u8,
+        255 as u8, 255 as u8, 255 as u8,
+        120 as u8, 121 as u8, 122 as u8, 123 as u8 // truncated payload (torn write!)
+    ]
+    file_write_all(appendH as usize, slice(tornTail))
+    file_sync(appendH as usize)
+    file_close(appendH as usize)
+
+    // 3. Cold reopen in fresh engine instance: must cleanly ignore torn tail!
+    let coldEngine: NoeWalEngine
+    let coldOpenRes: isize = noeWalEngineOpen(&coldEngine, dbPath)
+    assert_true(coldOpenRes == 0 as isize, "cold open recovers despite torn tail")
+
+    let tIdx: isize = noeFindTable(&coldEngine.db, "accounts")
+    assert_true(tIdx >= 0 as isize, "find accounts table")
+    let t: *NoeTableData = &coldEngine.db.tables[tIdx as usize]
+
+    // Verify all 5 committed transactions recovered intact
+    assert_true(t.rowCount == 5 as usize, "all 5 committed rows recovered")
+    let r0: *NoeRowCell = &t.cells[0 * 16 as usize + 1 as usize]
+    let r4: *NoeRowCell = &t.cells[4 * 16 as usize + 1 as usize]
+    assert_true(r0.intVal == 100 as i64, "first row is 100")
+    assert_true(r4.intVal == 500 as i64, "last committed row is 500")
+
+    // 4. Verify database can resume writing and append new committed transactions post-recovery
+    let txPost: NoeWalTx
+    let bPost: isize = noeWalEngineBegin(&coldEngine, &txPost)
+    assert_true(bPost == 0 as isize, "begin tx after torn tail recovery")
+    noeWalEngineExecute(&coldEngine, &txPost, "accounts add { balance: 600 }")
+    let cPost: isize = noeWalEngineCommit(&coldEngine, &txPost)
+    assert_true(cPost == 0 as isize, "commit tx after torn tail recovery")
+    assert_true(t.rowCount == 6 as usize, "row count is now 6")
+
+    file_close(coldEngine.walFd)
+    file_close(coldEngine.lockFd)
+    fs_remove_tree(dbPath)
+    fs_remove(dbPath + ".lck")
+
+    print("Checkpoint Interruption & Torn Tail Recovery: ALL PASSED")
+}
+
+main()
