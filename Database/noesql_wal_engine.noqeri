@@ -1514,7 +1514,7 @@ export function noeWalEngineRollback(engine: *NoeWalEngine, tx: *NoeWalTx): isiz
     return revRes
 }
 
-export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
+export function noeWalEngineCheckpointLocked(engine: *NoeWalEngine, keepLocked: bool): isize {
     if engine == null || !engine.walOpen { return -1 as isize }
 
     // 1. Acquire lock for checkpointing
@@ -1621,8 +1621,14 @@ export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
     engine.walCommittedOffset = 0 as usize
     noeWalSyncDirectory(engine.dbPath)
 
-    file_unlock(engine.lockFd)
+    if !keepLocked {
+        file_unlock(engine.lockFd)
+    }
     return 0 as isize
+}
+
+export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
+    return noeWalEngineCheckpointLocked(engine, false)
 }
 
 export function noeWalEngineClose(engine: *NoeWalEngine): isize {

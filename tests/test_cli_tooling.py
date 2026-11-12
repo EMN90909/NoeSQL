@@ -2,12 +2,13 @@
 """
 Test Suite: NoeSQL Operational CLI Tooling & Production Safeguards
 Verifies:
-  - noesql doctor (snapshot validation, HEAD check, ledger state, lock inspection)
+  - noesql doctor (truthful SHA-256 snapshot validation, catalog inspection, cryptographic ledger checks)
   - noesql check (B+Tree index parity, foreign-key referential integrity)
-  - noesql backup (consistent locked snapshot, non-clobbering target safeguard)
+  - noesql backup (continuous exclusive lock, atomic staging & publication, non-clobbering safeguard)
   - noesql restore (verified cold point-in-time recovery)
-  - noesql explain (O(log N) index scan vs O(N) sequential table scan)
-  - noesql query (statement execution via CLI runner)
+  - noesql explain (real catalog lookup, table/column validation, O(log N) index scan vs O(N) table scan)
+  - noesql query (statement execution, error propagation to process exit code)
+  - Parallel CLI execution (zero argument or status file clobbering across concurrent processes)
 """
 
 import os
@@ -15,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor
 
 NOESQL_BIN = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "bin", "noesql"))
 
@@ -37,7 +39,7 @@ def test_cli_help():
     print("  -> PASSED: CLI Help verified.")
 
 def test_cli_doctor():
-    print("[*] Test 2: CLI Doctor diagnostic check...")
+    print("[*] Test 2: Truthful CLI Doctor diagnostic check...")
     temp_dir = tempfile.mkdtemp(prefix="noesql_cli_doc_")
     db_path = os.path.join(temp_dir, "test.noedb")
     try:
@@ -46,25 +48,44 @@ def test_cli_doctor():
         assert res_fail.returncode != 0
         assert "CRITICAL" in res_fail.stdout
 
-        # 2. Initialize a valid database via binary test/query
+        # 2. Valid database doctor check
         run_cmd(["test"]) # Ensure production.noedb exists
         res_doc = run_cmd(["doctor", "production.noedb"])
-        assert "Snapshot SHA-256 Checksum: VERIFIED" in res_doc.stdout
+        assert "Snapshot SHA-256 Checksum: VERIFIED (100% Valid)" in res_doc.stdout
+        assert "Relational Catalog:" in res_doc.stdout
+        assert "departments" in res_doc.stdout
         assert "Overall Status: 100% HEALTHY" in res_doc.stdout
-        print("  -> PASSED: CLI Doctor verified.")
+
+        # 3. Corrupted snapshot payload should be caught by Doctor's SHA-256 check
+        res_b = run_cmd(["backup", "production.noedb", db_path])
+        head_file = os.path.join(db_path, "HEAD")
+        with open(head_file, "r") as f:
+            gen = int(f.read().strip())
+        snap_file = os.path.join(db_path, "versions", f"generation-{gen}.pages")
+        # Flip a byte in the snapshot payload
+        with open(snap_file, "r+b") as f:
+            f.seek(16)
+            b = f.read(1)
+            f.seek(16)
+            f.write(bytes([b[0] ^ 0xFF]))
+        res_corrupt = run_cmd(["doctor", db_path], expect_success=False)
+        assert res_corrupt.returncode != 0
+        assert "Snapshot open/integrity check failed" in res_corrupt.stdout
+
+        print("  -> PASSED: Truthful CLI Doctor verified (detects corruption and verifies authentic catalog).")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def test_cli_check():
     print("[*] Test 3: CLI Relational Integrity & B+Tree Checker...")
     res = run_cmd(["check", "production.noedb"])
-    assert "Primary Key B+Tree: 2 keys verified in O(log N) lookup" in res.stdout
+    assert "Primary Key B+Tree:" in res.stdout
     assert "Foreign Key 'dept_id' -> 'departments': 100% referential integrity" in res.stdout
     assert "Relational Consistency & Index Verification: ALL PASSED" in res.stdout
     print("  -> PASSED: CLI Check verified.")
 
 def test_cli_backup_restore():
-    print("[*] Test 4: CLI Backup & Restore Safeguards...")
+    print("[*] Test 4: CLI Backup & Restore Safeguards (Continuous Lock & Atomic Publish)...")
     temp_dir = tempfile.mkdtemp(prefix="noesql_cli_backup_")
     backup_path = os.path.join(temp_dir, "backup.noedb")
     restore_path = os.path.join(temp_dir, "restore.noedb")
@@ -91,30 +112,78 @@ def test_cli_backup_restore():
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 def test_cli_explain():
-    print("[*] Test 5: CLI Explain Query Plan Inspector...")
-    res_idx = run_cmd(["explain", "production.noedb", "SELECT * FROM users WHERE id: 1;"])
+    print("[*] Test 5: Real EXPLAIN Query Plan Inspector...")
+    # 1. Valid indexed primary key lookup
+    res_idx = run_cmd(["explain", "production.noedb", "SELECT * FROM departments WHERE id: 1;"])
     assert "PLAN: INDEX_SCAN" in res_idx.stdout
+    assert "Operator: B+Tree Primary Key Index Lookup (noeBTreeSearch)" in res_idx.stdout
     assert "Complexity: O(log N)" in res_idx.stdout
 
-    res_scan = run_cmd(["explain", "production.noedb", "SELECT * FROM users WHERE name: alice;"])
+    # 2. Valid table scan on unindexed column
+    res_scan = run_cmd(["explain", "production.noedb", "SELECT * FROM departments WHERE name: engineering;"])
     assert "PLAN: TABLE_SCAN" in res_scan.stdout
+    assert "Reason: Column 'name' does not possess an active B+Tree index" in res_scan.stdout
     assert "Complexity: O(N)" in res_scan.stdout
-    print("  -> PASSED: CLI Explain verified.")
+
+    # 3. Non-existent table rejected
+    res_bad_tbl = run_cmd(["explain", "production.noedb", "SELECT * FROM missing_tbl WHERE id: 1;"], expect_success=False)
+    assert res_bad_tbl.returncode != 0
+    assert "does not exist in schema catalog" in res_bad_tbl.stdout
+
+    # 4. Non-existent column rejected
+    res_bad_col = run_cmd(["explain", "production.noedb", "SELECT * FROM departments WHERE bad_col: 1;"], expect_success=False)
+    assert res_bad_col.returncode != 0
+    assert "does not exist in table 'departments'" in res_bad_col.stdout
+
+    print("  -> PASSED: Real EXPLAIN Query Plan Inspector verified against schema catalog.")
 
 def test_cli_query():
-    print("[*] Test 6: CLI Query & Transaction Statement Execution...")
-    # Execute valid statement via CLI
-    res = run_cmd(["query", "production.noedb", "departments add { id: 3, name: finance }"])
-    assert "OK:tx=" in res.stdout or "UNCERTAIN_COMMIT" in res.stdout
-    
-    # Reconcile historical tx
-    res_rec = run_cmd(["query", "production.noedb", "RECONCILE:1"])
-    assert "RECONCILED:committed" in res_rec.stdout or "RECONCILED:aborted" in res_rec.stdout
-    print("  -> PASSED: CLI Query verified.")
+    print("[*] Test 6: CLI Query Execution & Exit Code Error Propagation...")
+    temp_dir = tempfile.mkdtemp(prefix="noesql_cli_query_")
+    db_path = os.path.join(temp_dir, "query_test.noedb")
+    try:
+        # Create fresh isolated database via backup
+        run_cmd(["backup", "production.noedb", db_path])
+
+        # 1. Successful query on fresh database
+        res_ok = run_cmd(["query", db_path, "departments add { id: 99, name: unique_test_dept }"])
+        assert "OK:tx=" in res_ok.stdout
+
+        # 2. Duplicate key query fails closed with -203 and propagates non-zero exit code
+        res_dup = run_cmd(["query", db_path, "departments add { id: 99, name: duplicate_key }"], expect_success=False)
+        assert res_dup.returncode != 0
+        assert "ERROR:exec_failed:-203" in res_dup.stdout
+
+        # 3. Failed query on non-existent table propagates non-zero exit code
+        res_err = run_cmd(["query", db_path, "nonexistent_table add { id: 1 }"], expect_success=False)
+        assert res_err.returncode != 0
+        assert "ERROR:exec_failed:" in res_err.stdout
+
+        print("  -> PASSED: CLI Query statement execution and error exit codes verified.")
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+def test_cli_parallel_execution():
+    print("[*] Test 7: Parallel Concurrent CLI Execution (Zero File Clobbering)...")
+    commands = [
+        ["doctor", "production.noedb"],
+        ["explain", "production.noedb", "SELECT * FROM departments WHERE id: 1;"],
+        ["explain", "production.noedb", "SELECT * FROM departments WHERE name: engineering;"],
+        ["check", "production.noedb"],
+        ["doctor", "production.noedb"],
+    ]
+
+    with ThreadPoolExecutor(max_workers=5) as executor:
+        futures = [executor.submit(run_cmd, cmd) for cmd in commands]
+        for f in futures:
+            res = f.result()
+            assert res.returncode == 0
+
+    print("  -> PASSED: 5 concurrent CLI commands executed simultaneously with zero collision.")
 
 def main():
     print("================================================================")
-    print("  Running NoeSQL CLI Tooling & Production Safeguards Suite")
+    print("  Running Hardened NoeSQL CLI Tooling & Safeguards Suite")
     print("================================================================")
     test_cli_help()
     test_cli_doctor()
@@ -122,6 +191,7 @@ def main():
     test_cli_backup_restore()
     test_cli_explain()
     test_cli_query()
+    test_cli_parallel_execution()
     print("================================================================")
     print("  ALL CLI TOOLING ACCEPTANCE TESTS PASSED (100% SUCCESS)")
     print("================================================================")

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Formal ACID Verification & Transaction Isolation Test Suite for NoeSQL
+ACID Regression & Crash-Recovery Invariant Suite for NoeSQL
 Verifies:
   1. Atomicity: Multi-statement transaction rollback leaves zero partial writes.
   2. Consistency: Foreign keys, primary keys, and cryptographic checksum constraints enforced.
-  3. Isolation (MVCC / Snapshot Isolation):
-     - Dirty Read Freedom (G1a): Uncommitted writes never visible to concurrent transactions.
-     - Non-Repeatable Read Freedom (G1b): Committed concurrent writes do not alter active transaction view.
-     - Phantom Read Freedom: Range scans remain deterministic within transaction boundaries.
-  4. Durability: Acknowledged commits survive process termination and cold restart.
+  3. Crash-Isolation: Uncommitted staged WAL frames (aborted writer crash) are strictly invisible to recovery readers.
+  4. Durability: Acknowledged commits survive sudden process termination and power cut simulation.
+Note: Full concurrent MVCC snapshot isolation (multi-reader lock-free snapshot history across active writers)
+is tracked under Issue #21 and requires multi-page versioned storage.
 """
 
 import os
@@ -259,14 +258,14 @@ main()
 
 def main():
     print("================================================================")
-    print("  Running NoeSQL Formal ACID Verification & Isolation Suite")
+    print("  Running NoeSQL ACID Regression & Crash-Recovery Suite")
     print("================================================================")
     test_atomicity()
     test_consistency()
     test_isolation_dirty_read()
     test_durability_cold_recovery()
     print("================================================================")
-    print("  ALL ACID VERIFICATION TESTS PASSED (100% COMPLIANT)")
+    print("  ALL ACID REGRESSION TESTS PASSED (100% SUCCESS)")
     print("================================================================")
 
 if __name__ == "__main__":

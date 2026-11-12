@@ -26,10 +26,13 @@ shift
 
 case "$CMD" in
     doctor|check|backup|restore|explain|query)
-        ARG_FILE=".noesql_cli_cmd.txt"
-        STATUS_FILE=".noesql_cli_status.txt"
+        PID="$$"
+        ARG_FILE="/tmp/.noesql_cli_cmd_${PID}.txt"
+        STATUS_FILE="/tmp/.noesql_cli_status_${PID}.txt"
+        RUNNER_FILE="$SCRIPT_DIR/Programs/.noesql_runner_${PID}.noqeri"
+
         cleanup() {
-            rm -f "$ARG_FILE" "$STATUS_FILE"
+            rm -f "$ARG_FILE" "$STATUS_FILE" "$RUNNER_FILE"
         }
         trap cleanup EXIT INT TERM
 
@@ -38,13 +41,27 @@ case "$CMD" in
             printf "%s\n" "$arg" >> "$ARG_FILE"
         done
 
-        "$NOQERI_BIN" run "$SCRIPT_DIR/Programs/noesql_cli.noqeri"
+        cat <<EOF > "$RUNNER_FILE"
+import "./noesql_cli.noqeri"
+
+function main(): void {
+    let req: string = "$ARG_FILE"
+    let status: string = "$STATUS_FILE"
+    noeCliDispatch(req, status)
+}
+
+main()
+EOF
+
+        "$NOQERI_BIN" run "$RUNNER_FILE"
         EXIT_CODE=0
         if [ -f "$STATUS_FILE" ]; then
             STATUS_VAL="$(cat "$STATUS_FILE" | tr -d ' \r\n')"
             if [ -n "$STATUS_VAL" ] && [ "$STATUS_VAL" != "0" ]; then
                 EXIT_CODE=1
             fi
+        else
+            EXIT_CODE=1
         fi
         exit $EXIT_CODE
         ;;
