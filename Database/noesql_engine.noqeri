@@ -13,6 +13,10 @@ extern function stringToBytes(s: string, dst: *u8, maxLen: usize): usize
 extern function bytesToString(src: *u8, len: usize): string
 extern function intToString(val: i64): string
 
+export function noeIntToString(val: i64): string {
+    return intToString(val)
+}
+
 // ============================================================================
 // NoeSQL Pure Noqeri Database Engine
 // Full relational schema, CRUD, foreign keys, query execution, and durable v3 persistence.
@@ -98,14 +102,35 @@ function noeWriteString(h: usize, str: string): isize {
 }
 
 function noeReadString(h: usize): string {
+    let st: isize = 0 as isize
+    return noeReadStringChecked(h, &st)
+}
+
+function noeReadStringChecked(h: usize, outStatus: *isize): string {
+    outStatus[0] = 0 as isize
     let lenU32: u32 = 0 as u32
     let r32: isize = noeReadU32(h, &lenU32)
-    if r32 <= 0 as isize || lenU32 == 0 as u32 || lenU32 > 512 as u32 {
+    if r32 < 0 as isize {
+        outStatus[0] = r32
+        return ""
+    }
+    if r32 == 0 as isize {
+        outStatus[0] = -2 as isize
+        return ""
+    }
+    if lenU32 > 512 as u32 {
+        outStatus[0] = -50 as isize // Corrupted string length
+        return ""
+    }
+    if lenU32 == 0 as u32 {
         return ""
     }
     let buf: [u8; 512]
     let n: isize = file_read_exact(h, slice(buf, lenU32 as usize))
-    if n <= 0 as isize { return "" }
+    if n < 0 as isize {
+        outStatus[0] = n
+        return ""
+    }
     return bytesToString(&buf[0], lenU32 as usize)
 }
 
@@ -689,14 +714,26 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
 
     // Skip magic (8 bytes)
     let magicBuf: [u8; 8]
-    file_read_exact(h as usize, slice(magicBuf))
+    let rMagic: isize = file_read_exact(h as usize, slice(magicBuf))
+    if rMagic < 0 as isize {
+        file_close(h as usize)
+        return -60 as isize // Failed to read magic
+    }
 
     let genI64: i64 = 0 as i64
-    noeReadI64(h as usize, &genI64)
+    let rGen: isize = noeReadI64(h as usize, &genI64)
+    if rGen < 0 as isize {
+        file_close(h as usize)
+        return -61 as isize // Failed to read generation
+    }
     db.generation = genI64 as u64
 
     let tableCountU32: u32 = 0 as u32
-    noeReadU32(h as usize, &tableCountU32)
+    let rTc: isize = noeReadU32(h as usize, &tableCountU32)
+    if rTc < 0 as isize {
+        file_close(h as usize)
+        return -62 as isize // Failed to read table count
+    }
     if tableCountU32 > 16 as u32 {
         file_close(h as usize)
         return -6 as isize // Corrupted table count
@@ -706,19 +743,37 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
 
     // Read lastTxId (8 bytes) + 4 bytes padding
     let lastTxI64: i64 = 0 as i64
-    noeReadI64(h as usize, &lastTxI64)
+    let rTx: isize = noeReadI64(h as usize, &lastTxI64)
+    if rTx < 0 as isize {
+        file_close(h as usize)
+        return -63 as isize // Failed to read lastTxId
+    }
     db.lastTxId = lastTxI64 as u64
+
     let padU32: u32 = 0 as u32
-    noeReadU32(h as usize, &padU32)
+    let rPad: isize = noeReadU32(h as usize, &padU32)
+    if rPad < 0 as isize {
+        file_close(h as usize)
+        return -64 as isize // Failed to read padding
+    }
 
     // Deserialize each table
     let tIdx: usize = 0 as usize
     while tIdx < db.tableCount {
         let t: *NoeTableData = &db.tables[tIdx]
-        t.name = noeReadString(h as usize)
+        let rNameSt: isize = 0 as isize
+        t.name = noeReadStringChecked(h as usize, &rNameSt)
+        if rNameSt < 0 as isize {
+            file_close(h as usize)
+            return -65 as isize // Failed to read table name
+        }
 
         let fieldCountU32: u32 = 0 as u32
-        noeReadU32(h as usize, &fieldCountU32)
+        let rFc: isize = noeReadU32(h as usize, &fieldCountU32)
+        if rFc < 0 as isize {
+            file_close(h as usize)
+            return -66 as isize // Failed to read field count
+        }
         if fieldCountU32 > 16 as u32 {
             file_close(h as usize)
             return -7 as isize // Corrupted field count
@@ -726,11 +781,19 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
         t.fieldCount = fieldCountU32 as usize
 
         let autoSeqI64: i64 = 0 as i64
-        noeReadI64(h as usize, &autoSeqI64)
+        let rSeq: isize = noeReadI64(h as usize, &autoSeqI64)
+        if rSeq < 0 as isize {
+            file_close(h as usize)
+            return -67 as isize // Failed to read auto sequence
+        }
         t.autoSequence = autoSeqI64
 
         let rowCountU32: u32 = 0 as u32
-        noeReadU32(h as usize, &rowCountU32)
+        let rRc: isize = noeReadU32(h as usize, &rowCountU32)
+        if rRc < 0 as isize {
+            file_close(h as usize)
+            return -68 as isize // Failed to read row count
+        }
         if rowCountU32 > 512 as u32 {
             file_close(h as usize)
             return -8 as isize // Corrupted row count
@@ -741,41 +804,54 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
         let fIdx: usize = 0 as usize
         while fIdx < t.fieldCount {
             let f: *NoeFieldDef = &t.fields[fIdx]
-            f.name = noeReadString(h as usize)
+            let rFnameSt: isize = 0 as isize
+            f.name = noeReadStringChecked(h as usize, &rFnameSt)
+            if rFnameSt < 0 as isize { file_close(h as usize) return -69 as isize }
 
             let kindU32: u32 = 0 as u32
-            noeReadU32(h as usize, &kindU32)
+            let rKind: isize = noeReadU32(h as usize, &kindU32)
+            if rKind < 0 as isize { file_close(h as usize) return -70 as isize }
             f.kind = kindU32 as int
 
             let reqU8: u8 = 0 as u8
-            noeReadU8(h as usize, &reqU8)
+            let rReq: isize = noeReadU8(h as usize, &reqU8)
+            if rReq < 0 as isize { file_close(h as usize) return -71 as isize }
             f.required = (reqU8 != 0 as u8)
 
             let unqU8: u8 = 0 as u8
-            noeReadU8(h as usize, &unqU8)
+            let rUnq: isize = noeReadU8(h as usize, &unqU8)
+            if rUnq < 0 as isize { file_close(h as usize) return -72 as isize }
             f.unique = (unqU8 != 0 as u8)
 
             let keyU8: u8 = 0 as u8
-            noeReadU8(h as usize, &keyU8)
+            let rKey: isize = noeReadU8(h as usize, &keyU8)
+            if rKey < 0 as isize { file_close(h as usize) return -73 as isize }
             f.isKey = (keyU8 != 0 as u8)
 
             let autoU8: u8 = 0 as u8
-            noeReadU8(h as usize, &autoU8)
+            let rAuto: isize = noeReadU8(h as usize, &autoU8)
+            if rAuto < 0 as isize { file_close(h as usize) return -74 as isize }
             f.auto = (autoU8 != 0 as u8)
 
             let hasDefU8: u8 = 0 as u8
-            noeReadU8(h as usize, &hasDefU8)
+            let rHasDef: isize = noeReadU8(h as usize, &hasDefU8)
+            if rHasDef < 0 as isize { file_close(h as usize) return -75 as isize }
             f.hasDefault = (hasDefU8 != 0 as u8)
 
             let defIntI64: i64 = 0 as i64
-            noeReadI64(h as usize, &defIntI64)
+            let rDefInt: isize = noeReadI64(h as usize, &defIntI64)
+            if rDefInt < 0 as isize { file_close(h as usize) return -76 as isize }
             f.defaultInt = defIntI64
 
             let defBoolU8: u8 = 0 as u8
-            noeReadU8(h as usize, &defBoolU8)
+            let rDefBool: isize = noeReadU8(h as usize, &defBoolU8)
+            if rDefBool < 0 as isize { file_close(h as usize) return -77 as isize }
             f.defaultBool = (defBoolU8 != 0 as u8)
 
-            f.refTable = noeReadString(h as usize)
+            let rRefSt: isize = 0 as isize
+            f.refTable = noeReadStringChecked(h as usize, &rRefSt)
+            if rRefSt < 0 as isize { file_close(h as usize) return -78 as isize }
+
             fIdx = fIdx + 1 as usize
         }
 
@@ -786,25 +862,30 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
             while cIdx < t.fieldCount {
                 let cell: *NoeRowCell = &t.cells[rIdx * 16 as usize + cIdx]
                 let isNullU8: u8 = 0 as u8
-                noeReadU8(h as usize, &isNullU8)
+                let rNull: isize = noeReadU8(h as usize, &isNullU8)
+                if rNull < 0 as isize { file_close(h as usize) return -79 as isize }
                 cell.isNull = (isNullU8 != 0 as u8)
 
                 if !cell.isNull {
                     let kind: int = t.fields[cIdx].kind
                     if kind == noeTypeInt() {
                         let iVal: i64 = 0 as i64
-                        noeReadI64(h as usize, &iVal)
+                        let rI: isize = noeReadI64(h as usize, &iVal)
+                        if rI < 0 as isize { file_close(h as usize) return -80 as isize }
                         cell.intVal = iVal
                         cell.textVal = ""
                         cell.boolVal = false
                     } else if kind == noeTypeBool() {
                         let bVal: u8 = 0 as u8
-                        noeReadU8(h as usize, &bVal)
+                        let rB: isize = noeReadU8(h as usize, &bVal)
+                        if rB < 0 as isize { file_close(h as usize) return -81 as isize }
                         cell.boolVal = (bVal != 0 as u8)
                         cell.intVal = 0 as i64
                         cell.textVal = ""
                     } else if kind == noeTypeText() {
-                        cell.textVal = noeReadString(h as usize)
+                        let rTextSt: isize = 0 as isize
+                        cell.textVal = noeReadStringChecked(h as usize, &rTextSt)
+                        if rTextSt < 0 as isize { file_close(h as usize) return -82 as isize }
                         cell.intVal = 0 as i64
                         cell.boolVal = false
                     }
@@ -921,7 +1002,7 @@ function noeParseToken(buf: *u8, len: usize, cur: *usize): string {
     return bytesToString(&buf[start], cur[0] - start)
 }
 
-function noeParseI64(str: string): i64 {
+export function noeParseI64(str: string): i64 {
     let buf: [u8; 32]
     let n: usize = stringToBytes(str, &buf[0], 32 as usize)
     if n == 0 as usize { return 0 as i64 }

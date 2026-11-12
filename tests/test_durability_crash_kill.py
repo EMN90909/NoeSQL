@@ -1049,10 +1049,236 @@ assert "RECOVER_AFTER_CP_FAIL_OPEN:0" in res_cpv.stdout
 assert "RECOVERED_ROWS:2" in res_cpv.stdout
 print("=> PASS: Checkpoint aborts on snapshot/HEAD failure, preserving WAL with complete recovery!")
 
+# -----------------------------------------------------------------------------
+# Test 12: Equal-Size WAL Replacement Detection via File Identity (P0 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 12] Equal-Size WAL Replacement Inode Detection & Recovery")
+REPLACE_WAL_DB = os.path.join(NOESQL_DIR, "tmp_replace_wal.noedb")
+if os.path.exists(REPLACE_WAL_DB): shutil.rmtree(REPLACE_WAL_DB, ignore_errors=True)
+if os.path.exists(REPLACE_WAL_DB + ".lck"):
+    try: os.remove(REPLACE_WAL_DB + ".lck")
+    except OSError: pass
+
+replace_init_code = """import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/thread.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_replace_wal.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    if oRes != 0 as isize { print("OPEN_FAILED") return }
+
+    let tx1: NoeWalTx
+    noeWalEngineBegin(&engine, &tx1)
+    noeWalEngineExecute(&engine, &tx1, "table items { id: int key auto, val: int }")
+    noeWalEngineExecute(&engine, &tx1, "items add { val: 100 }")
+    noeWalEngineCommit(&engine, &tx1)
+
+    // Signal test harness that transaction is committed and walFd is held open
+    let sig: isize = file_open_create(dbPath + "/READY_FOR_REPLACE.flag")
+    if file_handle_valid(sig) { file_close(sig as usize) }
+
+    // Wait until test harness replaces WAL.log with another file of the EXACT same size
+    let waitIter: usize = 0 as usize
+    while waitIter < 500 as usize {
+        if fs_exists(dbPath + "/REPLACE_DONE.flag") { break }
+        thread_sleep_millis(10 as i64)
+        waitIter = waitIter + 1 as usize
+    }
+
+    // Refresh under lock to verify equal-size WAL replacement detection
+    let refRes: isize = noeWalEngineRefresh(&engine)
+    print("REFRESH_AFTER_SAME_SIZE_REPLACE:" + intToString(refRes as i64))
+
+    // Recheck open descriptor inode vs disk inode
+    let diskInode: i64 = fs_inode(dbPath + "/WAL.log")
+    let curInode: i64 = file_inode(engine.walFd)
+    if curInode == diskInode && diskInode > 0 as i64 {
+        print("INODES_REBOUND_MATCH:true")
+    } else {
+        print("INODES_REBOUND_MATCH:false")
+    }
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+replace_script_path = os.path.join(NOESQL_DIR, "tests", "tmp_replace_script.noqeri")
+with open(replace_script_path, "w") as f:
+    f.write(replace_init_code)
+
+p_rep = subprocess.Popen([NOQERI_BIN, "run", replace_script_path], cwd=NOESQL_DIR, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+# Wait for READY_FOR_REPLACE.flag
+ready_replace = os.path.join(REPLACE_WAL_DB, "READY_FOR_REPLACE.flag")
+while not os.path.exists(ready_replace):
+    time.sleep(0.01)
+    if p_rep.poll() is not None:
+        break
+
+wal_to_replace = os.path.join(REPLACE_WAL_DB, "WAL.log")
+wal_size = os.path.getsize(wal_to_replace)
+old_ino = os.stat(wal_to_replace).st_ino
+
+# Read exact bytes, modify header slightly or copy, and write to a new file of identical size
+with open(wal_to_replace, "rb") as f:
+    wal_bytes = f.read()
+
+# Replace WAL.log with a new inode having the exact same byte size
+tmp_wal = os.path.join(REPLACE_WAL_DB, "WAL.log.tmp")
+with open(tmp_wal, "wb") as f:
+    f.write(wal_bytes)
+os.replace(tmp_wal, wal_to_replace)
+
+new_ino = os.stat(wal_to_replace).st_ino
+assert new_ino != old_ino, f"New inode ({new_ino}) must differ from old ({old_ino})"
+assert os.path.getsize(wal_to_replace) == wal_size, "Replacement file must have identical size"
+
+# Signal worker that replace is done
+with open(os.path.join(REPLACE_WAL_DB, "REPLACE_DONE.flag"), "w") as f:
+    f.write("done")
+
+stdout_r, stderr_r = p_rep.communicate(timeout=10)
+print("Same-size WAL replacement output:\n", stdout_r.strip())
+assert "REFRESH_AFTER_SAME_SIZE_REPLACE:0" in stdout_r
+assert "INODES_REBOUND_MATCH:true" in stdout_r
+print("=> PASS: Same-size WAL replacement detected via inode identity; descriptor safely re-bound!")
+
+# -----------------------------------------------------------------------------
+# Test 13: Strict Read Failure on Damaged/Truncated Snapshot Pages (P0 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 13] Strict Deserialization Read Checks Fail Closed on Truncated Snapshot")
+CORRUPT_SNAP_DB = os.path.join(NOESQL_DIR, "tmp_corrupt_snap.noedb")
+if os.path.exists(CORRUPT_SNAP_DB): shutil.rmtree(CORRUPT_SNAP_DB, ignore_errors=True)
+if os.path.exists(CORRUPT_SNAP_DB + ".lck"):
+    try: os.remove(CORRUPT_SNAP_DB + ".lck")
+    except OSError: pass
+
+corrupt_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_corrupt_snap.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    let tx: NoeWalTx
+    noeWalEngineBegin(&engine, &tx)
+    noeWalEngineExecute(&engine, &tx, "table users { id: int key auto, name: string }")
+    noeWalEngineExecute(&engine, &tx, "users add { name: 'alice_super_long_name_for_testing' }")
+    noeWalEngineExecute(&engine, &tx, "users add { name: 'bob_super_long_name_for_testing' }")
+    noeWalEngineCommit(&engine, &tx)
+
+    // Run explicit checkpoint so snapshot pages are written
+    noeWalEngineCheckpoint(&engine)
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+corrupt_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_corrupt_init.noqeri")
+with open(corrupt_init_path, "w") as f:
+    f.write(corrupt_init_code)
+subprocess.run([NOQERI_BIN, "run", corrupt_init_path], cwd=NOESQL_DIR, check=True)
+
+# Truncate active generation pages file halfway through row data
+with open(os.path.join(CORRUPT_SNAP_DB, "HEAD"), "r") as f:
+    active_gen = f.read().strip()
+gen_pages = os.path.join(CORRUPT_SNAP_DB, "versions", f"generation-{active_gen}.pages")
+assert os.path.exists(gen_pages), f"{gen_pages} must exist"
+orig_size = os.path.getsize(gen_pages)
+# Truncate to half the file size
+with open(gen_pages, "r+b") as f:
+    f.truncate(orig_size // 2)
+
+
+corrupt_read_code = """import "../Database/noesql_engine.noqeri"
+
+function main(): void {
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "corrupt_test")
+    let openRes: isize = noeDbOpenV3(&db, "tmp_corrupt_snap.noedb")
+    print("CORRUPTED_OPEN_RES:" + noeIntToString(openRes as i64))
+}
+main()
+"""
+corrupt_read_path = os.path.join(NOESQL_DIR, "tests", "tmp_corrupt_read.noqeri")
+with open(corrupt_read_path, "w") as f:
+    f.write(corrupt_read_code)
+
+res_corrupt = subprocess.run([NOQERI_BIN, "run", corrupt_read_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Corrupted snapshot open output:\n", res_corrupt.stdout.strip())
+assert "CORRUPTED_OPEN_RES:" in res_corrupt.stdout
+status_val = int(res_corrupt.stdout.strip().split("CORRUPTED_OPEN_RES:")[1].split("\n")[0])
+assert status_val < 0, f"Expected negative error on truncated snapshot, got {status_val}"
+print("=> PASS: Truncated snapshot strictly fails closed with error status: " + str(status_val))
+
+# -----------------------------------------------------------------------------
+# Test 14: Daemon UNCERTAIN_COMMIT and Reconciliation API (P1 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 14] Daemon Exposes UNCERTAIN_COMMIT and Reconciles Transaction Outcome")
+DAEMON_RECON_DB = os.path.join(NOESQL_DIR, "tmp_daemon_recon.noedb")
+if os.path.exists(DAEMON_RECON_DB): shutil.rmtree(DAEMON_RECON_DB, ignore_errors=True)
+if os.path.exists(DAEMON_RECON_DB + ".lck"):
+    try: os.remove(DAEMON_RECON_DB + ".lck")
+    except OSError: pass
+
+daemon_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_daemon_recon.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    // 1. Normal successful daemon request
+    let res1: string = noeDaemonHandleRequest(&engine, "table orders { id: int key auto, amount: int }")
+    print("DAEMON_RES1:" + res1)
+
+    // 2. Injected fsync failure on commit
+    let f1: isize = file_open_create(dbPath + "/.noesql_testing_faults_enabled")
+    if file_handle_valid(f1) { file_close(f1 as usize) }
+    let f2: isize = file_open_create(dbPath + "/FAULT_COMMIT_SYNC_FAIL.flag")
+    if file_handle_valid(f2) { file_close(f2 as usize) }
+
+    let res2: string = noeDaemonHandleRequest(&engine, "orders add { amount: 500 }")
+    print("DAEMON_RES2:" + res2)
+
+    // Close engine (writer quarantined)
+    noeWalEngineClose(&engine)
+
+    // Clear fault flag for recovery/reconciliation
+    let fRem: isize = fs_remove(dbPath + "/FAULT_COMMIT_SYNC_FAIL.flag")
+
+    // 3. New engine instance opens and handles reconciliation
+    let engine2: NoeWalEngine
+    noeWalEngineOpen(&engine2, dbPath)
+
+    // Reconcile tx 2
+    let reconRes: string = noeDaemonHandleRequest(&engine2, "RECONCILE:2")
+    print("DAEMON_RECON_RES:" + reconRes)
+
+    // Reconcile uncommitted tx 999
+    let reconRes999: string = noeDaemonHandleRequest(&engine2, "RECONCILE:999")
+    print("DAEMON_RECON_999:" + reconRes999)
+
+    noeWalEngineClose(&engine2)
+}
+main()
+"""
+daemon_path = os.path.join(NOESQL_DIR, "tests", "tmp_daemon_test.noqeri")
+with open(daemon_path, "w") as f:
+    f.write(daemon_code)
+
+res_daemon = subprocess.run([NOQERI_BIN, "run", daemon_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Daemon uncertain commit & reconcile output:\n", res_daemon.stdout.strip())
+assert "DAEMON_RES1:OK:tx=1" in res_daemon.stdout
+assert "DAEMON_RES2:UNCERTAIN_COMMIT:tx=2" in res_daemon.stdout
+assert "DAEMON_RECON_RES:RECONCILED:committed:tx=2" in res_daemon.stdout
+assert "DAEMON_RECON_999:RECONCILED:aborted:tx=999" in res_daemon.stdout
+print("=> PASS: Daemon surfaces UNCERTAIN_COMMIT:tx=2 and reconciles outcome accurately!")
+
 # Cleanup temporary files
-for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path]:
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, corrupt_init_path, corrupt_read_path, daemon_path]:
     if os.path.exists(p): os.remove(p)
-for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB]:
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, DAEMON_RECON_DB]:
     if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
     if os.path.exists(d + ".lck"):
         try: os.remove(d + ".lck")

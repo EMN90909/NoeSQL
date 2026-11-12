@@ -71,8 +71,6 @@ function noeWalRebuildIndex(engine: *NoeWalEngine): void {
     }
 }
 
-extern function stringToBytes(s: string, dst: *u8, maxLen: usize): usize
-extern function bytesToString(src: *u8, len: usize): string
 
 function noeWalGetParentDir(path: string): string {
     let buf: [u8; 1024]
@@ -320,17 +318,24 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
     }
 
     let diskSize: usize = diskSizeIs as usize
+    let diskInode: i64 = fs_inode(walPath)
+    let inodeReplaced: bool = false
 
     // 2. Fast-path: if disk WAL size matches our verified committed offset
-    // AND our open walFd size matches diskSize, no external writes occurred.
+    // AND our open walFd size matches diskSize, AND file identity (inode) matches,
+    // then no external writes or file replacements occurred.
     if engine.walFd != 0 as usize {
+        let curInode: i64 = file_inode(engine.walFd)
         let curSizeIs: isize = file_size(engine.walFd)
-        if curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset && diskSize == engine.walCommittedOffset {
+        if curInode > 0 as i64 && diskInode > 0 as i64 && curInode == diskInode && curSizeIs >= 0 as isize && (curSizeIs as usize) == engine.walCommittedOffset && diskSize == engine.walCommittedOffset {
             engine.walBytesWritten = engine.walCommittedOffset
-            return 0 as isize // Fast-path: no external writes, avoid open/close syscalls
+            return 0 as isize // Fast-path: verified file identity and size match!
         }
-        if curSizeIs < 0 as isize || (curSizeIs as usize) != diskSize {
-            // Re-bind walFd if file was replaced or truncated by external process
+        if (curInode > 0 as i64 && diskInode > 0 as i64 && curInode != diskInode) || curSizeIs < 0 as isize || (curSizeIs as usize) != diskSize {
+            if curInode > 0 as i64 && diskInode > 0 as i64 && curInode != diskInode {
+                inodeReplaced = true
+            }
+            // Re-bind walFd if file was replaced (same size or different) or truncated
             file_close(engine.walFd)
             let appHandle: isize = file_open_append(walPath)
             if !file_handle_valid(appHandle) {
@@ -340,6 +345,11 @@ export function noeWalEngineRefresh(engine: *NoeWalEngine): isize {
             }
             engine.walFd = appHandle as usize
         }
+    }
+
+    if inodeReplaced {
+        // Equal-size or general WAL replacement detected: replay from offset 0
+        engine.walCommittedOffset = 0 as usize
     }
 
     if diskSize > 0 as usize {
@@ -684,6 +694,19 @@ export function noeWalEngineCommit(engine: *NoeWalEngine, tx: *NoeWalTx): isize 
         file_unlock(engine.lockFd)
         return -17 as isize
     }
+    let curInode: i64 = file_inode(engine.walFd)
+    let diskInode: i64 = fs_inode(walPath)
+    if curInode > 0 as i64 && diskInode > 0 as i64 && curInode != diskInode {
+        // Equal-size WAL replacement detected during active transaction!
+        if engine.walFd != 0 as usize {
+            file_close(engine.walFd)
+            engine.walFd = 0 as usize
+        }
+        engine.walOpen = false
+        tx.inProgress = false
+        file_unlock(engine.lockFd)
+        return -17 as isize
+    }
 
     // Encode WAL COMMIT frame with authentic chained rolling SHA-256 hash of images
     let target: [u8; 128]
@@ -791,6 +814,15 @@ export function noeWalEngineCheckpoint(engine: *NoeWalEngine): isize {
     engine.baseGeneration = engine.db.generation
     noeWalSyncDirectory(engine.dbPath)
 
+    // Snapshot integrity validation before WAL retirement: verify newly saved snapshot can be reopened cleanly
+    let verifyDb: NoeDatabaseState
+    noeEngineInit(&verifyDb, "verify")
+    let verifyStatus: isize = noeDbOpenV3(&verifyDb, engine.dbPath)
+    if verifyStatus != 0 as isize {
+        file_unlock(engine.lockFd)
+        return -19 as isize // Snapshot integrity verification failed: WAL MUST NOT BE RETIRED!
+    }
+
     // Fault-Injection Hook: signal external test harness after snapshot publication, before WAL truncation
     if fs_exists(engine.dbPath + "/.noesql_testing_faults_enabled") && fs_exists(engine.dbPath + "/FAULT_CHECKPOINT_KILL.flag") {
         let sigFd: isize = file_open_create(engine.dbPath + "/SNAPSHOT_PUBLISHED.marker")
@@ -869,18 +901,52 @@ export function noeWalEngineClose(engine: *NoeWalEngine): isize {
 // Multi-Process Daemon & Client-Server Request Handling
 // ----------------------------------------------------------------------------
 
+export function noeDaemonReconcileTx(engine: *NoeWalEngine, txId: u64): string {
+    if engine == null { return "ERROR:null_engine" }
+    let rStatus: isize = noeWalEngineRefresh(engine)
+    if rStatus != 0 as isize {
+        return "RECONCILE_ERROR:" + noeIntToString(rStatus as i64)
+    }
+    if txId <= engine.lastTxId && txId > 0 as u64 {
+        return "RECONCILED:committed:tx=" + noeIntToString(txId as i64)
+    }
+    return "RECONCILED:aborted:tx=" + noeIntToString(txId as i64)
+}
+
 export function noeDaemonHandleRequest(engine: *NoeWalEngine, request: string): string {
     if engine == null || request == "" { return "ERROR:empty_request" }
 
+    // Check for reconciliation request: "RECONCILE:<txId>"
+    let buf: [u8; 1024]
+    let rLen: usize = stringToBytes(request, &buf[0], 1024 as usize)
+    if rLen > 10 as usize && buf[0] == 82 as u8 && buf[1] == 69 as u8 && buf[2] == 67 as u8 &&
+       buf[3] == 79 as u8 && buf[4] == 78 as u8 && buf[5] == 67 as u8 && buf[6] == 73 as u8 &&
+       buf[7] == 76 as u8 && buf[8] == 69 as u8 && buf[9] == 58 as u8 { // "RECONCILE:"
+        let txIdStr: string = bytesToString(&buf[10], rLen - 10 as usize)
+        let parsedId: i64 = noeParseI64(txIdStr)
+        if parsedId > 0 as i64 {
+            return noeDaemonReconcileTx(engine, parsedId as u64)
+        }
+        return "ERROR:invalid_reconcile_tx"
+    }
+
     let tx: NoeWalTx
     let bStatus: isize = noeWalEngineBegin(engine, &tx)
-    if bStatus != 0 as isize { return "ERROR:begin_failed" }
+    if bStatus != 0 as isize { return "ERROR:begin_failed:" + noeIntToString(bStatus as i64) }
 
     let eStatus: isize = noeWalEngineExecute(engine, &tx, request)
-    if eStatus != 0 as isize { return "ERROR:exec_failed:" + intToString(eStatus as i64) }
+    if eStatus != 0 as isize { return "ERROR:exec_failed:" + noeIntToString(eStatus as i64) }
 
     let cStatus: isize = noeWalEngineCommit(engine, &tx)
-    if cStatus != 0 as isize { return "ERROR:commit_failed" }
+    if cStatus == -18 as isize {
+        // Expose unambiguous UNCERTAIN_COMMIT outcome with transaction ID for client reconciliation
+        return "UNCERTAIN_COMMIT:tx=" + noeIntToString(tx.txId as i64)
+    }
+    if cStatus != 0 as isize {
+        return "ERROR:commit_failed:" + noeIntToString(cStatus as i64)
+    }
 
-    return "OK:tx=" + intToString(tx.txId as i64)
+    return "OK:tx=" + noeIntToString(tx.txId as i64)
 }
+
+
