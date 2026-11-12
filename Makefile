@@ -32,6 +32,8 @@ test: no-js no-c-family no-rust-zig
 	@python3 tests/test_durability_crash_kill.py || exit 1
 	@python3 tests/test_wal_cross_process_refresh.py || exit 1
 	@python3 tests/test_wal_checkpoint_isolation.py || exit 1
+	@python3 tests/test_cli_tooling.py || exit 1
+	@python3 tests/test_acid_isolation.py || exit 1
 	@echo "=== All Pure Noqeri Tests Passed ==="
 
 no-js:

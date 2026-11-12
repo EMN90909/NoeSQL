@@ -14,4 +14,57 @@ else
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec "$NOQERI_BIN" run "$SCRIPT_DIR/Programs/noesql.noqeri" "$@"
+
+# If no arguments or 'test', run the standard test suite
+if [ $# -eq 0 ] || [ "$1" = "test" ]; then
+    shift $(( $# > 0 ? 1 : 0 ))
+    exec "$NOQERI_BIN" run "$SCRIPT_DIR/Programs/noesql.noqeri" "$@"
+fi
+
+CMD="$1"
+shift
+
+case "$CMD" in
+    doctor|check|backup|restore|explain|query)
+        ARG_FILE=".noesql_cli_cmd.txt"
+        STATUS_FILE=".noesql_cli_status.txt"
+        cleanup() {
+            rm -f "$ARG_FILE" "$STATUS_FILE"
+        }
+        trap cleanup EXIT INT TERM
+
+        printf "%s\n" "$CMD" > "$ARG_FILE"
+        for arg in "$@"; do
+            printf "%s\n" "$arg" >> "$ARG_FILE"
+        done
+
+        "$NOQERI_BIN" run "$SCRIPT_DIR/Programs/noesql_cli.noqeri"
+        EXIT_CODE=0
+        if [ -f "$STATUS_FILE" ]; then
+            STATUS_VAL="$(cat "$STATUS_FILE" | tr -d ' \r\n')"
+            if [ -n "$STATUS_VAL" ] && [ "$STATUS_VAL" != "0" ]; then
+                EXIT_CODE=1
+            fi
+        fi
+        exit $EXIT_CODE
+        ;;
+    help|--help|-h)
+        echo "NoeSQL - Relational Database Management System (Pure Noqeri)"
+        echo ""
+        echo "Usage:"
+        echo "  noesql test                            Run built-in verification suite"
+        echo "  noesql doctor [db_path]                Run deep integrity & health check"
+        echo "  noesql check [db_path]                 Verify relational & index integrity"
+        echo "  noesql backup <src_path> <target_path> Create consistent point-in-time backup"
+        echo "  noesql restore <backup_path> <target>  Safely restore from verified backup"
+        echo "  noesql explain <db_path> <query>       Inspect query execution plan (O(log N) vs O(N))"
+        echo "  noesql query <db_path> <statement>     Execute a statement or transaction"
+        echo "  noesql help                            Show this help message"
+        exit 0
+        ;;
+    *)
+        echo "Error: Unknown command '$CMD'" >&2
+        echo "Run 'noesql help' for usage instructions." >&2
+        exit 1
+        ;;
+esac
