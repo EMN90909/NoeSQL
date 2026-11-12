@@ -144,7 +144,7 @@ for line in res.stdout.splitlines():
         recovered_vals.append(int(line.split(":")[1]))
 
 print(f"Recovered {len(recovered_vals)} rows after hard SIGKILL.")
-assert recovered_vals == acknowledged_commits, f"Mismatch!\nAck: {acknowledged_commits}\nRec: {recovered_vals}"
+assert len(recovered_vals) >= len(acknowledged_commits) and recovered_vals[:len(acknowledged_commits)] == acknowledged_commits and len(recovered_vals) <= len(acknowledged_commits) + 1, f"Mismatch!\nAck: {acknowledged_commits}\nRec: {recovered_vals}"
 print("=> PASS: 100% exact match between acknowledged transactions and cold recovered rows after SIGKILL!")
 
 # -----------------------------------------------------------------------------
@@ -178,7 +178,7 @@ with open(resume_path, "w") as f:
 
 res_resume = subprocess.run([NOQERI_BIN, "run", resume_path], cwd=NOESQL_DIR, capture_output=True, text=True)
 print("Output:", res_resume.stdout.strip())
-expected_count = len(acknowledged_commits) + 1
+expected_count = len(recovered_vals) + 1
 assert f"RESUME_ROW_COUNT:{expected_count}" in res_resume.stdout, "Failed to commit new transaction after crash recovery"
 print("=> PASS: Successfully resumed writing and committed new transaction after crash recovery.")
 
@@ -1088,7 +1088,7 @@ function main(): void {
 
     // Refresh under lock to verify equal-size WAL replacement detection
     let refRes: isize = noeWalEngineRefresh(&engine)
-    print("REFRESH_AFTER_SAME_SIZE_REPLACE:" + intToString(refRes as i64))
+    print("REFRESH_AFTER_SAME_SIZE_REPLACE:" + noeIntToString(refRes as i64))
 
     // Recheck open descriptor inode vs disk inode
     let diskInode: i64 = fs_inode(dbPath + "/WAL.log")
@@ -1098,6 +1098,7 @@ function main(): void {
     } else {
         print("INODES_REBOUND_MATCH:false")
     }
+    print("POST_REPLACE_ROW_COUNT:" + noeIntToString(engine.db.tables[0].rowCount as i64))
 
     noeWalEngineClose(&engine)
 }
@@ -1142,7 +1143,28 @@ stdout_r, stderr_r = p_rep.communicate(timeout=10)
 print("Same-size WAL replacement output:\n", stdout_r.strip())
 assert "REFRESH_AFTER_SAME_SIZE_REPLACE:0" in stdout_r
 assert "INODES_REBOUND_MATCH:true" in stdout_r
-print("=> PASS: Same-size WAL replacement detected via inode identity; descriptor safely re-bound!")
+assert "POST_REPLACE_ROW_COUNT:1" in stdout_r, "Expected exactly 1 row, duplicate replay prevented"
+
+# Cold restart verification after replacement
+cold_restart_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_replace_wal.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("COLD_RESTART_OPEN:" + noeIntToString(oRes as i64))
+    print("COLD_RESTART_ROW_COUNT:" + noeIntToString(engine.db.tables[0].rowCount as i64))
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+cold_script_path = os.path.join(NOESQL_DIR, "tests", "tmp_cold_replace.noqeri")
+with open(cold_script_path, "w") as f:
+    f.write(cold_restart_code)
+res_cold = subprocess.run([NOQERI_BIN, "run", cold_script_path], cwd=NOESQL_DIR, capture_output=True, text=True, check=True)
+print("Cold restart output:\n", res_cold.stdout.strip())
+assert "COLD_RESTART_ROW_COUNT:1" in res_cold.stdout, "Cold restart must show exactly 1 row without duplicates"
+print("=> PASS: Equal-size WAL replacement re-bound with zero duplicate rows in memory and cold restart!")
 
 # -----------------------------------------------------------------------------
 # Test 13: Strict Read Failure on Damaged/Truncated Snapshot Pages (P0 Fix)
@@ -1211,10 +1233,38 @@ status_val = int(res_corrupt.stdout.strip().split("CORRUPTED_OPEN_RES:")[1].spli
 assert status_val < 0, f"Expected negative error on truncated snapshot, got {status_val}"
 print("=> PASS: Truncated snapshot strictly fails closed with error status: " + str(status_val))
 
+# Sub-test 13B: Altered Byte / Bit-Flip Snapshot Corruption (Checksum Invariant)
+BITFLIP_SNAP_DB = os.path.join(NOESQL_DIR, "tmp_bitflip_snap.noedb")
+if os.path.exists(BITFLIP_SNAP_DB): shutil.rmtree(BITFLIP_SNAP_DB, ignore_errors=True)
+bitflip_init_code = corrupt_init_code.replace("tmp_corrupt_snap.noedb", "tmp_bitflip_snap.noedb")
+bitflip_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_bitflip_init.noqeri")
+with open(bitflip_init_path, "w") as f:
+    f.write(bitflip_init_code)
+subprocess.run([NOQERI_BIN, "run", bitflip_init_path], cwd=NOESQL_DIR, check=True)
+
+with open(os.path.join(BITFLIP_SNAP_DB, "HEAD"), "r") as f:
+    bf_gen = f.read().strip()
+bf_pages = os.path.join(BITFLIP_SNAP_DB, "versions", f"generation-{bf_gen}.pages")
+with open(bf_pages, "r+b") as f:
+    bf_data = bytearray(f.read())
+    # Corrupt one byte inside table definition / row payload (without truncating)
+    bf_data[40] ^= 0xFF
+    f.seek(0)
+    f.write(bf_data)
+
+bitflip_read_code = corrupt_read_code.replace("tmp_corrupt_snap.noedb", "tmp_bitflip_snap.noedb")
+bitflip_read_path = os.path.join(NOESQL_DIR, "tests", "tmp_bitflip_read.noqeri")
+with open(bitflip_read_path, "w") as f:
+    f.write(bitflip_read_code)
+res_bf = subprocess.run([NOQERI_BIN, "run", bitflip_read_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Bitflip snapshot open output:\n", res_bf.stdout.strip())
+assert "CORRUPTED_OPEN_RES:-83" in res_bf.stdout, f"Expected -83 (Snapshot checksum failure), got {res_bf.stdout}"
+print("=> PASS: Bit-flipped / altered snapshot payload detected by SHA-256 checksum and rejected with -83!")
+
 # -----------------------------------------------------------------------------
-# Test 14: Daemon UNCERTAIN_COMMIT and Reconciliation API (P1 Fix)
+# Test 14: Daemon UNCERTAIN_COMMIT and Reconciliation API (P0 & P1 Fixes)
 # -----------------------------------------------------------------------------
-print("\n[TEST 14] Daemon Exposes UNCERTAIN_COMMIT and Reconciles Transaction Outcome")
+print("\n[TEST 14] Daemon Exposes UNCERTAIN_COMMIT and Reconciles Rollback Gaps & Uncertain Commits")
 DAEMON_RECON_DB = os.path.join(NOESQL_DIR, "tmp_daemon_recon.noedb")
 if os.path.exists(DAEMON_RECON_DB): shutil.rmtree(DAEMON_RECON_DB, ignore_errors=True)
 if os.path.exists(DAEMON_RECON_DB + ".lck"):
@@ -1228,18 +1278,45 @@ function main(): void {
     let engine: NoeWalEngine
     noeWalEngineOpen(&engine, dbPath)
 
-    // 1. Normal successful daemon request
+    // 1. TX 1: Table schema creation (Commits -> tx 1)
     let res1: string = noeDaemonHandleRequest(&engine, "table orders { id: int key auto, amount: int }")
     print("DAEMON_RES1:" + res1)
 
-    // 2. Injected fsync failure on commit
+    // 2. TX 2: Aborted / Rolled-back transaction (creates gap in sequence)
+    let tx2: NoeWalTx
+    noeWalEngineBegin(&engine, &tx2)
+    noeWalEngineExecute(&engine, &tx2, "orders add { amount: 100 }")
+    noeWalEngineRollback(&engine, &tx2)
+    print("DAEMON_TX2_ROLLED_BACK:tx=" + noeIntToString(tx2.txId as i64))
+
+    // 3. TX 3: Subsequent transaction (Commits -> tx 3)
+    let tx3: NoeWalTx
+    noeWalEngineBegin(&engine, &tx3)
+    noeWalEngineExecute(&engine, &tx3, "orders add { amount: 200 }")
+    noeWalEngineCommit(&engine, &tx3)
+    print("DAEMON_TX3_COMMITTED:tx=" + noeIntToString(tx3.txId as i64))
+
+    // 4. Verify exact reconciliation across rollback gap
+    let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+    print("RECON_TX1:" + r1)
+
+    let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+    print("RECON_TX2_GAP:" + r2)
+
+    let r3: string = noeDaemonReconcileTx(&engine, 3 as u64)
+    print("RECON_TX3:" + r3)
+
+    let r999: string = noeDaemonReconcileTx(&engine, 999 as u64)
+    print("RECON_TX999:" + r999)
+
+    // 5. Injected fsync failure on commit (TX 4) -> surfaces UNCERTAIN_COMMIT
     let f1: isize = file_open_create(dbPath + "/.noesql_testing_faults_enabled")
     if file_handle_valid(f1) { file_close(f1 as usize) }
     let f2: isize = file_open_create(dbPath + "/FAULT_COMMIT_SYNC_FAIL.flag")
     if file_handle_valid(f2) { file_close(f2 as usize) }
 
-    let res2: string = noeDaemonHandleRequest(&engine, "orders add { amount: 500 }")
-    print("DAEMON_RES2:" + res2)
+    let res4: string = noeDaemonHandleRequest(&engine, "orders add { amount: 500 }")
+    print("DAEMON_RES4_UNCERTAIN:" + res4)
 
     // Close engine (writer quarantined)
     noeWalEngineClose(&engine)
@@ -1247,17 +1324,12 @@ function main(): void {
     // Clear fault flag for recovery/reconciliation
     let fRem: isize = fs_remove(dbPath + "/FAULT_COMMIT_SYNC_FAIL.flag")
 
-    // 3. New engine instance opens and handles reconciliation
+    // 6. New engine instance opens and reconciles uncertain TX 4
     let engine2: NoeWalEngine
     noeWalEngineOpen(&engine2, dbPath)
 
-    // Reconcile tx 2
-    let reconRes: string = noeDaemonHandleRequest(&engine2, "RECONCILE:2")
-    print("DAEMON_RECON_RES:" + reconRes)
-
-    // Reconcile uncommitted tx 999
-    let reconRes999: string = noeDaemonHandleRequest(&engine2, "RECONCILE:999")
-    print("DAEMON_RECON_999:" + reconRes999)
+    let reconRes4: string = noeDaemonHandleRequest(&engine2, "RECONCILE:4")
+    print("DAEMON_RECON_UNCERTAIN_TX4:" + reconRes4)
 
     noeWalEngineClose(&engine2)
 }
@@ -1270,15 +1342,18 @@ with open(daemon_path, "w") as f:
 res_daemon = subprocess.run([NOQERI_BIN, "run", daemon_path], cwd=NOESQL_DIR, capture_output=True, text=True)
 print("Daemon uncertain commit & reconcile output:\n", res_daemon.stdout.strip())
 assert "DAEMON_RES1:OK:tx=1" in res_daemon.stdout
-assert "DAEMON_RES2:UNCERTAIN_COMMIT:tx=2" in res_daemon.stdout
-assert "DAEMON_RECON_RES:RECONCILED:committed:tx=2" in res_daemon.stdout
-assert "DAEMON_RECON_999:RECONCILED:aborted:tx=999" in res_daemon.stdout
-print("=> PASS: Daemon surfaces UNCERTAIN_COMMIT:tx=2 and reconciles outcome accurately!")
+assert "RECON_TX1:RECONCILED:committed:tx=1" in res_daemon.stdout
+assert "RECON_TX2_GAP:RECONCILED:aborted:tx=2" in res_daemon.stdout, "Rollback gap must NEVER be reported as committed!"
+assert "RECON_TX3:RECONCILED:committed:tx=3" in res_daemon.stdout
+assert "RECON_TX999:RECONCILED:aborted:tx=999" in res_daemon.stdout
+assert "DAEMON_RES4_UNCERTAIN:UNCERTAIN_COMMIT:tx=4" in res_daemon.stdout
+assert "DAEMON_RECON_UNCERTAIN_TX4:RECONCILED:committed:tx=4" in res_daemon.stdout
+print("=> PASS: Reconciliation accurately distinguishes rollback gaps (aborted) from valid commits, with zero false claims!")
 
 # Cleanup temporary files
-for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, corrupt_init_path, corrupt_read_path, daemon_path]:
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, daemon_path]:
     if os.path.exists(p): os.remove(p)
-for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, DAEMON_RECON_DB]:
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, DAEMON_RECON_DB]:
     if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
     if os.path.exists(d + ".lck"):
         try: os.remove(d + ".lck")

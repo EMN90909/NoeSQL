@@ -601,13 +601,69 @@ export function noeDbSaveV3(db: *NoeDatabaseState, dbPath: string): isize {
         tIdx = tIdx + 1 as usize
     }
 
-    // 6. Fsync generation file to guarantee disk persistence
+    // 6. Fsync and compute authentic SHA-256 checksum over entire snapshot payload
     let syncPages: isize = file_sync(genHandle as usize)
     file_close(genHandle as usize)
     if syncPages < 0 as isize {
         file_unlock(lockHandle as usize)
         file_close(lockHandle as usize)
         return syncPages
+    }
+
+    let snapReadHandle: isize = file_open_read(genFile)
+    if snapReadHandle < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return snapReadHandle
+    }
+    let snapSizeIs: isize = file_size(snapReadHandle as usize)
+    if snapSizeIs < 0 as isize {
+        file_close(snapReadHandle as usize)
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return snapSizeIs
+    }
+    let snapSize: usize = snapSizeIs as usize
+    let snapDigest: [u8; 32]
+    let sdi: usize = 0 as usize
+    while sdi < 32 as usize { snapDigest[sdi] = 0 as u8 sdi = sdi + 1 as usize }
+    let readChunk: [u8; 2048]
+    let hashedOff: usize = 0 as usize
+    while hashedOff < snapSize {
+        let toRead: usize = snapSize - hashedOff
+        if toRead > 2048 as usize { toRead = 2048 as usize }
+        let nRead: isize = file_read_exact(snapReadHandle as usize, slice(&readChunk[0], toRead))
+        if nRead < 0 as isize {
+            file_close(snapReadHandle as usize)
+            file_unlock(lockHandle as usize)
+            file_close(lockHandle as usize)
+            return -48 as isize
+        }
+        noeWalChainHash(&snapDigest[0], &readChunk[0], toRead, &snapDigest[0])
+        hashedOff = hashedOff + toRead
+    }
+    file_close(snapReadHandle as usize)
+
+    // Append 32-byte SHA-256 checksum trailer
+    let snapAppHandle: isize = file_open_append(genFile)
+    if snapAppHandle < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return snapAppHandle
+    }
+    let wChk: isize = file_write_all(snapAppHandle as usize, slice(snapDigest))
+    if wChk < 0 as isize {
+        file_close(snapAppHandle as usize)
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return -49 as isize
+    }
+    let syncTrailer: isize = file_sync(snapAppHandle as usize)
+    file_close(snapAppHandle as usize)
+    if syncTrailer < 0 as isize {
+        file_unlock(lockHandle as usize)
+        file_close(lockHandle as usize)
+        return syncTrailer
     }
 
     // Fsync versions directory to persist generation file creation
@@ -711,6 +767,58 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
     let genFile: string = dbPath + "/versions/generation-" + intToString(currentGen as i64) + ".pages"
     let h: isize = file_open_read(genFile)
     if h < 0 as isize { return h }
+
+    let fSizeIs: isize = file_size(h as usize)
+    if fSizeIs >= 64 as isize {
+        let fSize: usize = fSizeIs as usize
+        let payloadSize: usize = fSize - 32 as usize
+
+        // Read stored 32-byte checksum from the end of the file
+        if file_seek(h as usize, payloadSize as i64, 0) < 0 as isize {
+            file_close(h as usize)
+            return -84 as isize
+        }
+        let storedDigest: [u8; 32]
+        let rStored: isize = file_read_exact(h as usize, slice(storedDigest))
+        if rStored < 0 as isize {
+            file_close(h as usize)
+            return -84 as isize
+        }
+
+        // Rewind and compute authentic rolling SHA-256 over payload
+        file_seek(h as usize, 0 as i64, 0)
+        let compDigest: [u8; 32]
+        let cdi: usize = 0 as usize
+        while cdi < 32 as usize { compDigest[cdi] = 0 as u8 cdi = cdi + 1 as usize }
+        let vChunk: [u8; 2048]
+        let vOff: usize = 0 as usize
+        while vOff < payloadSize {
+            let vToRead: usize = payloadSize - vOff
+            if vToRead > 2048 as usize { vToRead = 2048 as usize }
+            let rV: isize = file_read_exact(h as usize, slice(&vChunk[0], vToRead))
+            if rV < 0 as isize {
+                file_close(h as usize)
+                return -85 as isize
+            }
+            noeWalChainHash(&compDigest[0], &vChunk[0], vToRead, &compDigest[0])
+            vOff = vOff + vToRead
+        }
+
+        // Verify computed checksum matches stored checksum
+        let chkFail: bool = false
+        let mi: usize = 0 as usize
+        while mi < 32 as usize {
+            if compDigest[mi] != storedDigest[mi] { chkFail = true }
+            mi = mi + 1 as usize
+        }
+        if chkFail {
+            file_close(h as usize)
+            return -83 as isize // Snapshot checksum verification failed!
+        }
+
+        // Rewind to 0 to proceed with deserialization
+        file_seek(h as usize, 0 as i64, 0)
+    }
 
     // Skip magic (8 bytes)
     let magicBuf: [u8; 8]
