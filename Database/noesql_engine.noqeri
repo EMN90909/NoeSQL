@@ -742,6 +742,13 @@ export function noeDbCheckV3(db: *NoeDatabaseState, dbPath: string): isize {
 
     let h: isize = file_open_read(genFile)
     if h < 0 as isize { return -3 as isize }
+
+    let fSizeIs: isize = file_size(h as usize)
+    if fSizeIs < 64 as isize {
+        file_close(h as usize)
+        return -83 as isize // Undersized file: missing mandatory 32-byte checksum trailer for NQDB0003
+    }
+
     let buf: [u8; 8]
     let n: isize = file_read_exact(h as usize, slice(buf))
     file_close(h as usize)
@@ -769,9 +776,12 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
     if h < 0 as isize { return h }
 
     let fSizeIs: isize = file_size(h as usize)
-    if fSizeIs >= 64 as isize {
-        let fSize: usize = fSizeIs as usize
-        let payloadSize: usize = fSize - 32 as usize
+    if fSizeIs < 64 as isize {
+        file_close(h as usize)
+        return -83 as isize // Undersized file: missing mandatory 32-byte checksum trailer for NQDB0003
+    }
+    let fSize: usize = fSizeIs as usize
+    let payloadSize: usize = fSize - 32 as usize
 
         // Read stored 32-byte checksum from the end of the file
         if file_seek(h as usize, payloadSize as i64, 0) < 0 as isize {
@@ -818,7 +828,6 @@ export function noeDbOpenV3(db: *NoeDatabaseState, dbPath: string): isize {
 
         // Rewind to 0 to proceed with deserialization
         file_seek(h as usize, 0 as i64, 0)
-    }
 
     // Skip magic (8 bytes)
     let magicBuf: [u8; 8]

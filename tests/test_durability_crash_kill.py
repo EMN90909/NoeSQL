@@ -1261,10 +1261,45 @@ print("Bitflip snapshot open output:\n", res_bf.stdout.strip())
 assert "CORRUPTED_OPEN_RES:-83" in res_bf.stdout, f"Expected -83 (Snapshot checksum failure), got {res_bf.stdout}"
 print("=> PASS: Bit-flipped / altered snapshot payload detected by SHA-256 checksum and rejected with -83!")
 
+# Sub-test 13C: Snapshot Checksum Trailer Removed Entirely (Empty Database and Populated Database)
+EMPTY_SNAP_DB = os.path.join(NOESQL_DIR, "tmp_empty_snap.noedb")
+if os.path.exists(EMPTY_SNAP_DB): shutil.rmtree(EMPTY_SNAP_DB, ignore_errors=True)
+empty_init_code = """import "../Database/noesql_engine.noqeri"
+
+function main(): void {
+    let db: NoeDatabaseState
+    noeEngineInit(&db, "empty_target")
+    let sRes: isize = noeDbSaveV3(&db, "tmp_empty_snap.noedb")
+    print("EMPTY_INIT_SAVE:" + noeIntToString(sRes as i64))
+}
+main()
+"""
+empty_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_empty_init.noqeri")
+with open(empty_init_path, "w") as f:
+    f.write(empty_init_code)
+subprocess.run([NOQERI_BIN, "run", empty_init_path], cwd=NOESQL_DIR, check=True)
+
+with open(os.path.join(EMPTY_SNAP_DB, "HEAD"), "r") as f:
+    empty_gen = f.read().strip()
+empty_pages = os.path.join(EMPTY_SNAP_DB, "versions", f"generation-{empty_gen}.pages")
+# Empty snapshot is exactly 64 bytes (32-byte header + 32-byte checksum trailer).
+# Strip the 32-byte trailer entirely by truncating to 32 bytes:
+with open(empty_pages, "r+b") as f:
+    f.truncate(32)
+
+empty_read_code = corrupt_read_code.replace("tmp_corrupt_snap.noedb", "tmp_empty_snap.noedb")
+empty_read_path = os.path.join(NOESQL_DIR, "tests", "tmp_empty_read.noqeri")
+with open(empty_read_path, "w") as f:
+    f.write(empty_read_code)
+res_empty = subprocess.run([NOQERI_BIN, "run", empty_read_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Empty snapshot stripped trailer output:\n", res_empty.stdout.strip())
+assert "CORRUPTED_OPEN_RES:-83" in res_empty.stdout, f"Expected -83 on missing trailer for empty snapshot, got {res_empty.stdout}"
+print("=> PASS: Stripped checksum trailer on empty snapshot strictly rejected with -83!")
+
 # -----------------------------------------------------------------------------
-# Test 14: Daemon UNCERTAIN_COMMIT and Reconciliation API (P0 & P1 Fixes)
+# Test 14: Daemon UNCERTAIN_COMMIT, Reconciliation API & Post-Checkpoint Cold Restart (P0 & P1 Fixes)
 # -----------------------------------------------------------------------------
-print("\n[TEST 14] Daemon Exposes UNCERTAIN_COMMIT and Reconciles Rollback Gaps & Uncertain Commits")
+print("\n[TEST 14] Daemon Exposes UNCERTAIN_COMMIT and Reconciles Rollback Gaps Before & After Checkpointing")
 DAEMON_RECON_DB = os.path.join(NOESQL_DIR, "tmp_daemon_recon.noedb")
 if os.path.exists(DAEMON_RECON_DB): shutil.rmtree(DAEMON_RECON_DB, ignore_errors=True)
 if os.path.exists(DAEMON_RECON_DB + ".lck"):
@@ -1296,7 +1331,7 @@ function main(): void {
     noeWalEngineCommit(&engine, &tx3)
     print("DAEMON_TX3_COMMITTED:tx=" + noeIntToString(tx3.txId as i64))
 
-    // 4. Verify exact reconciliation across rollback gap
+    // 4. Verify exact reconciliation across rollback gap BEFORE checkpoint
     let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
     print("RECON_TX1:" + r1)
 
@@ -1331,7 +1366,31 @@ function main(): void {
     let reconRes4: string = noeDaemonHandleRequest(&engine2, "RECONCILE:4")
     print("DAEMON_RECON_UNCERTAIN_TX4:" + reconRes4)
 
+    // 7. Explicit checkpoint to truncate WAL and move state to persistent snapshot
+    let cpRes: isize = noeWalEngineCheckpoint(&engine2)
+    print("CHECKPOINT_RES:" + noeIntToString(cpRes as i64))
     noeWalEngineClose(&engine2)
+
+    // 8. COLD RESTART: Verify rollback gap (TX 2) is STILL reported as aborted after checkpoint & WAL truncation!
+    let engine3: NoeWalEngine
+    noeWalEngineOpen(&engine3, dbPath)
+
+    let postCpReconTx1: string = noeDaemonHandleRequest(&engine3, "RECONCILE:1")
+    print("POST_CP_COLD_RECON_TX1:" + postCpReconTx1)
+
+    let postCpReconTx2: string = noeDaemonHandleRequest(&engine3, "RECONCILE:2")
+    print("POST_CP_COLD_RECON_TX2_GAP:" + postCpReconTx2)
+
+    let postCpReconTx3: string = noeDaemonHandleRequest(&engine3, "RECONCILE:3")
+    print("POST_CP_COLD_RECON_TX3:" + postCpReconTx3)
+
+    let postCpReconTx4: string = noeDaemonHandleRequest(&engine3, "RECONCILE:4")
+    print("POST_CP_COLD_RECON_TX4:" + postCpReconTx4)
+
+    let postCpReconTx999: string = noeDaemonHandleRequest(&engine3, "RECONCILE:999")
+    print("POST_CP_COLD_RECON_TX999:" + postCpReconTx999)
+
+    noeWalEngineClose(&engine3)
 }
 main()
 """
@@ -1348,12 +1407,239 @@ assert "RECON_TX3:RECONCILED:committed:tx=3" in res_daemon.stdout
 assert "RECON_TX999:RECONCILED:aborted:tx=999" in res_daemon.stdout
 assert "DAEMON_RES4_UNCERTAIN:UNCERTAIN_COMMIT:tx=4" in res_daemon.stdout
 assert "DAEMON_RECON_UNCERTAIN_TX4:RECONCILED:committed:tx=4" in res_daemon.stdout
-print("=> PASS: Reconciliation accurately distinguishes rollback gaps (aborted) from valid commits, with zero false claims!")
+
+# Assert post-checkpoint and cold restart reconciliation:
+assert "POST_CP_COLD_RECON_TX1:RECONCILED:committed:tx=1" in res_daemon.stdout
+assert "POST_CP_COLD_RECON_TX2_GAP:RECONCILED:aborted:tx=2" in res_daemon.stdout, "Rollback gap after checkpoint and cold restart must NEVER be reported as committed!"
+assert "POST_CP_COLD_RECON_TX3:RECONCILED:committed:tx=3" in res_daemon.stdout
+assert "POST_CP_COLD_RECON_TX4:RECONCILED:committed:tx=4" in res_daemon.stdout
+assert "POST_CP_COLD_RECON_TX999:RECONCILED:aborted:tx=999" in res_daemon.stdout
+print("=> PASS: Reconciliation accurately distinguishes rollback gaps (aborted) from valid commits across checkpoints and cold restarts!")
+
+# -----------------------------------------------------------------------------
+# Test 15: Forged / Corrupted WAL COMMIT-Like Frame Detection (P1 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 15] Forged / Tampered COMMIT Frame Rejection in Reconciliation")
+FORGE_WAL_DB = os.path.join(NOESQL_DIR, "tmp_forge_wal.noedb")
+if os.path.exists(FORGE_WAL_DB): shutil.rmtree(FORGE_WAL_DB, ignore_errors=True)
+if os.path.exists(FORGE_WAL_DB + ".lck"):
+    try: os.remove(FORGE_WAL_DB + ".lck")
+    except OSError: pass
+
+# Process 1: Starts engine, commits TX 1, signals ready, waits for forged frame, reconciles TX 2
+forge_runner_code = """import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/thread.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_forge_wal.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    // TX 1: Valid schema creation
+    let res1: string = noeDaemonHandleRequest(&engine, "table accounts { id: int key auto, balance: int }")
+    print("FORGE_INIT:" + res1)
+    file_flush(1 as usize)
+
+    // Signal TX 1 is durable
+    let sig1: isize = file_open_create(dbPath + "/TX1_READY.marker")
+    if file_handle_valid(sig1) { file_close(sig1 as usize) }
+
+    // Wait for external harness to inject forged COMMIT frame into WAL.log
+    let waitIter: usize = 0 as usize
+    while waitIter < 500 as usize {
+        if fs_exists(dbPath + "/FORGE_INJECTED.marker") { break }
+        thread_sleep_millis(10 as i64)
+        waitIter = waitIter + 1 as usize
+    }
+
+    // Attempt to reconcile forged TX 2 while engine is live
+    let res2: string = noeDaemonHandleRequest(&engine, "RECONCILE:2")
+    print("FORGED_RECON_RES:" + res2)
+    file_flush(1 as usize)
+
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+forge_runner_path = os.path.join(NOESQL_DIR, "tests", "tmp_forge_runner.noqeri")
+with open(forge_runner_path, "w") as f:
+    f.write(forge_runner_code)
+
+proc_forge = subprocess.Popen([NOQERI_BIN, "run", forge_runner_path], cwd=NOESQL_DIR, stdout=subprocess.PIPE, text=True)
+
+# Wait for TX 1 to commit
+tx1_marker = os.path.join(FORGE_WAL_DB, "TX1_READY.marker")
+for _ in range(100):
+    if os.path.exists(tx1_marker): break
+    time.sleep(0.02)
+
+# Inject forged transaction frame for TX 2 directly into WAL.log
+wal_file = os.path.join(FORGE_WAL_DB, "WAL.log")
+with open(wal_file, "a+b") as f:
+    # BEGIN frame (56 bytes): magic NWAL(4), ver=1(2), kind=1(1), flags=0(1), tx=2(8), seq=1(4), psize=0(4), digest(32)
+    begin_hdr = bytearray(56)
+    begin_hdr[0:4] = b"NWAL"
+    begin_hdr[4] = 1 # version
+    begin_hdr[6] = 1 # kind = BEGIN
+    begin_hdr[8:16] = (2).to_bytes(8, "little")
+    begin_hdr[16:20] = (1).to_bytes(4, "little")
+    begin_hdr[20:24] = (0).to_bytes(4, "little")
+    f.write(begin_hdr)
+
+    # IMAGE frame (56 bytes header + payload):
+    stmt = b"accounts add { balance: 9999 }"
+    img_hdr = bytearray(56)
+    img_hdr[0:4] = b"NWAL"
+    img_hdr[4] = 1
+    img_hdr[6] = 2 # kind = IMAGE
+    img_hdr[8:16] = (2).to_bytes(8, "little")
+    img_hdr[16:20] = (2).to_bytes(4, "little")
+    img_hdr[20:24] = len(stmt).to_bytes(4, "little")
+    f.write(img_hdr)
+    f.write(stmt)
+
+    # Forged COMMIT frame (56 bytes header + 32 bytes garbage payload)
+    commit_hdr = bytearray(56)
+    commit_hdr[0:4] = b"NWAL"
+    commit_hdr[4] = 1
+    commit_hdr[6] = 3 # kind = COMMIT
+    commit_hdr[8:16] = (2).to_bytes(8, "little")
+    commit_hdr[16:20] = (3).to_bytes(4, "little")
+    commit_hdr[20:24] = (32).to_bytes(4, "little")
+    f.write(commit_hdr)
+    f.write(b"\xee" * 32) # Forged payload (does NOT match SHA-256 rolling digest)
+
+# Signal forged write is ready
+with open(os.path.join(FORGE_WAL_DB, "FORGE_INJECTED.marker"), "w") as f:
+    f.write("injected\n")
+
+out_forge, _ = proc_forge.communicate()
+print("Forged frame reconciliation output:\n", out_forge.strip())
+assert proc_forge.returncode == 0, f"Forge runner failed with returncode {proc_forge.returncode}"
+assert "committed" not in out_forge.lower() or "reconciled:committed" not in out_forge.lower(), f"Forged frame must NEVER be reported as committed! Got: {out_forge}"
+assert ("FORGED_RECON_RES:RECONCILE_ERROR:-107" in out_forge) or ("FORGED_RECON_RES:RECONCILED:aborted:tx=2" in out_forge), f"Expected rejection of forged frame, got: {out_forge}"
+print("=> PASS: Forged COMMIT frame detected and rejected by cryptographic digest verification!")
+
+# Also verify that a cold restart fails closed (-107) on the forged frame
+forge_cold_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_forge_wal.noedb"
+    let engine: NoeWalEngine
+    let oRes: isize = noeWalEngineOpen(&engine, dbPath)
+    print("FORGED_COLD_OPEN:" + noeIntToString(oRes as i64))
+    if oRes == 0 as isize { noeWalEngineClose(&engine) }
+}
+main()
+"""
+forge_cold_path = os.path.join(NOESQL_DIR, "tests", "tmp_forge_cold.noqeri")
+with open(forge_cold_path, "w") as f:
+    f.write(forge_cold_code)
+res_forge_cold = subprocess.run([NOQERI_BIN, "run", forge_cold_path], cwd=NOESQL_DIR, capture_output=True, text=True)
+print("Forged cold open output:\n", res_forge_cold.stdout.strip())
+assert "FORGED_COLD_OPEN:-107" in res_forge_cold.stdout, f"Expected -107 (WAL digest verification failed), got {res_forge_cold.stdout}"
+print("=> PASS: Cold startup strictly rejects forged WAL frame with -107!")
+
+# -----------------------------------------------------------------------------
+# Test 16: Concurrency: Reconciliation During Active Checkpointing (P1 Fix)
+# -----------------------------------------------------------------------------
+print("\n[TEST 16] Reconciliation Synchronization During Active Checkpointing")
+CONCUR_CKPT_DB = os.path.join(NOESQL_DIR, "tmp_concur_ckpt.noedb")
+if os.path.exists(CONCUR_CKPT_DB): shutil.rmtree(CONCUR_CKPT_DB, ignore_errors=True)
+if os.path.exists(CONCUR_CKPT_DB + ".lck"):
+    try: os.remove(CONCUR_CKPT_DB + ".lck")
+    except OSError: pass
+
+concur_init_code = """import "../Database/noesql_wal_engine.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_concur_ckpt.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+    noeDaemonHandleRequest(&engine, "table ledger { id: int key auto, amount: int }")
+    noeDaemonHandleRequest(&engine, "ledger add { amount: 100 }")
+    print("CONCUR_INIT_OK")
+    noeWalEngineClose(&engine)
+}
+main()
+"""
+concur_init_path = os.path.join(NOESQL_DIR, "tests", "tmp_concur_init.noqeri")
+with open(concur_init_path, "w") as f:
+    f.write(concur_init_code)
+subprocess.run([NOQERI_BIN, "run", concur_init_path], cwd=NOESQL_DIR, check=True)
+
+concur_worker_a = """import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/thread.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_concur_ckpt.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    let round: usize = 0 as usize
+    while round < 5 as usize {
+        let req: string = "ledger add { amount: " + noeIntToString((round + 1 as usize) as i64 * 100 as i64) + " }"
+        noeDaemonHandleRequest(&engine, req)
+        thread_sleep_millis(30 as i64)
+        noeWalEngineCheckpoint(&engine)
+        thread_sleep_millis(20 as i64)
+        round = round + 1 as usize
+    }
+
+    noeWalEngineClose(&engine)
+    print("WORKER_A_FINISHED")
+}
+main()
+"""
+concur_worker_a_path = os.path.join(NOESQL_DIR, "tests", "tmp_concur_worker_a.noqeri")
+with open(concur_worker_a_path, "w") as f:
+    f.write(concur_worker_a)
+
+concur_worker_b = """import "../Database/noesql_wal_engine.noqeri"
+import "../../Noqeri/Lib/std/thread.noqeri"
+
+function main(): void {
+    let dbPath: string = "tmp_concur_ckpt.noedb"
+    let engine: NoeWalEngine
+    noeWalEngineOpen(&engine, dbPath)
+
+    let round: usize = 0 as usize
+    while round < 5 as usize {
+        let r1: string = noeDaemonReconcileTx(&engine, 1 as u64)
+        print("CONCUR_RECON_TX1:" + r1)
+        let r2: string = noeDaemonReconcileTx(&engine, 2 as u64)
+        print("CONCUR_RECON_TX2:" + r2)
+        thread_sleep_millis(25 as i64)
+        round = round + 1 as usize
+    }
+
+    noeWalEngineClose(&engine)
+    print("WORKER_B_FINISHED")
+}
+main()
+"""
+concur_worker_b_path = os.path.join(NOESQL_DIR, "tests", "tmp_concur_worker_b.noqeri")
+with open(concur_worker_b_path, "w") as f:
+    f.write(concur_worker_b)
+
+proc_a = subprocess.Popen([NOQERI_BIN, "run", concur_worker_a_path], cwd=NOESQL_DIR, stdout=subprocess.PIPE, text=True)
+proc_b = subprocess.Popen([NOQERI_BIN, "run", concur_worker_b_path], cwd=NOESQL_DIR, stdout=subprocess.PIPE, text=True)
+
+out_a, _ = proc_a.communicate()
+out_b, _ = proc_b.communicate()
+
+print("Worker A output:\n", out_a.strip())
+print("Worker B output:\n", out_b.strip())
+assert proc_a.returncode == 0, f"Worker A failed with {proc_a.returncode}"
+assert proc_b.returncode == 0, f"Worker B failed with {proc_b.returncode}"
+assert "CONCUR_RECON_TX1:RECONCILED:committed:tx=1" in out_b
+assert "CONCUR_RECON_TX2:RECONCILED:committed:tx=2" in out_b
+print("=> PASS: Concurrent reconciliation cleanly synchronized with active checkpointing under lock!")
 
 # Cleanup temporary files
-for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, daemon_path]:
+for p in [commit_fail_path, missing_init_path, missing_test_path, degraded_path, unlink_script_path, commit_sync_path, verify_sync_path, cp_init_path, cp_run_path, cp_verify_path, replace_script_path, cold_script_path, corrupt_init_path, corrupt_read_path, bitflip_init_path, bitflip_read_path, empty_init_path, empty_read_path, daemon_path, forge_runner_path, forge_cold_path, concur_init_path, concur_worker_a_path, concur_worker_b_path]:
     if os.path.exists(p): os.remove(p)
-for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, DAEMON_RECON_DB]:
+for d in [FAIL_COMMIT_DB, MISSING_WAL_DB, ACTIVE_UNLINK_DB, COMMIT_SYNC_DB, CP_FAULT_DB, REPLACE_WAL_DB, CORRUPT_SNAP_DB, BITFLIP_SNAP_DB, EMPTY_SNAP_DB, DAEMON_RECON_DB, FORGE_WAL_DB, CONCUR_CKPT_DB]:
     if os.path.exists(d): shutil.rmtree(d, ignore_errors=True)
     if os.path.exists(d + ".lck"):
         try: os.remove(d + ".lck")

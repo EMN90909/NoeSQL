@@ -124,19 +124,43 @@ function main(): void {
     assert_true(checkMissingGen == -2 as isize, "missing generation pages fails closed with -2")
     assert_true(noeDbOpenV3(&coldDb, dbPath) == -2 as isize, "missing generation rejected by noeDbOpenV3")
 
-    // Mutation 5: Corrupted table count (> 16)
+    // Mutation 5: Corrupted table count (> 16) with valid checksum trailer
     let corruptH: isize = file_open_replace(genFile)
-    let goodMagic: [u8; 8] = [78 as u8, 81 as u8, 68 as u8, 66 as u8, 48 as u8, 48 as u8, 48 as u8, 51 as u8]
-    file_write_all(corruptH as usize, slice(goodMagic))
-    let dummyGen: [u8; 8] = [1 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8, 0 as u8]
-    file_write_all(corruptH as usize, slice(dummyGen))
-    // 999 tables (exceeds max 16 tables)
-    let badTableCount: [u8; 4] = [231 as u8, 3 as u8, 0 as u8, 0 as u8]
-    file_write_all(corruptH as usize, slice(badTableCount))
+    let badPayload: [u8; 32]
+    // magic "NQDB0003"
+    badPayload[0] = 78 as u8 badPayload[1] = 81 as u8 badPayload[2] = 68 as u8 badPayload[3] = 66 as u8
+    badPayload[4] = 48 as u8 badPayload[5] = 48 as u8 badPayload[6] = 48 as u8 badPayload[7] = 51 as u8
+    // gen = 1
+    badPayload[8] = 1 as u8 badPayload[9] = 0 as u8 badPayload[10] = 0 as u8 badPayload[11] = 0 as u8
+    badPayload[12] = 0 as u8 badPayload[13] = 0 as u8 badPayload[14] = 0 as u8 badPayload[15] = 0 as u8
+    // tableCount = 999 (> 16)
+    badPayload[16] = 231 as u8 badPayload[17] = 3 as u8 badPayload[18] = 0 as u8 badPayload[19] = 0 as u8
+    // lastTxId = 0
+    badPayload[20] = 0 as u8 badPayload[21] = 0 as u8 badPayload[22] = 0 as u8 badPayload[23] = 0 as u8
+    badPayload[24] = 0 as u8 badPayload[25] = 0 as u8 badPayload[26] = 0 as u8 badPayload[27] = 0 as u8
+    // reserved = 0
+    badPayload[28] = 0 as u8 badPayload[29] = 0 as u8 badPayload[30] = 0 as u8 badPayload[31] = 0 as u8
+    file_write_all(corruptH as usize, slice(badPayload))
+
+    let badDigest: [u8; 32]
+    let bdi: usize = 0 as usize
+    while bdi < 32 as usize { badDigest[bdi] = 0 as u8 bdi = bdi + 1 as usize }
+    noeWalChainHash(&badDigest[0], &badPayload[0], 32 as usize, &badDigest[0])
+    file_write_all(corruptH as usize, slice(badDigest))
     file_close(corruptH as usize)
 
     let checkBadTableCount: isize = noeDbOpenV3(&coldDb, dbPath)
     assert_true(checkBadTableCount == -6 as isize, "corrupted table count rejected with -6 by noeDbOpenV3")
+
+    // Mutation 6: Snapshot with missing checksum trailer (truncated to 32 bytes)
+    let truncH: isize = file_open_replace(genFile)
+    file_write_all(truncH as usize, slice(badPayload))
+    file_close(truncH as usize)
+
+    let checkMissingTrailer: isize = noeDbCheckV3(&db, dbPath)
+    assert_true(checkMissingTrailer == -83 as isize, "missing checksum trailer rejected with -83 by noeDbCheckV3")
+    let checkMissingTrailerOpen: isize = noeDbOpenV3(&coldDb, dbPath)
+    assert_true(checkMissingTrailerOpen == -83 as isize, "missing checksum trailer rejected with -83 by noeDbOpenV3")
 
     // Clean up
     fs_remove_tree(dbPath)
