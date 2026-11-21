@@ -1,0 +1,12 @@
+[nodule]
+format = "ndl-1"
+name = "noqeri/noesql"
+version = "0.9.5"
+entry = "Database/noesql_api.noqeri"
+kind = "database-engine"
+target = "portable"
+license = "Apache-2.0"
+description = "Noqeri's native database engine and query interfaces."
+
+[files]
+include = ["Database/**/*.noqeri", "Programs/noesql.noqeri", "Grammar/**/*.md", "README.md", "LICENSE", "LICENSES.md"]
