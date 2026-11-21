@@ -1,0 +1,9 @@
+package {
+    name: "noqeri/noesql"
+    version: "0.9.5"
+    edition: "2026"
+    entry: "Database/noesql_api.noqeri"
+    profile: "library"
+    target: "portable"
+    license: "Apache-2.0"
+}
